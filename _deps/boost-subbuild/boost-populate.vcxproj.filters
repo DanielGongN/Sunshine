@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\d6e4812aa598cac22da907152b125e26\boost-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\cdbe6fe9a905ceef837d281b89727652\boost-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\3ba41e488a9638fb5a04066af03b66e9\boost-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\boost-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{4B6E12C5-F656-337E-BC08-A5E343B61027}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

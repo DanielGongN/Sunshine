@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Debug"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Folder Name="/CMakePredefinedTargets/">
+		<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="aa8f8157-4b19-30a7-91cb-9d53e809c8f4" DefaultStartup="true">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<BuildDependency Project="boost-populate.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+		</Project>
+		<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="73ffc817-3e1b-36d1-8467-4e1bcf9ab74c"/>
+	</Folder>
+	<Folder Name="/ExternalProjectTargets/"/>
+	<Folder Name="/ExternalProjectTargets/boost-populate/">
+		<Project Path="boost-populate.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="e1945134-f651-3cdc-bff6-a3efc8810373">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		</Project>
+	</Folder>
+</Solution>

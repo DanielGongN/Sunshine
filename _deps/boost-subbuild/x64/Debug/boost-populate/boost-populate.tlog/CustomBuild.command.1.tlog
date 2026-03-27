@@ -1,0 +1,152 @@
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-MKDIR.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -Dcfgdir=/Debug -P E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/tmp/boost-populate-mkdirs.cmake
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-mkdir
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-DOWNLOAD.RULE
+setlocal
+cd E:\work\c++\Sunshine\_deps
+if %errorlevel% neq 0 goto :cmEnd
+E:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/download-boost-populate.cmake
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/verify-boost-populate.cmake
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/extract-boost-populate.cmake
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-download
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-UPDATE.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-update
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-PATCH.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-patch
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-CONFIGURE.RULE
+setlocal
+cd E:\work\c++\Sunshine\_deps\boost-build
+if %errorlevel% neq 0 goto :cmEnd
+E:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-configure
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-BUILD.RULE
+setlocal
+cd E:\work\c++\Sunshine\_deps\boost-build
+if %errorlevel% neq 0 goto :cmEnd
+E:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-build
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-INSTALL.RULE
+setlocal
+cd E:\work\c++\Sunshine\_deps\boost-build
+if %errorlevel% neq 0 goto :cmEnd
+E:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-install
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\D6E4812AA598CAC22DA907152B125E26\BOOST-POPULATE-TEST.RULE
+setlocal
+cd E:\work\c++\Sunshine\_deps\boost-build
+if %errorlevel% neq 0 goto :cmEnd
+E:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-test
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\CDBE6FE9A905CEEF837D281B89727652\BOOST-POPULATE-COMPLETE.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E make_directory E:/work/c++/Sunshine/_deps/boost-subbuild/CMakeFiles/Debug
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/CMakeFiles/Debug/boost-populate-complete
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch E:/work/c++/Sunshine/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/Debug/boost-populate-done
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKEFILES\3BA41E488A9638FB5A04066AF03B66E9\BOOST-POPULATE.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^E:\WORK\C++\SUNSHINE\_DEPS\BOOST-SUBBUILD\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SE:/work/c++/Sunshine/_deps/boost-subbuild -BE:/work/c++/Sunshine/_deps/boost-subbuild --check-stamp-file E:/work/c++/Sunshine/_deps/boost-subbuild/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

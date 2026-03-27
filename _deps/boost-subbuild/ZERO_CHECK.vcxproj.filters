@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="E:\work\c++\Sunshine\_deps\boost-subbuild\CMakeFiles\3ba41e488a9638fb5a04066af03b66e9\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{4B6E12C5-F656-337E-BC08-A5E343B61027}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
