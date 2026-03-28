@@ -1,0 +1,1433 @@
+{
+    "openapi": "3.0.3",
+    "info": {
+        "title": "Sunshine API",
+        "description": "Sunshine 自托管游戏串流主机的 RESTful API。\n\n除非另有说明，所有 API 调用均需认证。可使用管理员用户名和密码进行 Basic 认证。\n\n## CSRF 保护\n\n状态变更 API 端点（POST、DELETE）受 CSRF 攻击保护。\n\n- **浏览器请求**：同源请求自动允许；跨源请求需携带 CSRF Token（通过 `X-CSRF-Token` 请求头传递）。\n- **非浏览器应用**（如 curl、脚本）：无需 CSRF Token，无 `Origin` 或 `Referer` 请求头的请求会自动放行。",
+        "version": "latest",
+        "license": {
+            "name": "GPL-3.0",
+            "url": "https://github.com/LizardByte/Sunshine/blob/master/LICENSE"
+        }
+    },
+    "servers": [
+        {
+            "url": "https://localhost:47990",
+            "description": "本地 Sunshine 实例（默认端口）"
+        }
+    ],
+    "components": {
+        "securitySchemes": {
+            "basicAuth": {
+                "type": "http",
+                "scheme": "basic",
+                "description": "使用管理员用户名和密码进行 Basic 认证"
+            }
+        },
+        "parameters": {
+            "csrfTokenHeader": {
+                "in": "header",
+                "name": "X-CSRF-Token",
+                "schema": {
+                    "type": "string"
+                },
+                "required": false,
+                "description": "浏览器跨源请求所需的 CSRF Token（非浏览器客户端无需提供）"
+            }
+        },
+        "schemas": {
+            "StatusResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "boolean",
+                        "description": "操作是否成功"
+                    }
+                },
+                "required": [
+                    "status"
+                ]
+            },
+            "ErrorResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "example": "false"
+                    },
+                    "error": {
+                        "type": "string",
+                        "description": "错误描述信息"
+                    }
+                }
+            },
+            "PrepCmd": {
+                "type": "object",
+                "properties": {
+                    "do": {
+                        "type": "string",
+                        "description": "准备阶段执行的命令"
+                    },
+                    "undo": {
+                        "type": "string",
+                        "description": "撤销准备阶段执行的命令"
+                    },
+                    "elevated": {
+                        "type": "boolean",
+                        "description": "是否以提升权限运行",
+                        "default": false
+                    }
+                }
+            },
+            "App": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "应用名称"
+                    },
+                    "output": {
+                        "type": "string",
+                        "description": "日志输出路径"
+                    },
+                    "cmd": {
+                        "type": "string",
+                        "description": "启动应用的命令"
+                    },
+                    "index": {
+                        "type": "integer",
+                        "description": "应用索引（-1 表示新建）"
+                    },
+                    "exclude-global-prep-cmd": {
+                        "type": "boolean",
+                        "description": "是否排除全局准备命令",
+                        "default": false
+                    },
+                    "elevated": {
+                        "type": "boolean",
+                        "description": "是否以提升权限运行",
+                        "default": false
+                    },
+                    "auto-detach": {
+                        "type": "boolean",
+                        "description": "串流结束时是否自动分离",
+                        "default": true
+                    },
+                    "wait-all": {
+                        "type": "boolean",
+                        "description": "是否等待所有子进程结束",
+                        "default": true
+                    },
+                    "exit-timeout": {
+                        "type": "integer",
+                        "description": "退出超时时间（秒）",
+                        "default": 5
+                    },
+                    "prep-cmd": {
+                        "type": "array",
+                        "description": "准备命令列表",
+                        "items": {
+                            "$ref": "#/components/schemas/PrepCmd"
+                        }
+                    },
+                    "detached": {
+                        "type": "array",
+                        "description": "分离命令列表",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "image-path": {
+                        "type": "string",
+                        "description": "应用封面图片完整路径（必须为 PNG 文件）"
+                    }
+                },
+                "required": [
+                    "name"
+                ]
+            },
+            "AppListResponse": {
+                "type": "object",
+                "properties": {
+                    "apps": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/App"
+                        }
+                    },
+                    "env": {
+                        "type": "object",
+                        "description": "全局环境变量",
+                        "additionalProperties": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "NamedCert": {
+                "type": "object",
+                "description": "已配对客户端信息",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "客户端名称"
+                    },
+                    "uuid": {
+                        "type": "string",
+                        "description": "客户端唯一标识符"
+                    }
+                }
+            },
+            "ClientListResponse": {
+                "type": "object",
+                "properties": {
+                    "named_certs": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/NamedCert"
+                        }
+                    },
+                    "status": {
+                        "type": "boolean"
+                    }
+                }
+            },
+            "ConfigResponse": {
+                "type": "object",
+                "description": "配置项（键值对，内容取决于 Sunshine 配置文件）",
+                "properties": {
+                    "status": {
+                        "type": "boolean"
+                    },
+                    "platform": {
+                        "type": "string",
+                        "description": "运行平台（如 windows、linux）"
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": "Sunshine 版本号"
+                    }
+                },
+                "additionalProperties": true
+            },
+            "LocaleResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "boolean"
+                    },
+                    "locale": {
+                        "type": "string",
+                        "description": "当前语言区域设置",
+                        "example": "zh"
+                    }
+                }
+            },
+            "CoverUploadRequest": {
+                "type": "object",
+                "required": [
+                    "key"
+                ],
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "封面标识，格式为 igdb_<game_id>",
+                        "example": "igdb_1234"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "封面图片 URL（仅允许 images.igdb.com 域名）",
+                        "example": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/abc123.png"
+                    },
+                    "data": {
+                        "type": "string",
+                        "description": "Base64 编码的图片数据（与 url 二选一）",
+                        "format": "byte"
+                    }
+                }
+            },
+            "CoverUploadResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "boolean"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "封面图片保存路径"
+                    }
+                }
+            },
+            "PasswordRequest": {
+                "type": "object",
+                "required": [
+                    "currentUsername",
+                    "currentPassword",
+                    "newUsername",
+                    "newPassword",
+                    "confirmNewPassword"
+                ],
+                "properties": {
+                    "currentUsername": {
+                        "type": "string",
+                        "description": "当前用户名",
+                        "example": "admin"
+                    },
+                    "currentPassword": {
+                        "type": "string",
+                        "description": "当前密码",
+                        "format": "password",
+                        "example": "admin"
+                    },
+                    "newUsername": {
+                        "type": "string",
+                        "description": "新用户名",
+                        "example": "admin"
+                    },
+                    "newPassword": {
+                        "type": "string",
+                        "description": "新密码",
+                        "format": "password",
+                        "example": "newpassword"
+                    },
+                    "confirmNewPassword": {
+                        "type": "string",
+                        "description": "确认新密码",
+                        "format": "password",
+                        "example": "newpassword"
+                    }
+                }
+            },
+            "PinRequest": {
+                "type": "object",
+                "required": [
+                    "pin",
+                    "name"
+                ],
+                "properties": {
+                    "pin": {
+                        "type": "string",
+                        "description": "Moonlight 客户端生成的 4 位配对 PIN 码",
+                        "pattern": "^[0-9]{4}$",
+                        "example": "1234"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "客户端友好名称",
+                        "example": "My PC"
+                    }
+                }
+            },
+            "UnpairRequest": {
+                "type": "object",
+                "required": [
+                    "uuid"
+                ],
+                "properties": {
+                    "uuid": {
+                        "type": "string",
+                        "description": "要取消配对的客户端 UUID",
+                        "example": "1234-5678-abcd-efgh"
+                    }
+                }
+            },
+            "CSRFTokenResponse": {
+                "type": "object",
+                "properties": {
+                    "csrf_token": {
+                        "type": "string",
+                        "description": "CSRF Token，用于浏览器跨源 POST/DELETE 请求"
+                    }
+                }
+            },
+            "BrowseEntry": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "文件或目录名称"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "条目类型",
+                        "enum": [
+                            "file",
+                            "directory",
+                            "drive"
+                        ]
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "完整路径"
+                    }
+                }
+            },
+            "BrowseResponse": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "当前目录路径"
+                    },
+                    "parent": {
+                        "type": "string",
+                        "description": "父目录路径（空字符串表示在驱动器列表根）"
+                    },
+                    "entries": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/BrowseEntry"
+                        }
+                    }
+                }
+            },
+            "ViGEmBusStatusResponse": {
+                "type": "object",
+                "properties": {
+                    "installed": {
+                        "type": "boolean",
+                        "description": "ViGEmBus 是否已安装"
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": "ViGEmBus 版本号"
+                    },
+                    "version_compatible": {
+                        "type": "boolean",
+                        "description": "版本是否兼容（>= 1.17.0.0）"
+                    },
+                    "packaged_version": {
+                        "type": "string",
+                        "description": "Sunshine 自带的 ViGEmBus 版本"
+                    },
+                    "error": {
+                        "type": "string",
+                        "description": "非 Windows 平台返回的错误说明"
+                    }
+                }
+            },
+            "ViGEmBusInstallResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "boolean"
+                    },
+                    "exit_code": {
+                        "type": "integer",
+                        "description": "安装程序退出码"
+                    },
+                    "error": {
+                        "type": "string",
+                        "description": "错误信息（如有）"
+                    }
+                }
+            },
+            "DeleteAppResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "boolean"
+                    },
+                    "result": {
+                        "type": "string",
+                        "description": "操作结果描述",
+                        "example": "application 0 deleted"
+                    }
+                }
+            }
+        }
+    },
+    "security": [
+        {
+            "basicAuth": []
+        }
+    ],
+    "tags": [
+        {
+            "name": "Apps",
+            "description": "应用程序管理"
+        },
+        {
+            "name": "Clients",
+            "description": "已配对客户端管理"
+        },
+        {
+            "name": "Config",
+            "description": "配置管理"
+        },
+        {
+            "name": "Covers",
+            "description": "应用封面图片管理"
+        },
+        {
+            "name": "System",
+            "description": "系统操作（日志、密码、重启等）"
+        },
+        {
+            "name": "Security",
+            "description": "CSRF Token 及认证相关"
+        },
+        {
+            "name": "Browse",
+            "description": "服务器文件系统浏览"
+        },
+        {
+            "name": "ViGEmBus",
+            "description": "ViGEmBus 驱动管理（仅 Windows）"
+        }
+    ],
+    "paths": {
+        "/api/csrf-token": {
+            "get": {
+                "tags": [
+                    "Security"
+                ],
+                "summary": "获取 CSRF Token",
+                "description": "获取当前认证用户的 CSRF Token，用于浏览器跨源的状态变更请求。",
+                "operationId": "getCSRFToken",
+                "responses": {
+                    "200": {
+                        "description": "成功返回 CSRF Token",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CSRFTokenResponse"
+                                },
+                                "example": {
+                                    "csrf_token": "abc123def456"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            }
+        },
+        "/api/apps": {
+            "get": {
+                "tags": [
+                    "Apps"
+                ],
+                "summary": "获取应用列表",
+                "description": "获取所有可用应用程序的列表。",
+                "operationId": "getApps",
+                "responses": {
+                    "200": {
+                        "description": "成功返回应用列表",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AppListResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "Apps"
+                ],
+                "summary": "保存应用",
+                "description": "保存一个应用程序。`index` 为 `-1` 时新建，否则按索引更新已有应用。",
+                "operationId": "saveApp",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/App"
+                            },
+                            "example": {
+                                "name": "Hello, World!",
+                                "index": -1,
+                                "cmd": "notepad.exe",
+                                "exclude-global-prep-cmd": false,
+                                "elevated": false,
+                                "auto-detach": true,
+                                "wait-all": true,
+                                "exit-timeout": 5,
+                                "prep-cmd": [],
+                                "detached": []
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "保存成功",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "请求参数错误",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/apps/close": {
+            "post": {
+                "tags": [
+                    "Apps"
+                ],
+                "summary": "关闭当前运行的应用",
+                "description": "关闭当前正在运行的应用程序。",
+                "operationId": "closeApp",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "成功关闭",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/apps/{index}": {
+            "delete": {
+                "tags": [
+                    "Apps"
+                ],
+                "summary": "删除应用",
+                "description": "按索引删除指定应用程序。",
+                "operationId": "deleteApp",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "index",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        },
+                        "description": "要删除的应用索引",
+                        "example": 0
+                    },
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "删除成功",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/DeleteAppResponse"
+                                },
+                                "example": {
+                                    "status": true,
+                                    "result": "application 0 deleted"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "索引无效或越界",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/browse": {
+            "get": {
+                "tags": [
+                    "Browse"
+                ],
+                "summary": "浏览服务器目录",
+                "description": "浏览服务器文件系统目录。在 Windows 上，空路径时返回可用驱动器列表。",
+                "operationId": "browseDirectory",
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "path",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "要浏览的目录路径，为空则返回根目录（Windows 返回驱动器列表）",
+                        "example": "C:\\Program Files"
+                    },
+                    {
+                        "in": "query",
+                        "name": "type",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "any",
+                                "executable",
+                                "directory"
+                            ],
+                            "default": "any"
+                        },
+                        "description": "过滤条目类型"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "成功返回目录内容",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BrowseResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "路径不是有效目录",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            }
+        },
+        "/api/clients/list": {
+            "get": {
+                "tags": [
+                    "Clients"
+                ],
+                "summary": "获取已配对客户端列表",
+                "description": "获取所有已配对的 Moonlight 客户端列表。",
+                "operationId": "getClients",
+                "responses": {
+                    "200": {
+                        "description": "成功返回客户端列表",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ClientListResponse"
+                                },
+                                "example": {
+                                    "named_certs": [
+                                        {
+                                            "name": "My PC",
+                                            "uuid": "1234-5678-abcd-efgh"
+                                        }
+                                    ],
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            }
+        },
+        "/api/clients/unpair": {
+            "post": {
+                "tags": [
+                    "Clients"
+                ],
+                "summary": "取消配对指定客户端",
+                "description": "根据 UUID 取消配对指定客户端。",
+                "operationId": "unpairClient",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/UnpairRequest"
+                            },
+                            "example": {
+                                "uuid": "1234-5678-abcd-efgh"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "操作结果",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "请求参数错误",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/clients/unpair-all": {
+            "post": {
+                "tags": [
+                    "Clients"
+                ],
+                "summary": "取消所有客户端配对",
+                "description": "取消所有已配对客户端的配对，并终止当前运行的应用。",
+                "operationId": "unpairAllClients",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "成功取消所有配对",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/config": {
+            "get": {
+                "tags": [
+                    "Config"
+                ],
+                "summary": "获取配置设置",
+                "description": "获取当前 Sunshine 配置设置，包括平台信息和版本号。",
+                "operationId": "getConfig",
+                "responses": {
+                    "200": {
+                        "description": "成功返回配置",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConfigResponse"
+                                },
+                                "example": {
+                                    "status": true,
+                                    "platform": "windows",
+                                    "version": "0.23.0",
+                                    "sunshine_name": "Sunshine",
+                                    "port": "47989"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "Config"
+                ],
+                "summary": "保存配置设置",
+                "description": "保存 Sunshine 配置设置。建议仅保存与默认行为不同的配置项。",
+                "operationId": "saveConfig",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "description": "配置键值对",
+                                "additionalProperties": true,
+                                "example": {
+                                    "sunshine_name": "MyGameStream",
+                                    "port": "47989"
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "保存成功",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "请求参数错误",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/configLocale": {
+            "get": {
+                "tags": [
+                    "Config"
+                ],
+                "summary": "获取语言区域设置",
+                "description": "获取当前语言区域设置。**此端点无需认证。**",
+                "operationId": "getConfigLocale",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "成功返回语言区域",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LocaleResponse"
+                                },
+                                "example": {
+                                    "status": true,
+                                    "locale": "zh"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/covers/{index}": {
+            "get": {
+                "tags": [
+                    "Covers"
+                ],
+                "summary": "获取应用封面图片",
+                "description": "获取指定应用的封面图片（PNG 格式）。",
+                "operationId": "getCover",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "index",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        },
+                        "description": "应用程序索引",
+                        "example": 0
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "成功返回封面图片",
+                        "content": {
+                            "image/png": {
+                                "schema": {
+                                    "type": "string",
+                                    "format": "binary"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "索引无效或图片不可读",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "404": {
+                        "description": "封面图片不存在"
+                    }
+                }
+            }
+        },
+        "/api/covers/upload": {
+            "post": {
+                "tags": [
+                    "Covers"
+                ],
+                "summary": "上传封面图片",
+                "description": "上传应用封面图片。可通过 URL 下载（仅允许 images.igdb.com 域名）或提供 Base64 编码数据。",
+                "operationId": "uploadCover",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CoverUploadRequest"
+                            },
+                            "example": {
+                                "key": "igdb_1234",
+                                "url": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/abc123.png"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "上传成功",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CoverUploadResponse"
+                                },
+                                "example": {
+                                    "status": true,
+                                    "path": "C:\\Users\\user\\AppData\\Roaming\\Sunshine\\covers\\igdb_1234.png"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "请求参数错误（如 key 缺失、URL 域名不允许、下载失败）",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            }
+        },
+        "/api/logs": {
+            "get": {
+                "tags": [
+                    "System"
+                ],
+                "summary": "获取日志",
+                "description": "获取 Sunshine 日志文件的内容。",
+                "operationId": "getLogs",
+                "responses": {
+                    "200": {
+                        "description": "成功返回日志内容（纯文本）",
+                        "content": {
+                            "text/plain": {
+                                "schema": {
+                                    "type": "string"
+                                },
+                                "example": "[2024-01-01 12:00:00] [INFO] Sunshine started successfully"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            }
+        },
+        "/api/password": {
+            "post": {
+                "tags": [
+                    "System"
+                ],
+                "summary": "更新凭据",
+                "description": "更新管理员用户名和密码。",
+                "operationId": "savePassword",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PasswordRequest"
+                            },
+                            "example": {
+                                "currentUsername": "admin",
+                                "currentPassword": "oldpassword",
+                                "newUsername": "admin",
+                                "newPassword": "newpassword",
+                                "confirmNewPassword": "newpassword"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "更新成功",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "凭据无效或密码不匹配",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/pin": {
+            "post": {
+                "tags": [
+                    "Clients"
+                ],
+                "summary": "提交配对 PIN 码",
+                "description": "向主机发送 Moonlight 客户端在配对过程中生成的 PIN 码（4 位数字，0000-9999）。",
+                "operationId": "savePin",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PinRequest"
+                            },
+                            "example": {
+                                "pin": "1234",
+                                "name": "My PC"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "配对结果",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "PIN 码格式错误（不在 0000-9999 范围内）",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/reset-display-device-persistence": {
+            "post": {
+                "tags": [
+                    "System"
+                ],
+                "summary": "重置显示设备持久化",
+                "description": "重置显示设备的持久化配置。",
+                "operationId": "resetDisplayDevicePersistence",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "操作结果",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/StatusResponse"
+                                },
+                                "example": {
+                                    "status": true
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/restart": {
+            "post": {
+                "tags": [
+                    "System"
+                ],
+                "summary": "重启 Sunshine",
+                "description": "重启 Sunshine 服务。此操作可能不会有响应返回。",
+                "operationId": "restart",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "重启指令已接受（服务可能在响应前即已重启）"
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        },
+        "/api/vigembus/status": {
+            "get": {
+                "tags": [
+                    "ViGEmBus"
+                ],
+                "summary": "获取 ViGEmBus 状态",
+                "description": "获取 ViGEmBus 驱动的安装状态和版本信息（仅 Windows 平台有实际数据）。",
+                "operationId": "getViGEmBusStatus",
+                "responses": {
+                    "200": {
+                        "description": "成功返回 ViGEmBus 状态",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ViGEmBusStatusResponse"
+                                },
+                                "examples": {
+                                    "windows_installed": {
+                                        "summary": "Windows 已安装",
+                                        "value": {
+                                            "installed": true,
+                                            "version": "1.17.333.0",
+                                            "version_compatible": true,
+                                            "packaged_version": "1.17.333.0"
+                                        }
+                                    },
+                                    "windows_not_installed": {
+                                        "summary": "Windows 未安装",
+                                        "value": {
+                                            "installed": false,
+                                            "version": "",
+                                            "version_compatible": false,
+                                            "packaged_version": "1.17.333.0"
+                                        }
+                                    },
+                                    "non_windows": {
+                                        "summary": "非 Windows 平台",
+                                        "value": {
+                                            "error": "ViGEmBus is only available on Windows",
+                                            "installed": false,
+                                            "version": "",
+                                            "version_compatible": false,
+                                            "packaged_version": ""
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    }
+                }
+            }
+        },
+        "/api/vigembus/install": {
+            "post": {
+                "tags": [
+                    "ViGEmBus"
+                ],
+                "summary": "安装 ViGEmBus 驱动",
+                "description": "以提升权限静默安装 ViGEmBus 驱动（仅 Windows 平台有效）。",
+                "operationId": "installViGEmBus",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/csrfTokenHeader"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "安装操作结果",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ViGEmBusInstallResponse"
+                                },
+                                "examples": {
+                                    "success": {
+                                        "summary": "安装成功",
+                                        "value": {
+                                            "status": true,
+                                            "exit_code": 0
+                                        }
+                                    },
+                                    "not_found": {
+                                        "summary": "安装包不存在",
+                                        "value": {
+                                            "status": false,
+                                            "error": "ViGEmBus installer not found"
+                                        }
+                                    },
+                                    "non_windows": {
+                                        "summary": "非 Windows 平台",
+                                        "value": {
+                                            "status": false,
+                                            "error": "ViGEmBus installation is only available on Windows"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未认证"
+                    },
+                    "403": {
+                        "description": "CSRF 验证失败"
+                    }
+                }
+            }
+        }
+    }
+}
