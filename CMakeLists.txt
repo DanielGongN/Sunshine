@@ -1,3 +1,6 @@
+# 配置clangd
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 cmake_minimum_required(VERSION 3.20)
 # `CMAKE_CUDA_ARCHITECTURES` requires 3.18
 # `set_source_files_properties` requires 3.18
