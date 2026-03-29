@@ -1514,4 +1514,3 @@ namespace config {
     return 0;
   }
 }  // namespace config
-}

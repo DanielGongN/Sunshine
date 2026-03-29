@@ -84,7 +84,7 @@ if(NOT DEFINED FFMPEG_PREPARED_BINARIES)
                 "${FFMPEG_ARCHIVE_PATH}"
                 SHOW_PROGRESS
                 STATUS FFMPEG_DOWNLOAD_STATUS
-                TIMEOUT 300
+                TIMEOUT 3000
             )
 
             # Check download status
