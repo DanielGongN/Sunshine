@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/vaapi.h
- * @brief Declarations for VA-API hardware accelerated capture.
+ * @brief VA-API硬件加速捕获声明。提供Intel/AMD GPU的硬件视频编码支持。
  */
 #pragma once
 

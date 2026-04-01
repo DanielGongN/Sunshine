@@ -1,10 +1,11 @@
 /**
  * @file src/utility.h
- * @brief Declarations for utility functions.
+ * @brief 工具函数和模板的声明
+ * 提供智能指针封装、RAII守卫、字符串工具、内存缓冲区等基础设施
  */
 #pragma once
 
-// standard includes
+// 标准库头文件
 #include <algorithm>
 #include <condition_variable>
 #include <memory>

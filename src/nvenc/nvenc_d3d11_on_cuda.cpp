@@ -1,13 +1,15 @@
 /**
  * @file src/nvenc/nvenc_d3d11_on_cuda.cpp
- * @brief Definitions for CUDA NVENC encoder with Direct3D11 input surfaces.
+ * @brief CUDA互操作 D3D11 NVENC编码器实现。
+ *        包括构造/析构、CUDA库加载、CUDA上下文创建、D3D11纹理到CUDA内存的数据传输、
+ *        编码输入缓冲区创建和同步。
  */
 #ifdef _WIN32
-  // this include
+  // 本模块头文件
   #include "nvenc_d3d11_on_cuda.h"
 
-  // local includes
-  #include "nvenc_utils.h"
+  // 本地头文件
+  #include "nvenc_utils.h"  // 像素格式转换工具
 
 namespace nvenc {
 
@@ -56,6 +58,9 @@ namespace nvenc {
     return d3d_input_texture.GetInterfacePtr();
   }
 
+  /**
+   * @brief 加载CUDA DLL并初始化CUDA上下文（用于D3D11与CUDA互操作）
+   */
   bool nvenc_d3d11_on_cuda::init_library() {
     if (!nvenc_d3d11::init_library()) {
       return false;
@@ -113,6 +118,9 @@ namespace nvenc {
     return device != nullptr;
   }
 
+  /**
+   * @brief 通过CUDA互操作创建并注册输入缓冲区（专用于10bit 4:4:4编码）
+   */
   bool nvenc_d3d11_on_cuda::create_and_register_input_buffer() {
     if (encoder_params.buffer_format != NV_ENC_BUFFER_FORMAT_YUV444_10BIT) {
       BOOST_LOG(error) << "NvEnc: CUDA interop is expected to be used only for 10-bit 4:4:4 encoding";

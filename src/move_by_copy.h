@@ -1,19 +1,19 @@
 /**
  * @file src/move_by_copy.h
- * @brief Declarations for the MoveByCopy utility class.
+ * @brief MoveByCopy工具类的声明
+ * 将移动语义包装为拷贝语义，用于将只能移动的对象传入std::function等要求可拷贝的场景
  */
 #pragma once
 
-// standard includes
 #include <utility>
 
 /**
- * @brief Contains utilities for moving objects by copying them.
+ * @brief 移动代替拷贝工具命名空间
  */
 namespace move_by_copy_util {
   /**
-   * When a copy is made, it moves the object
-   * This allows you to move an object when a move can't be done.
+   * @brief 拷贝时实际执行移动的包装器
+   * 当需要将只能移动的对象（如unique_ptr）传入要求可拷贝的容器时使用
    */
   template<class T>
   class MoveByCopy {

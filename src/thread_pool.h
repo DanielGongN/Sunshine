@@ -1,19 +1,21 @@
 /**
  * @file src/thread_pool.h
- * @brief Declarations for the thread pool system.
+ * @brief 线程池系统的声明
+ * 管理一组工作线程，从任务队列中取出并执行任务
  */
 #pragma once
 
-// standard includes
 #include <thread>
 
-// local includes
-#include "platform/common.h"
-#include "task_pool.h"
+// 本地项目头文件
+#include "platform/common.h" // 平台公共接口（线程名称设置等）
+#include "task_pool.h"        // 任务池基类
 
 namespace thread_pool_util {
   /**
-   * Allow threads to execute unhindered while keeping full control over the threads.
+   * @brief 线程池类
+   * 继承自任务池，管理工作线程的创建、运行和停止
+   * 工作线程通过条件变量等待新任务，避免忙等待
    */
   class ThreadPool: public task_pool_util::TaskPool {
   public:

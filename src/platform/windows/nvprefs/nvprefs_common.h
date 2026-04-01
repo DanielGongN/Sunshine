@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/nvprefs_common.h
- * @brief Declarations for common nvidia preferences.
+ * @brief NVIDIA偏好设置公共声明。定义共享的枚举、常量和工具函数。
  */
 #pragma once
 

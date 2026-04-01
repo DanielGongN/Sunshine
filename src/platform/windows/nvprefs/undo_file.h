@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/undo_file.h
- * @brief Declarations for the nvidia undo file.
+ * @brief NVIDIA撤销文件声明。管理配置撤销数据的文件持久化。
  */
 #pragma once
 

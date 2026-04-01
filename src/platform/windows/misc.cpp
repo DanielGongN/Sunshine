@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/misc.cpp
- * @brief Miscellaneous definitions for Windows.
+ * @brief Windows平台杂项实现。包括线程优先级、服务控制、进程管理、网络发送、QoS等。
  */
 // standard includes
 #include <csignal>
@@ -186,6 +186,9 @@ namespace platf {
     return "00:00:00:00:00:00"s;
   }
 
+  /**
+   * @brief 同步线程到当前活动桌面（确保在UAC/锁屏等场景下可以发送输入）
+   */
   HDESK syncThreadDesktop() {
     auto hDesk = OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL);
     if (!hDesk) {
@@ -247,26 +250,33 @@ namespace platf {
    * @brief Obtain the current sessions user's primary token with elevated privileges.
    * @return The user's token. If user has admin capability it will be elevated, otherwise it will be a limited token. On error, `nullptr`.
    */
+  /**
+   * @brief 获取当前用户令牌（支持UAC提升）：枚举会话→打开用户进程→复制令牌
+   */
   HANDLE retrieve_users_token(bool elevated) {
     DWORD consoleSessionId;
     HANDLE userToken;
     TOKEN_ELEVATION_TYPE elevationType;
     DWORD dwSize;
 
-    // Get the session ID of the active console session
+    // 获取活动控制台会话的ID
     consoleSessionId = WTSGetActiveConsoleSessionId();
     if (0xFFFFFFFF == consoleSessionId) {
-      // If there is no active console session, log a warning and return null
+      // 无活动用户会话，无法以用户身份执行命令
       BOOST_LOG(warning) << "There isn't an active user session, therefore it is not possible to execute commands under the users profile.";
       return nullptr;
     }
 
-    // Get the user token for the active console session
+    // 获取该会话的用户令牌
     if (!WTSQueryUserToken(consoleSessionId, &userToken)) {
       BOOST_LOG(debug) << "QueryUserToken failed, this would prevent commands from launching under the users profile.";
       return nullptr;
     }
 
+    // 查询令牌提升类型（判断UAC状态）
+    // Elevation - Default: 非管理员，UAC无关
+    // Elevation - Limited: 管理员+UAC开启，当前为受限令牌
+    // Elevation - Full:    管理员+UAC关闭，已是最高权限
     // We need to know if this is an elevated token or not.
     // Get the elevation type of the user token
     // Elevation - Default: User is not an admin, UAC enabled/disabled does not matter.
@@ -286,6 +296,7 @@ namespace platf {
                          << "For security reasons Sunshine will retain the same access level as the current user and will not elevate it.";
     }
 
+    // 用户有Limited令牌且需要提升，获取关联的管理员令牌
     // User has a limited token, this means they have UAC enabled and is an Administrator
     if (elevated && elevationType == TokenElevationTypeLimited) {
       TOKEN_LINKED_TOKEN linkedToken;
@@ -682,6 +693,9 @@ namespace platf {
    * @param creation_flags The creation flags for CreateProcess(), which may be modified by this function.
    * @return A command string suitable for use by CreateProcess().
    */
+  /**
+   * @brief 解析用户命令字符串：查找可执行文件→处理shell打开动词→替换参数占位符
+   */
   std::wstring resolve_command_string(const std::string &raw_cmd, const std::wstring &working_dir, HANDLE token, DWORD &creation_flags) {
     std::wstring raw_cmd_w = utf_utils::from_utf8(raw_cmd);
 
@@ -902,6 +916,9 @@ namespace platf {
    * @param group A pointer to a `bp::group` object to which the new process should belong (may be `nullptr`).
    * @return A `bp::child` object representing the new process, or an empty `bp::child` object if the launch fails.
    */
+  /**
+   * @brief 以用户身份运行命令：克隆环境→创建进程（支持提权/交互/后台）
+   */
   bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
     std::wstring start_dir = utf_utils::from_utf8(working_dir.string());
     HANDLE job = group ? group->native_handle() : nullptr;
@@ -1063,7 +1080,11 @@ namespace platf {
     }
   }
 
+  /**
+   * @brief 流媒体开始前的系统优化：启用MMCSS、降低定时器精度、禁用WiFi省电
+   */
   void streaming_will_start() {
+    // 加载wlanapi.dll用于WiFi低延迟优化（服务器版Windows可能未安装）
     static std::once_flag load_wlanapi_once_flag;
     std::call_once(load_wlanapi_once_flag, []() {
       // wlanapi.dll is not installed by default on Windows Server, so we load it dynamically
@@ -1093,9 +1114,11 @@ namespace platf {
       }
     });
 
+    // 启用DWM的MMCSS调度，确保桌面窗口管理器不会被降优先级
     // Enable MMCSS scheduling for DWM
     DwmEnableMMCSS(true);
 
+    // 将系统定时器精度降低到最小值（约0.5ms）以减少帧节奏报动
     // Reduce timer period to 0.5ms
     if (nt_set_timer_resolution_max()) {
       used_nt_set_timer_resolution = true;
@@ -1105,9 +1128,11 @@ namespace platf {
       used_nt_set_timer_resolution = false;
     }
 
+    // 提升进程优先级为HIGH_PRIORITY_CLASS
     // Promote ourselves to high priority class
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
+    // 重新应用NVIDIA控制面板配置（防止用户外部修改）
     // Modify NVIDIA control panel settings again, in case they have been changed externally since sunshine launch
     if (nvprefs_instance.load()) {
       if (!nvprefs_instance.owning_undo_file()) {
@@ -1118,6 +1143,7 @@ namespace platf {
       nvprefs_instance.unload();
     }
 
+    // 对所有已连接的WiFi网卡启用低延迟模式（减少后台扫描导致的丢包和报动）
     // Enable low latency mode on all connected WLAN NICs if wlanapi.dll is available
     if (fn_WlanOpenHandle) {
       DWORD negotiated_version;
@@ -1180,10 +1206,15 @@ namespace platf {
     }
   }
 
+  /**
+   * @brief 流媒体结束后的系统清理：恢复MMCSS、定时器、WiFi设置
+   */
   void streaming_will_stop() {
+    // 恢复进程优先级为普通
     // Demote ourselves back to normal priority class
     SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
 
+    // 恢复系统定时器精度
     // End our 0.5ms timer request
     if (used_nt_set_timer_resolution) {
       used_nt_set_timer_resolution = false;
@@ -1366,6 +1397,12 @@ namespace platf {
 
   // Use UDP segmentation offload if it is supported by the OS. If the NIC is capable, this will use
   // hardware acceleration to reduce CPU usage. Support for USO was introduced in Windows 10 20H1.
+  /**
+   * @brief 使用USO批量发送UDP数据包（利用WSASendMsg和UDP_SEND_MSG_SIZE实现高效批量发送）
+   */
+  /**
+   * @brief 批量UDP发送（使用USO - UDP Segmentation Offload），将多个包合并为一次系统调用
+   */
   bool send_batch(batched_send_info_t &send_info) {
     WSAMSG msg;
 
@@ -1453,22 +1490,28 @@ namespace platf {
     }
 
     if (send_info.block_count > 1) {
+      // 启用UDP分段卸载（USO）：告知内核每个输出包的大小
       cmbuflen += WSA_CMSG_SPACE(sizeof(DWORD));
 
       cm = WSA_CMSG_NXTHDR(&msg, cm);
       cm->cmsg_level = IPPROTO_UDP;
       cm->cmsg_type = UDP_SEND_MSG_SIZE;
       cm->cmsg_len = WSA_CMSG_LEN(sizeof(DWORD));
+      // 每个输出包 = header + payload
       *((DWORD *) WSA_CMSG_DATA(cm)) = send_info.header_size + send_info.payload_size;
     }
 
     msg.Control.len = cmbuflen;
 
+    // USO不支持时返回false，调用者会回退到逐包发送
     // If USO is not supported, this will fail and the caller will fall back to unbatched sends.
     DWORD bytes_sent;
     return WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR;
   }
 
+  /**
+   * @brief 发送单个UDP数据包（使用WSASendMsg并指定源地址）
+   */
   bool send(send_info_t &send_info) {
     WSAMSG msg;
 
@@ -1574,17 +1617,22 @@ namespace platf {
    * @param data_type The type of traffic sent on this socket.
    * @param dscp_tagging Specifies whether to enable DSCP tagging on outgoing traffic.
    */
+  /**
+   * @brief 启用套接字QoS：使用qWAVE API设置DSCP标记，优先处理视频/音频流量
+   */
   std::unique_ptr<deinit_t> enable_socket_qos(uintptr_t native_socket, boost::asio::ip::address &address, uint16_t port, qos_data_type_e data_type, bool dscp_tagging) {
     SOCKADDR_IN saddr_v4;
     SOCKADDR_IN6 saddr_v6;
     PSOCKADDR dest_addr;
     bool using_connect_hack = false;
 
+    // Windows不支持无DSCP标记的流量优先级
     // Windows doesn't support any concept of traffic priority without DSCP tagging
     if (!dscp_tagging) {
       return nullptr;
     }
 
+    // 加载qWAVE库（服务器版Windows可能未安装）
     static std::once_flag load_qwave_once_flag;
     std::call_once(load_qwave_once_flag, []() {
       // qWAVE is not installed by default on Windows Server, so we load it dynamically
@@ -1639,6 +1687,8 @@ namespace platf {
       saddr_v6 = to_sockaddr(address_v6, port);
       dest_addr = (PSOCKADDR) &saddr_v6;
 
+      // qWAVE不支持IPv4映射的IPv6地址，也不支持双栈套接字上的IPv4地址。
+      // 解决方法：临时connect()设置目标地址，让qWAVE成功初始化流，然后断开连接
       // qWAVE doesn't properly support IPv4-mapped IPv6 addresses, nor does it
       // correctly support IPv4 addresses on a dual-stack socket (despite MSDN's
       // claims to the contrary). To get proper QoS tagging when hosting in dual
@@ -1660,6 +1710,7 @@ namespace platf {
       dest_addr = (PSOCKADDR) &saddr_v4;
     }
 
+    // 根据数据类型设置qWAVE流量类型（音频用Voice，视频用AudioVideo）
     QOS_TRAFFIC_TYPE traffic_type;
     switch (data_type) {
       case qos_data_type_e::audio:

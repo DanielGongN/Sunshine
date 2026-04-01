@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/nv12_zero_device.h
- * @brief Declarations for NV12 zero copy device on macOS.
+ * @brief macOS NV12零拷贝设备声明。提供无需额外内存拷贝的NV12编码输入。
  */
 #pragma once
 

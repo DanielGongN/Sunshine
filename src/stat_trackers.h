@@ -1,23 +1,28 @@
 /**
  * @file src/stat_trackers.h
- * @brief Declarations for streaming statistic tracking.
+ * @brief 串流统计跟踪的声明
+ * 提供最小值/最大值/平均值等统计跟踪器，用于监控串流性能
  */
 #pragma once
 
-// standard includes
+// 标准库头文件
 #include <chrono>
 #include <functional>
 #include <limits>
 
-// lib includes
-#include <boost/format.hpp>
+// 第三方库头文件
+#include <boost/format.hpp> // 字符串格式化
 
 namespace stat_trackers {
 
-  boost::format one_digit_after_decimal();
+  boost::format one_digit_after_decimal();  // 一位小数格式化器
 
-  boost::format two_digits_after_decimal();
+  boost::format two_digits_after_decimal(); // 两位小数格式化器
 
+  /**
+   * @brief 最小值/最大值/平均值统计跟踪器
+   * 在指定时间间隔内收集样本，到期后调用回调函数输出统计结果
+   */
   template<typename T>
   class min_max_avg_tracker {
   public:

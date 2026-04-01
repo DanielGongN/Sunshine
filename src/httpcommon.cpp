@@ -1,33 +1,34 @@
 /**
  * @file src/httpcommon.cpp
- * @brief Definitions for common HTTP.
+ * @brief HTTP公共接口的实现
+ * 包含HTTP/HTTPS服务器初始化、SSL证书管理、用户凭证管理、文件下载等
  */
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
-// standard includes
+// 标准库头文件
 #include <filesystem>
 #include <utility>
 
-// lib includes
-#include <boost/asio/ssl/context.hpp>
-#include <boost/asio/ssl/context_base.hpp>
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
-#include <boost/property_tree/xml_parser.hpp>
-#include <curl/curl.h>
-#include <Simple-Web-Server/server_http.hpp>
-#include <Simple-Web-Server/server_https.hpp>
+// 第三方库头文件
+#include <boost/asio/ssl/context.hpp>           // SSL上下文
+#include <boost/asio/ssl/context_base.hpp>      // SSL基础配置
+#include <boost/property_tree/json_parser.hpp>  // JSON解析器
+#include <boost/property_tree/ptree.hpp>        // 属性树
+#include <boost/property_tree/xml_parser.hpp>   // XML解析器
+#include <curl/curl.h>                          // libcurl HTTP客户端
+#include <Simple-Web-Server/server_http.hpp>    // HTTP服务器
+#include <Simple-Web-Server/server_https.hpp>   // HTTPS服务器
 
-// local includes
-#include "config.h"
-#include "crypto.h"
-#include "file_handler.h"
-#include "httpcommon.h"
-#include "logging.h"
-#include "network.h"
-#include "nvhttp.h"
-#include "platform/common.h"
-#include "process.h"
+// 本地项目头文件
+#include "config.h"          // 配置管理
+#include "crypto.h"          // 加密函数
+#include "file_handler.h"    // 文件操作
+#include "httpcommon.h"      // 本文件头文件
+#include "logging.h"         // 日志系统
+#include "network.h"         // 网络工具
+#include "nvhttp.h"          // NVIDIA HTTP协议
+#include "platform/common.h" // 平台公共接口
+#include "process.h"         // 进程管理
 #include "rtsp.h"
 #include "utility.h"
 #include "uuid.h"
@@ -43,6 +44,9 @@ namespace http {
   std::string unique_id;
   net::net_e origin_web_ui_allowed;
 
+  /**
+   * @brief 初始化HTTP模块：加载或创建SSL证书和用户凭据
+   */
   int init() {
     bool clean_slate = config::sunshine.flags[config::flag::FRESH_STATE];
     origin_web_ui_allowed = net::from_enum_string(config::nvhttp.origin_web_ui_allowed);
@@ -66,6 +70,10 @@ namespace http {
     return 0;
   }
 
+  /**
+   * @brief 保存用户凭证到JSON文件
+   * 使用随机盐值和SHA-256对密码进行加盐哈希后存储
+   */
   int save_user_creds(const std::string &file, const std::string &username, const std::string &password, bool run_our_mouth) {
     pt::ptree outputTree;
 
@@ -93,6 +101,9 @@ namespace http {
     return 0;
   }
 
+  /**
+   * @brief 检查凭证文件是否存在且包含完整的用户名/密码/盐值字段
+   */
   bool user_creds_exist(const std::string &file) {
     if (!fs::exists(file)) {
       return false;
@@ -111,6 +122,9 @@ namespace http {
     return false;
   }
 
+  /**
+   * @brief 从JSON文件重新加载用户凭证到全局配置
+   */
   int reload_user_creds(const std::string &file) {
     pt::ptree inputTree;
     try {
@@ -125,6 +139,10 @@ namespace http {
     return 0;
   }
 
+  /**
+   * @brief 创建自签名SSL证书和私钥
+   * 生成2048位RSA密钥对和X.509证书，写入文件并设置安全权限
+   */
   int create_creds(const std::string &pkey, const std::string &cert) {
     fs::path pkey_path = pkey;
     fs::path cert_path = cert;
@@ -176,6 +194,10 @@ namespace http {
     return 0;
   }
 
+  /**
+   * @brief 使用libcurl下载文件到本地
+   * 支持指定SSL/TLS版本，自动创建目录
+   */
   bool download_file(const std::string &url, const std::string &file, long ssl_version) {
     // sonar complains about weak ssl and tls versions; however sonar cannot detect the fix
     CURL *curl = curl_easy_init();  // NOSONAR
@@ -212,6 +234,9 @@ namespace http {
     return result == CURLE_OK;
   }
 
+  /**
+   * @brief URL编码（百分号编码）
+   */
   std::string url_escape(const std::string &url) {
     char *string = curl_easy_escape(nullptr, url.c_str(), static_cast<int>(url.length()));
     std::string result(string);
@@ -219,6 +244,9 @@ namespace http {
     return result;
   }
 
+  /**
+   * @brief 从URL中提取主机名部分
+   */
   std::string url_get_host(const std::string &url) {
     CURLU *curlu = curl_url();
     curl_url_set(curlu, CURLUPART_URL, url.c_str(), static_cast<unsigned int>(url.length()));

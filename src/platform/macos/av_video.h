@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/av_video.h
- * @brief Declarations for video capture on macOS.
+ * @brief macOS视频捕获声明。使用AVFoundation/CoreGraphics进行屏幕捕获。
  */
 #pragma once
 

@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/undo_data.cpp
- * @brief Definitions for undoing changes to nvidia preferences.
+ * @brief NVIDIA偏好设置撤销数据实现。序列化/反序列化撤销数据到JSON。
  */
 // lib includes
 #include <nlohmann/json.hpp>

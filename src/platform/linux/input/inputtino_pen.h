@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_pen.h
- * @brief Declarations for inputtino pen input handling.
+ * @brief inputtino触笔输入处理声明。定义虚拟触笔设备接口。
  */
 #pragma once
 

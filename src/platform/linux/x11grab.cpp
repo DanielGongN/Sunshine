@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/x11grab.cpp
- * @brief Definitions for x11 capture.
+ * @brief X11显示捕获实现。使用XShm/XFixes进行屏幕戚取和光标捕获。
  */
 // standard includes
 #include <fstream>
@@ -385,6 +385,9 @@ namespace platf {
       x11::InitThreads();
     }
 
+    /**
+     * @brief 初始化X11显示捕获：打开显示器→查找目标监视器→配置捕获区域
+     */
     int init(const std::string &display_name, const ::video::config_t &config) {
       if (!xdisplay) {
         BOOST_LOG(error) << "Could not open X11 display"sv;
@@ -456,6 +459,9 @@ namespace platf {
       x11::GetWindowAttributes(xdisplay.get(), xwindow, &xattr);  // Update xattr's
     }
 
+    /**
+     * @brief X11 XGetImage捕获主循环（帧节奏控制、截图、游标合成）
+     */
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
       auto next_frame = std::chrono::steady_clock::now();
 
@@ -595,6 +601,9 @@ namespace platf {
       while (!task_pool.cancel(refresh_task_id));
     }
 
+    /**
+     * @brief XCB SHM共享内存捕获主循环（高性能零拷贝截图）
+     */
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
       auto next_frame = std::chrono::steady_clock::now();
 
@@ -685,6 +694,9 @@ namespace platf {
       return 0;
     }
 
+    /**
+     * @brief 初始化XCB SHM捕获：X11基础初始化→XCB连接→共享内存挂载
+     */
     int init(const std::string &display_name, const ::video::config_t &config) {
       if (x11_attr_t::init(display_name, config)) {
         return 1;

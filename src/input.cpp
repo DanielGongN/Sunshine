@@ -1,14 +1,15 @@
 /**
  * @file src/input.cpp
- * @brief Definitions for gamepad, keyboard, and mouse input handling.
+ * @brief 游戏手柄、键盘和鼠标输入处理的实现
+ * 解析Moonlight客户端发送的输入事件，转换为本地操作系统输入
  */
 #include <cstdint>
 extern "C" {
-#include <moonlight-common-c/src/Input.h>
-#include <moonlight-common-c/src/Limelight.h>
+#include <moonlight-common-c/src/Input.h>     // Moonlight输入协议定义
+#include <moonlight-common-c/src/Limelight.h> // Moonlight公共接口
 }
 
-// standard includes
+// 标准库头文件
 #include <bitset>
 #include <chrono>
 #include <cmath>
@@ -104,6 +105,9 @@ namespace input {
    * @param max The maximum value for clamping.
    * @return Clamped native endianess float value.
    */
+  /**
+   * @brief 将网络字节序浮点数转换为本机字节序并限定范围
+   */
   float from_clamped_netfloat(netfloat f, float min, float max) {
     return std::clamp(from_netfloat(f), min, max);
   }
@@ -115,6 +119,9 @@ namespace input {
   static platf::input_t platf_input;
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
 
+  /**
+   * @brief 释放游戏手柄资源：释放硬件、共有触摸分配、输入检测伺服、反馈队列
+   */
   void free_gamepad(platf::input_t &platf_input, int id) {
     platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
     platf::free_gamepad(platf_input, id);
@@ -199,6 +206,9 @@ namespace input {
    * @brief Apply shortcut based on VKEY
    * @param keyCode The VKEY code
    * @return 0 if no shortcut applied, > 0 if shortcut applied.
+   */
+  /**
+   * @brief 应用快捷键：检查组合键并执行对应操作（屏幕图、退出App、弹出键盘等）
    */
   inline int apply_shortcut(short keyCode) {
     constexpr auto VK_F1 = 0x70;
@@ -441,6 +451,9 @@ namespace input {
     }
   }
 
+  /**
+   * @brief 处理相对鼠标移动事件
+   */
   void passthrough(std::shared_ptr<input_t> &input, PNV_REL_MOUSE_MOVE_PACKET packet) {
     if (!config::input.mouse) {
       return;
@@ -456,6 +469,9 @@ namespace input {
    * @param val The cartesian coordinate pair to convert.
    * @param size The size of the client's surface containing the value.
    * @return The host-relative coordinate pair if a touchport is available.
+   */
+  /**
+   * @brief 客户端坐标转换为触控板坐标：处理宽高比偏移和缩放
    */
   std::optional<std::pair<float, float>> client_to_touchport(std::shared_ptr<input_t> &input, const std::pair<float, float> &val, const std::pair<float, float> &size) {
     auto &touch_port_event = input->touch_port_event;
@@ -538,6 +554,9 @@ namespace input {
     return {multiply_polar_by_cartesian_scalar(major, angle, scalar), multiply_polar_by_cartesian_scalar(minor, angle + (M_PI / 2), scalar)};
   }
 
+  /**
+   * @brief 处理绝对鼠标位置事件（触摸屏输入）
+   */
   void passthrough(std::shared_ptr<input_t> &input, PNV_ABS_MOUSE_MOVE_PACKET packet) {
     if (!config::input.mouse) {
       return;
@@ -588,6 +607,9 @@ namespace input {
     platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
   }
 
+  /**
+   * @brief 处理鼠标按钮事件（支持左键延迟以避免移动+点击失序）
+   */
   void passthrough(std::shared_ptr<input_t> &input, PNV_MOUSE_BUTTON_PACKET packet) {
     if (!config::input.mouse) {
       return;
@@ -649,6 +671,12 @@ namespace input {
     platf::button_mouse(platf_input, button, release);
   }
 
+  /**
+   * @brief 键码映射：将Moonlight键码通过配置的映射表转换
+   */
+  /**
+   * @brief 应用键码重映射配置
+   */
   short map_keycode(short keycode) {
     auto it = config::input.keybindings.find(keycode);
     if (it != std::end(config::input.keybindings)) {
@@ -710,6 +738,9 @@ namespace input {
     }
   }
 
+  /**
+   * @brief 发送按键及修饰符：先按下必要的修饰键，发送目标键，再释放修饰键
+   */
   void send_key_and_modifiers(uint16_t key_code, bool release, uint8_t flags, uint8_t synthetic_modifiers) {
     if (!release) {
       // Press any synthetic modifiers required for this key
@@ -752,6 +783,12 @@ namespace input {
     key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_period, key_code, flags, synthetic_modifiers).task_id;
   }
 
+  /**
+   * @brief 传递键盘事件：处理按键/释放、快捷键组合、键重复、修饰符状态
+   */
+  /**
+   * @brief 处理键盘事件：快捷键检查、键码重映射、修饰键跟踪
+   */
   void passthrough(std::shared_ptr<input_t> &input, PNV_KEYBOARD_PACKET packet) {
     if (!config::input.keyboard) {
       return;
@@ -1126,6 +1163,12 @@ namespace input {
     platf::gamepad_battery(platf_input, battery);
   }
 
+  /**
+   * @brief 传递游戏手柄事件：处理手柄按钮、摇杆、触发器、自动分配/释放手柄
+   */
+  /**
+   * @brief 处理手柄状态更新（摇杆、按钮、扳机）
+   */
   void passthrough(std::shared_ptr<input_t> &input, PNV_MULTI_CONTROLLER_PACKET packet) {
     if (!config::input.controller) {
       return;
@@ -1527,6 +1570,12 @@ namespace input {
    * @brief Called on a thread pool thread to process an input message.
    * @param input The input context pointer.
    */
+  /**
+   * @brief 处理队列中的下一条输入消息：批量合并同类型消息，分发到对应处理函数
+   */
+  /**
+   * @brief 批量分发队列中的输入消息（合并同类型事件以优化性能）
+   */
   void passthrough_next_message(std::shared_ptr<input_t> input) {
     // 'entry' backs the 'payload' pointer, so they must remain in scope together
     std::vector<uint8_t> entry;
@@ -1633,6 +1682,12 @@ namespace input {
     task_pool.push(passthrough_next_message, input);
   }
 
+  /**
+   * @brief 重置所有输入状态：释放所有键/鼠标按钮、释放游戏手柄、清除指损蒋、恢复输入状态
+   */
+  /**
+   * @brief 重置输入状态：释放所有按键、鼠标按钮、取消定时器
+   */
   void reset(std::shared_ptr<input_t> &input) {
     task_pool.cancel(key_press_repeat_id);
     task_pool.cancel(input->mouse_left_button_timeout);
@@ -1681,6 +1736,12 @@ namespace input {
     return true;
   }
 
+  /**
+   * @brief 分配输入上下文：初始化输入队列、订阅触摸端口事件、分配平台输入资源
+   */
+  /**
+   * @brief 为新串流会话分配输入上下文并启动输入处理线程
+   */
   std::shared_ptr<input_t> alloc(safe::mail_t mail) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),

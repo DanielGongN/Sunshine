@@ -1,8 +1,9 @@
 /**
  * @file src/system_tray.cpp
- * @brief Definitions for the system tray icon and notification system.
+ * @brief 系统托盘图标和通知系统的实现
+ * 在任务栏显示托盘图标，提供快捷菜单（打开UI、重启、退出等）
  */
-// macros
+// 宏定义
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
 
   #if defined(_WIN32)
@@ -55,6 +56,9 @@ using namespace std::literals;
 namespace system_tray {
   static std::atomic tray_initialized = false;
 
+  /**
+   * @brief 托盘菜单回调：打开Web管理界面
+   */
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Opening UI from system tray"sv;
     launch_ui();
@@ -72,18 +76,28 @@ namespace system_tray {
     platf::open_url("https://www.paypal.com/paypalme/ReenigneArcher");
   }
 
+  /**
+   * @brief 托盘菜单回调：重置显示设备配置
+   */
   void tray_reset_display_device_config_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Resetting display device config from system tray"sv;
 
     std::ignore = display_device::reset_persistence();
   }
 
+  /**
+   * @brief 托盘菜单回调：重启Sunshine程序
+   */
   void tray_restart_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Restarting from system tray"sv;
 
     platf::restart();
   }
 
+  /**
+   * @brief 托盘菜单回调：退出Sunshine程序
+   * Windows服务模式下返回特殊状态码以通知服务一同终止
+   */
   void tray_quit_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Quitting from system tray"sv;
 
@@ -129,6 +143,9 @@ namespace system_tray {
     .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING, TRAY_ICON_PAUSING},
   };
 
+  /**
+   * @brief macOS专用：解析Bundle内部资源目录中的相对路径为绝对路径
+   */
   const char *GetResourcePath(const char *relativePath) {
   #ifdef __APPLE__
     if (!relativePath || !*relativePath) {
@@ -181,6 +198,10 @@ namespace system_tray {
   #endif
   }
 
+  /**
+   * @brief 初始化系统托盘图标
+   * Windows下需要设置线程DACL以确保Explorer能监控线程状态
+   */
   int init_tray() {
   #ifdef _WIN32
     // If we're running as SYSTEM, Explorer.exe will not have permission to open our thread handle
@@ -264,6 +285,9 @@ namespace system_tray {
     return 0;
   }
 
+  /**
+   * @brief 处理托盘事件（阻塞直到有事件或tray_quit()被调用）
+   */
   int process_tray_events() {
     if (!tray_initialized) {
       BOOST_LOG(error) << "System tray is not initialized"sv;
@@ -274,6 +298,9 @@ namespace system_tray {
     return tray_loop(1);
   }
 
+  /**
+   * @brief 清理系统托盘资源
+   */
   int end_tray() {
     if (tray_initialized) {
       tray_initialized = false;
@@ -282,6 +309,9 @@ namespace system_tray {
     return 0;
   }
 
+  /**
+   * @brief 更新托盘图标显示串流中状态和通知
+   */
   void update_tray_playing(std::string app_name) {
     if (!tray_initialized) {
       return;
@@ -303,6 +333,9 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  /**
+   * @brief 更新托盘图标显示串流暂停状态
+   */
   void update_tray_pausing(std::string app_name) {
     if (!tray_initialized) {
       return;
@@ -324,6 +357,9 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  /**
+   * @brief 更新托盘图标显示应用停止状态
+   */
   void update_tray_stopped(std::string app_name) {
     if (!tray_initialized) {
       return;
@@ -345,6 +381,9 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  /**
+   * @brief 更新托盘图标显示等待PIN配对状态
+   */
   void update_tray_require_pin() {
     if (!tray_initialized) {
       return;
@@ -368,6 +407,9 @@ namespace system_tray {
   }
 
   // Threading functions available on all platforms
+  /**
+   * @brief 独立线程中运行托盘事件循环
+   */
   static void tray_thread_worker() {
     platf::set_thread_name("system_tray");
     BOOST_LOG(info) << "System tray thread started"sv;
@@ -384,6 +426,10 @@ namespace system_tray {
     BOOST_LOG(info) << "System tray thread ended"sv;
   }
 
+  /**
+   * @brief 初始化并在独立线程中运行托盘事件循环
+   * 适用于Windows服务模式，线程会被分离
+   */
   int init_tray_threaded() {
     try {
       auto tray_thread = std::thread(tray_thread_worker);

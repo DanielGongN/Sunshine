@@ -1,48 +1,52 @@
 /**
  * @file src/video.h
- * @brief Declarations for video.
+ * @brief 视频编码和捕获的声明
+ * 支持H.264/HEVC/AV1硬件编码，基于FFmpeg和平台特定编码器（NVENC、VAAPI、VideoToolbox等）
  */
 #pragma once
 
-// local includes
-#include "input.h"
-#include "platform/common.h"
-#include "thread_safe.h"
-#include "video_colorspace.h"
+// 本地项目头文件
+#include "input.h"            // 输入子系统
+#include "platform/common.h"  // 平台公共接口
+#include "thread_safe.h"      // 线程安全工具
+#include "video_colorspace.h" // 视频色彩空间处理
 
 extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libswscale/swscale.h>
+#include <libavcodec/avcodec.h> // FFmpeg视频编解码器
+#include <libswscale/swscale.h> // FFmpeg图像缩放和格式转换
 }
 
 struct AVPacket;
 
 namespace video {
 
-  /* Encoding configuration requested by remote client */
+  /**
+   * @brief 远程客户端请求的视频编码配置
+   */
   struct config_t {
-    int width;  // Video width in pixels
-    int height;  // Video height in pixels
-    int framerate;  // Requested framerate, used in individual frame bitrate budget calculation
-    int framerateX100;  // Optional field for streaming at NTSC or similar rates e.g. 59.94 = 5994
-    int bitrate;  // Video bitrate in kilobits (1000 bits) for requested framerate
-    int slicesPerFrame;  // Number of slices per frame
-    int numRefFrames;  // Max number of reference frames
+    int width;  // 视频宽度（像素）
+    int height;  // 视频高度（像素）
+    int framerate;  // 帧率（用于计算单帧比特率预算）
+    int framerateX100;  // 帧率×100（支持NTSC等非integer帧率，如59.94=5994）
+    int bitrate;  // 视频比特率（千比特/秒）
+    int slicesPerFrame;  // 每帧切片数（用于并行编码）
+    int numRefFrames;  // 最大参考帧数量
 
-    /* Requested color range and SDR encoding colorspace, HDR encoding colorspace is always BT.2020+ST2084
-       Color range (encoderCscMode & 0x1) : 0 - limited, 1 - full
-       SDR encoding colorspace (encoderCscMode >> 1) : 0 - BT.601, 1 - BT.709, 2 - BT.2020 */
+    /* 色彩范围和SDR编码色彩空间设置
+       HDR编码色彩空间始终为 BT.2020+ST2084
+       色彩范围 (encoderCscMode & 0x1): 0-有限范围, 1-全范围
+       SDR色彩空间 (encoderCscMode >> 1): 0-BT.601, 1-BT.709, 2-BT.2020 */
     int encoderCscMode;
 
-    int videoFormat;  // 0 - H.264, 1 - HEVC, 2 - AV1
+    int videoFormat;  // 视频格式: 0-H.264, 1-HEVC, 2-AV1
 
-    /* Encoding color depth (bit depth): 0 - 8-bit, 1 - 10-bit
-       HDR encoding activates when color depth is higher than 8-bit and the display which is being captured is operating in HDR mode */
+    /* 编码色彩深度: 0-8位, 1-10位
+       当色彩深度>8位且捕获的显示器处于HDR模式时，激活HDR编码 */
     int dynamicRange;
 
-    int chromaSamplingType;  // 0 - 4:2:0, 1 - 4:4:4
+    int chromaSamplingType;  // 色度采样类型: 0-4:2:0, 1-4:4:4
 
-    int enableIntraRefresh;  // 0 - disabled, 1 - enabled
+    int enableIntraRefresh;  // 帧内刷新: 0-禁用, 1-启用
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);

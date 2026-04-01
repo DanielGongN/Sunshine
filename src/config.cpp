@@ -1,8 +1,9 @@
 /**
  * @file src/config.cpp
- * @brief Definitions for the configuration of Sunshine.
+ * @brief Sunshine配置系统的实现
+ * 解析配置文件和命令行参数，加载/保存所有配置项
  */
-// standard includes
+// 标准库头文件
 #include <algorithm>
 #include <filesystem>
 #include <format>
@@ -583,6 +584,9 @@ namespace config {
     {},  // prep commands
   };
 
+  /**
+   * @brief 判断字符是否为行结束符（CR或LF）
+   */
   bool endline(char ch) {
     return ch == '\r' || ch == '\n';
   }
@@ -668,6 +672,10 @@ namespace config {
     );
   }
 
+  /**
+   * @brief 将配置文件内容解析为键值对映射表
+   * 支持 key = value 格式，忽略注释和空行
+   */
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content) {
     std::unordered_map<std::string, std::string> vars;
 
@@ -1025,6 +1033,18 @@ namespace config {
     }
   }
 
+  /**
+   * @brief 应用命令行标志位。
+   * 每个字符对应一个功能开关：
+   * '0' - 从标准输入读取PIN码
+   * '1' - 不加载之前保存的状态（仿佛首次启动）
+   * '2' - 强制替换视频流中的头信息
+   * 'p' - 启用/禁用UPnP
+   * @return 0成功，-1遇到未识别的标志
+   */
+  /**
+   * @brief 应用命令行标志位（-0: 从stdin读PIN, -1: 新状态, -2: 强制替换头, -p: UPnP）
+   */
   int apply_flags(const char *line) {
     int ret = 0;
     while (*line != '\0') {
@@ -1052,6 +1072,9 @@ namespace config {
     return ret;
   }
 
+  /**
+   * @brief 获取平台支持的手柄类型选项列表。
+   */
   std::vector<std::string_view> &get_supported_gamepad_options() {
     const auto options = platf::supported_gamepads(nullptr);
     static std::vector<std::string_view> opts {};
@@ -1062,30 +1085,43 @@ namespace config {
     return opts;
   }
 
+  /**
+   * @brief 将解析后的配置变量应用到全局配置结构体。
+   * 这是配置系统的核心函数，将所有配置项从字符串键值对转换为对应的全局变量。
+   * 包括：视频编码参数、音频设置、网络配置、输入设置、安全设置等。
+   */
+  /**
+   * @brief 将解析后的配置项应用到全局配置结构体
+   * 包括视频编码、音频、网络、输入、显示设备等所有子系统的配置
+   */
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
+    // 记录所有配置项并保存已修改的配置
     for (auto &[name, val] : vars) {
       BOOST_LOG(info) << "config: '"sv << name << "' = "sv << val;
       modified_config_settings[name] = val;
     }
 
-    int_f(vars, "qp", video.qp);
-    int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});
-    int_between_f(vars, "av1_mode", video.av1_mode, {0, 3});
-    int_f(vars, "min_threads", video.min_threads);
-    string_f(vars, "sw_preset", video.sw.sw_preset);
+    // === 视频编码基础参数 ===
+    int_f(vars, "qp", video.qp);  // 量化参数（影响图像质量）
+    int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});  // HEVC编码模式
+    int_between_f(vars, "av1_mode", video.av1_mode, {0, 3});  // AV1编码模式
+    int_f(vars, "min_threads", video.min_threads);  // 最小编码线程数
+    // === 软件编码器参数 ===
+    string_f(vars, "sw_preset", video.sw.sw_preset);  // 软件编码预设（如ultrafast, fast等）
     if (!video.sw.sw_preset.empty()) {
-      video.sw.svtav1_preset = sw::svtav1_preset_from_view(video.sw.sw_preset);
+      video.sw.svtav1_preset = sw::svtav1_preset_from_view(video.sw.sw_preset);  // SVT-AV1对应预设
     }
-    string_f(vars, "sw_tune", video.sw.sw_tune);
+    string_f(vars, "sw_tune", video.sw.sw_tune);  // 软件编码调优（如zerolatency等）
 
-    int_between_f(vars, "nvenc_preset", video.nv.quality_preset, {1, 7});
-    int_between_f(vars, "nvenc_vbv_increase", video.nv.vbv_percentage_increase, {0, 400});
-    bool_f(vars, "nvenc_spatial_aq", video.nv.adaptive_quantization);
-    generic_f(vars, "nvenc_twopass", video.nv.two_pass, nv::twopass_from_view);
-    bool_f(vars, "nvenc_h264_cavlc", video.nv.h264_cavlc);
-    bool_f(vars, "nvenc_realtime_hags", video.nv_realtime_hags);
-    bool_f(vars, "nvenc_opengl_vulkan_on_dxgi", video.nv_opengl_vulkan_on_dxgi);
-    bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);
+    // === NVIDIA NVENC编码器参数 ===
+    int_between_f(vars, "nvenc_preset", video.nv.quality_preset, {1, 7});  // NVENC质量预设（P1-P7）
+    int_between_f(vars, "nvenc_vbv_increase", video.nv.vbv_percentage_increase, {0, 400});  // VBV缓冲增量百分比
+    bool_f(vars, "nvenc_spatial_aq", video.nv.adaptive_quantization);  // 空间自适应量化
+    generic_f(vars, "nvenc_twopass", video.nv.two_pass, nv::twopass_from_view);  // 双Pass编码模式
+    bool_f(vars, "nvenc_h264_cavlc", video.nv.h264_cavlc);  // H.264使用CAVLC编码
+    bool_f(vars, "nvenc_realtime_hags", video.nv_realtime_hags);  // 实时HAGS
+    bool_f(vars, "nvenc_opengl_vulkan_on_dxgi", video.nv_opengl_vulkan_on_dxgi);  // OpenGL/Vulkan使用DXGI
+    bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);  // 低延迟优先于省电
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
     video.nv_legacy.preset = video.nv.quality_preset + 11;
@@ -1097,10 +1133,13 @@ namespace config {
     video.nv_legacy.vbv_percentage_increase = video.nv.vbv_percentage_increase;
 #endif
 
-    int_f(vars, "qsv_preset", video.qsv.qsv_preset, qsv::preset_from_view);
-    int_f(vars, "qsv_coder", video.qsv.qsv_cavlc, qsv::coder_from_view);
-    bool_f(vars, "qsv_slow_hevc", video.qsv.qsv_slow_hevc);
+    // === Intel QSV编码器参数 ===
+    int_f(vars, "qsv_preset", video.qsv.qsv_preset, qsv::preset_from_view);  // QSV编码预设
+    int_f(vars, "qsv_coder", video.qsv.qsv_cavlc, qsv::coder_from_view);  // QSV熵编码方式
+    bool_f(vars, "qsv_slow_hevc", video.qsv.qsv_slow_hevc);  // QSV慢速HEVC模式
 
+    // === AMD AMF编码器参数 ===
+    // 质量预设同时应用到H.264/HEVC/AV1三种编解码器
     std::string quality;
     string_f(vars, "amd_quality", quality);
     if (!quality.empty()) {
@@ -1109,38 +1148,43 @@ namespace config {
       video.amd.amd_quality_av1 = amd::quality_from_view<amd::quality_av1_e>(quality, video.amd.amd_quality_av1);
     }
 
+    // === AMD码率控制方法 ===
     std::string rc;
-    string_f(vars, "amd_rc", rc);
-    int_f(vars, "amd_coder", video.amd.amd_coder, amd::coder_from_view);
+    string_f(vars, "amd_rc", rc);  // 码率控制: cbr/cqp/vbr_latency/vbr_peak
+    int_f(vars, "amd_coder", video.amd.amd_coder, amd::coder_from_view);  // 熵编码方式
     if (!rc.empty()) {
       video.amd.amd_rc_h264 = amd::rc_from_view<amd::rc_h264_e>(rc, video.amd.amd_rc_h264);
       video.amd.amd_rc_hevc = amd::rc_from_view<amd::rc_hevc_e>(rc, video.amd.amd_rc_hevc);
       video.amd.amd_rc_av1 = amd::rc_from_view<amd::rc_av1_e>(rc, video.amd.amd_rc_av1);
     }
 
+    // === AMD编码场景设置 ===
     std::string usage;
-    string_f(vars, "amd_usage", usage);
+    string_f(vars, "amd_usage", usage);  // 编码场景: lowlatency/ultralowlatency/transcoding等
     if (!usage.empty()) {
       video.amd.amd_usage_h264 = amd::usage_from_view<amd::usage_h264_e>(usage, video.amd.amd_usage_h264);
       video.amd.amd_usage_hevc = amd::usage_from_view<amd::usage_hevc_e>(usage, video.amd.amd_usage_hevc);
       video.amd.amd_usage_av1 = amd::usage_from_view<amd::usage_av1_e>(usage, video.amd.amd_usage_av1);
     }
 
-    bool_f(vars, "amd_preanalysis", (bool &) video.amd.amd_preanalysis);
-    bool_f(vars, "amd_vbaq", (bool &) video.amd.amd_vbaq);
-    bool_f(vars, "amd_enforce_hrd", (bool &) video.amd.amd_enforce_hrd);
+    bool_f(vars, "amd_preanalysis", (bool &) video.amd.amd_preanalysis);  // AMD预分析
+    bool_f(vars, "amd_vbaq", (bool &) video.amd.amd_vbaq);  // AMD方差自适应量化
+    bool_f(vars, "amd_enforce_hrd", (bool &) video.amd.amd_enforce_hrd);  // AMD强制HRD缓冲
 
-    int_f(vars, "vt_coder", video.vt.vt_coder, vt::coder_from_view);
-    int_f(vars, "vt_software", video.vt.vt_allow_sw, vt::allow_software_from_view);
-    int_f(vars, "vt_software", video.vt.vt_require_sw, vt::force_software_from_view);
-    int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);
+    // === Apple VideoToolbox编码器参数 ===
+    int_f(vars, "vt_coder", video.vt.vt_coder, vt::coder_from_view);  // VT熵编码方式
+    int_f(vars, "vt_software", video.vt.vt_allow_sw, vt::allow_software_from_view);  // 允许软件编码
+    int_f(vars, "vt_software", video.vt.vt_require_sw, vt::force_software_from_view);  // 强制软件编码
+    int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);  // VT实时编码
 
-    bool_f(vars, "vaapi_strict_rc_buffer", video.vaapi.strict_rc_buffer);
+    // === Linux VA-API编码器参数 ===
+    bool_f(vars, "vaapi_strict_rc_buffer", video.vaapi.strict_rc_buffer);  // VA-API严格码率控制缓冲
 
-    string_f(vars, "capture", video.capture);
-    string_f(vars, "encoder", video.encoder);
-    string_f(vars, "adapter_name", video.adapter_name);
-    string_f(vars, "output_name", video.output_name);
+    // === 捕获和编码通用设置 ===
+    string_f(vars, "capture", video.capture);  // 捕获后端名称
+    string_f(vars, "encoder", video.encoder);  // 编码器名称
+    string_f(vars, "adapter_name", video.adapter_name);  // GPU适配器名称
+    string_f(vars, "output_name", video.output_name);  // 显示输出名称
 
     generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
     generic_f(vars, "dd_resolution_option", video.dd.resolution_option, dd::resolution_option_from_view);
@@ -1163,30 +1207,33 @@ namespace config {
       video.dd.wa.hdr_toggle_delay = std::chrono::milliseconds {value};
     }
 
-    int_f(vars, "max_bitrate", video.max_bitrate);
-    double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
+    int_f(vars, "max_bitrate", video.max_bitrate);  // 最大码率限制
+    double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});  // 最低帧率目标
 
-    path_f(vars, "pkey", nvhttp.pkey);
-    path_f(vars, "cert", nvhttp.cert);
-    string_f(vars, "sunshine_name", nvhttp.sunshine_name);
-    path_f(vars, "log_path", config::sunshine.log_file);
-    path_f(vars, "file_state", nvhttp.file_state);
+    // === 证书和安全设置 ===
+    path_f(vars, "pkey", nvhttp.pkey);  // 私钥文件路径
+    path_f(vars, "cert", nvhttp.cert);  // 证书文件路径
+    string_f(vars, "sunshine_name", nvhttp.sunshine_name);  // Sunshine服务名称
+    path_f(vars, "log_path", config::sunshine.log_file);  // 日志文件路径
+    path_f(vars, "file_state", nvhttp.file_state);  // 状态文件路径
 
-    // Must be run after "file_state"
+    // 凭据文件默认与状态文件相同路径
     config::sunshine.credentials_file = config::nvhttp.file_state;
     path_f(vars, "credentials_file", config::sunshine.credentials_file);
 
-    string_f(vars, "external_ip", nvhttp.external_ip);
-    list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
+    string_f(vars, "external_ip", nvhttp.external_ip);  // 外部IP地址（用于NAT穿透）
+    list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);  // 全局预处理命令列表
 
-    string_f(vars, "audio_sink", audio.sink);
-    string_f(vars, "virtual_sink", audio.virtual_sink);
-    bool_f(vars, "stream_audio", audio.stream);
-    bool_f(vars, "install_steam_audio_drivers", audio.install_steam_drivers);
+    // === 音频设置 ===
+    string_f(vars, "audio_sink", audio.sink);  // 音频输出设备
+    string_f(vars, "virtual_sink", audio.virtual_sink);  // 虚拟音频设备
+    bool_f(vars, "stream_audio", audio.stream);  // 是否启用音频流
+    bool_f(vars, "install_steam_audio_drivers", audio.install_steam_drivers);  // 是否安装Steam音频驱动
 
+    // === Web UI访问控制 ===
     string_restricted_f(vars, "origin_web_ui_allowed", nvhttp.origin_web_ui_allowed, {"pc"sv, "lan"sv, "wan"sv});
 
-    // Parse CSRF allowed origins - always include defaults, then append user-configured origins
+    // === CSRF允许的源（始终包含localhost默认值，再追加用户配置的源） ===
     std::vector<std::string> user_csrf_origins;
     string_list_f(vars, "csrf_allowed_origins", user_csrf_origins);
 
@@ -1204,18 +1251,20 @@ namespace config {
       user_csrf_origins.end()
     );
 
+    // === 流媒体设置 ===
     int to = -1;
     int_between_f(vars, "ping_timeout", to, {-1, std::numeric_limits<int>::max()});
     if (to != -1) {
-      stream.ping_timeout = std::chrono::milliseconds(to);
+      stream.ping_timeout = std::chrono::milliseconds(to);  // 客户端心跳超时时间
     }
 
-    int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});
-    int_between_f(vars, "wan_encryption_mode", stream.wan_encryption_mode, {0, 2});
+    int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});  // 局域网加密模式
+    int_between_f(vars, "wan_encryption_mode", stream.wan_encryption_mode, {0, 2});  // 广域网加密模式
 
+    // === 应用程序配置文件 ===
     path_f(vars, "file_apps", stream.file_apps);
 #ifndef __ANDROID__
-    // TODO: Android can possibly support this
+    // 如果应用程序配置文件不存在，从默认模板复制
     if (!fs::exists(stream.file_apps.c_str())) {
       fs::copy_file(SUNSHINE_ASSETS_DIR "/apps.json", stream.file_apps);
       fs::permissions(
@@ -1226,17 +1275,16 @@ namespace config {
     }
 #endif
 
-    int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
+    int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});  // 前向纠错码百分比
 
-    map_int_int_f(vars, "keybindings"s, input.keybindings);
+    // === 输入设置 ===
+    map_int_int_f(vars, "keybindings"s, input.keybindings);  // 键位重映射表
 
-    // This config option will only be used by the UI
-    // When editing in the config file itself, use "keybindings"
+    // 此配置仅用于UI界面，在配置文件中使用"keybindings"
     bool map_rightalt_to_win = false;
     bool_f(vars, "key_rightalt_to_key_win", map_rightalt_to_win);
-
     if (map_rightalt_to_win) {
-      input.keybindings.emplace(0xA5, 0x5B);
+      input.keybindings.emplace(0xA5, 0x5B);  // 将右Alt映射为Win键
     }
 
     to = std::numeric_limits<int>::min();
@@ -1259,41 +1307,46 @@ namespace config {
       input.key_repeat_delay = std::chrono::milliseconds {to};
     }
 
-    string_restricted_f(vars, "gamepad"s, input.gamepad, get_supported_gamepad_options());
-    bool_f(vars, "ds4_back_as_touchpad_click", input.ds4_back_as_touchpad_click);
-    bool_f(vars, "motion_as_ds4", input.motion_as_ds4);
-    bool_f(vars, "touchpad_as_ds4", input.touchpad_as_ds4);
-    bool_f(vars, "ds5_inputtino_randomize_mac", input.ds5_inputtino_randomize_mac);
+    // === 手柄和输入设备设置 ===
+    string_restricted_f(vars, "gamepad"s, input.gamepad, get_supported_gamepad_options());  // 手柄后端类型
+    bool_f(vars, "ds4_back_as_touchpad_click", input.ds4_back_as_touchpad_click);  // DS4 Back键作为触摸板点击
+    bool_f(vars, "motion_as_ds4", input.motion_as_ds4);  // 运动传感器模拟DS4
+    bool_f(vars, "touchpad_as_ds4", input.touchpad_as_ds4);  // 触摸板模拟DS4
+    bool_f(vars, "ds5_inputtino_randomize_mac", input.ds5_inputtino_randomize_mac);  // DS5随机MAC
 
-    bool_f(vars, "mouse", input.mouse);
-    bool_f(vars, "keyboard", input.keyboard);
-    bool_f(vars, "controller", input.controller);
+    bool_f(vars, "mouse", input.mouse);  // 启用鼠标输入
+    bool_f(vars, "keyboard", input.keyboard);  // 启用键盘输入
+    bool_f(vars, "controller", input.controller);  // 启用手柄输入
 
-    bool_f(vars, "always_send_scancodes", input.always_send_scancodes);
+    bool_f(vars, "always_send_scancodes", input.always_send_scancodes);  // 始终发送扫描码
 
-    bool_f(vars, "high_resolution_scrolling", input.high_resolution_scrolling);
-    bool_f(vars, "native_pen_touch", input.native_pen_touch);
+    bool_f(vars, "high_resolution_scrolling", input.high_resolution_scrolling);  // 高分辨率滚动
+    bool_f(vars, "native_pen_touch", input.native_pen_touch);  // 原生触笔/触摸支持
 
-    bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
-    bool_f(vars, "system_tray", sunshine.system_tray);
+    // === 系统设置 ===
+    bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);  // 通知预发布版本
+    bool_f(vars, "system_tray", sunshine.system_tray);  // 显示系统托盘图标
 
+    // === 网络端口设置 ===
     int port = sunshine.port;
+    // 端口范围：最小值需预留HTTPS偏移，最大值需预留RTSP偏移
     int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});
     sunshine.port = (std::uint16_t) port;
 
-    // Now that we have the port, add web UI port-specific origins to CSRF allowed list
-    // Web UI runs on port + 1 (PORT_HTTPS offset is 1 for confighttp)
+    // 现在有了端口，添加Web UI特定端口的CSRF允许源
+    // Web UI运行在 port + 1（HTTPS偏移）
     const unsigned short web_ui_port = sunshine.port + 1;
     sunshine.csrf_allowed_origins.push_back(std::format("https://localhost:{}", web_ui_port));
     sunshine.csrf_allowed_origins.push_back(std::format("https://127.0.0.1:{}", web_ui_port));
     sunshine.csrf_allowed_origins.push_back(std::format("https://[::1]:{}", web_ui_port));
 
-    string_restricted_f(vars, "address_family", sunshine.address_family, {"ipv4"sv, "both"sv});
-    string_f(vars, "bind_address", sunshine.bind_address);
+    // === 网络地址设置 ===
+    string_restricted_f(vars, "address_family", sunshine.address_family, {"ipv4"sv, "both"sv});  // IP协议类型
+    string_f(vars, "bind_address", sunshine.bind_address);  // 绑定地址
 
+    // UPnP端口映射开关
     bool upnp = false;
     bool_f(vars, "upnp"s, upnp);
-
     if (upnp) {
       config::sunshine.flags[config::flag::UPNP].flip();
     }
@@ -1364,19 +1417,34 @@ namespace config {
     }
   }
 
+  /**
+   * @brief 解析命令行参数并加载配置文件。
+   * 唤叫顺序：
+   * 1. 解析命令行参数（--help, --creds, --version, 标志位, 配置覆盖）
+   * 2. 创建应用数据目录和默认配置文件
+   * 3. 读取配置文件并合并命令行覆盖
+   * 4. 调用apply_config()应用所有配置
+   * 5. Windows平台：处理快捷方式启动和服务管理
+   * @return 0成功, 1终止（不启动）, -1错误
+   */
+  /**
+   * @brief 程序配置解析入口：解析命令行参数和配置文件
+   * 处理子命令、标志位、配置文件路径和配置项覆盖
+   */
   int parse(int argc, char *argv[]) {
-    std::unordered_map<std::string, std::string> cmd_vars;
+    std::unordered_map<std::string, std::string> cmd_vars;  // 命令行配置覆盖
 #ifdef _WIN32
-    bool shortcut_launch = false;
-    bool service_admin_launch = false;
+    bool shortcut_launch = false;      // 是否从开始菜单快捷方式启动
+    bool service_admin_launch = false;  // 是否以管理员身份启动服务
 #endif
 
+    // 遍历命令行参数
     for (auto x = 1; x < argc; ++x) {
       auto line = argv[x];
 
       if (line == "--help"sv) {
         logging::print_help(*argv);
-        return 1;
+        return 1;  // 打印帮助后退出
       }
 #ifdef _WIN32
       else if (line == "--shortcut"sv) {
@@ -1387,22 +1455,23 @@ namespace config {
 #endif
       else if (*line == '-') {
         if (*(line + 1) == '-') {
+          // 双破折号参数: 作为子命令处理（如 --creds, --version）
           sunshine.cmd.name = line + 2;
           sunshine.cmd.argc = argc - x - 1;
           sunshine.cmd.argv = argv + x + 1;
-
           break;
         }
+        // 单破折号: 应用标志位（如 -0, -1, -2, -p）
         if (apply_flags(line + 1)) {
           logging::print_help(*argv);
           return -1;
         }
       } else {
+        // 无破折号参数: 可能是配置文件路径或 key=value 配置覆盖
         auto line_end = line + strlen(line);
-
         auto pos = std::find(line, line_end, '=');
         if (pos == line_end) {
-          sunshine.config_file = line;
+          sunshine.config_file = line;  // 没有'='，视为配置文件路径
         } else {
           TUPLE_EL(var, 1, parse_option(line, line_end));
           if (!var) {
@@ -1424,24 +1493,24 @@ namespace config {
 
     bool config_loaded = false;
     try {
-      // Create appdata folder if it does not exist
+      // 创建应用数据目录（如不存在）
       file_handler::make_directory(platf::appdata().string());
 
-      // Create empty config file if it does not exist
+      // 创建空配置文件（如不存在）
       if (!fs::exists(sunshine.config_file)) {
         std::ofstream {sunshine.config_file};
       }
 
-      // Read config file
+      // 读取配置文件并解析为键值对
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
 
+      // 将命令行配置覆盖合并到文件配置中
       for (auto &[name, value] : cmd_vars) {
         vars.insert_or_assign(std::move(name), std::move(value));
       }
 
-      // Apply the config. Note: This will try to create any paths
-      // referenced in the config, so we may receive exceptions if
-      // the path is incorrect or inaccessible.
+      // 应用配置。注意：这会尝试创建配置中引用的路径，
+      // 如果路径不正确或无权访问可能抛出异常
       apply_config(std::move(vars));
       config_loaded = true;
     } catch (const std::filesystem::filesystem_error &err) {
@@ -1451,13 +1520,11 @@ namespace config {
     }
 
 #ifdef _WIN32
-    // UCRT64 raises an access denied exception if launching from the shortcut
-    // as non-admin and the config folder is not yet present; we can defer
-    // so that service instance will do the work instead.
-
+    // Windows特定: UCRT64从快捷方式以非管理员身份启动时，如果配置文件夹不存在
+    // 会抛出拒绝访问异常，此时推迟处理，由服务实例完成工作
     if (!config_loaded && !shortcut_launch) {
       BOOST_LOG(fatal) << "To relaunch Sunshine successfully, use the shortcut in the Start Menu. Do not run Sunshine.exe manually."sv;
-      std::this_thread::sleep_for(10s);
+      std::this_thread::sleep_for(10s);  // 给用户时间阅读错误消息
 #else
     if (!config_loaded) {
 #endif
@@ -1465,20 +1532,15 @@ namespace config {
     }
 
 #ifdef _WIN32
-    // We have to wait until the config is loaded to handle these launches,
-    // because we need to have the correct base port loaded in our config.
-    // Exception: UCRT64 shortcut_launch instances may have no config loaded due to
-    // insufficient permissions to create folder; port defaults will be acceptable.
+    // Windows服务和快捷方式处理（必须在配置加载后，因为需要正确的基础端口号）
     if (service_admin_launch) {
-      // This is a relaunch as admin to start the service
+      // 以管理员身份重新启动以启动Windows服务
       service_ctrl::start_service();
-
-      // Always return 1 to ensure Sunshine doesn't start normally
-      return 1;
+      return 1;  // 始终返回1确保Sunshine不正常启动
     }
     if (shortcut_launch) {
       if (!service_ctrl::is_service_running()) {
-        // If the service isn't running, relaunch ourselves as admin to start it
+        // 服务未运行，以管理员身份重新启动自己来启动服务
         WCHAR executable[MAX_PATH];
         GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
 
@@ -1495,19 +1557,18 @@ namespace config {
           return 1;
         }
 
-        // Wait for the elevated process to finish starting the service
+        // 等待提权进程完成服务启动
         WaitForSingleObject(shell_exec_info.hProcess, INFINITE);
         CloseHandle(shell_exec_info.hProcess);
 
-        // Wait for the UI to be ready for connections
+        // 等待UI就绪接受连接
         service_ctrl::wait_for_ui_ready();
       }
 
-      // Launch the web UI
+      // 打开Web UI界面
       launch_ui();
 
-      // Always return 1 to ensure Sunshine doesn't start normally
-      return 1;
+      return 1;  // 始终返回1确保Sunshine不正常启动
     }
 #endif
 

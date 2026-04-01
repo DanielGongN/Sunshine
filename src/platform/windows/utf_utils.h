@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/utf_utils.h
- * @brief Minimal UTF conversion utilities for Windows tools
+ * @brief Windows UTF字符串转换工具声明。提供UTF-8与Wide字符串的相互转换。
  */
 #pragma once
 

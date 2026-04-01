@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_gamepad.cpp
- * @brief Definitions for inputtino gamepad input handling.
+ * @brief inputtino手柄输入处理实现。包括手柄创建、状态更新、震动反馈等。
  */
 // lib includes
 #include <boost/locale.hpp>

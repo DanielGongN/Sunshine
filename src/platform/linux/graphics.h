@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/graphics.h
- * @brief Declarations for graphics related functions.
+ * @brief Linux图形相关函数声明。包括EGL/OpenGL、DRM、缓冲区管理等。
  */
 #pragma once
 

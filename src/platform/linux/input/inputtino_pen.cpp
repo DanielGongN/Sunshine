@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_pen.cpp
- * @brief Definitions for inputtino pen input handling.
+ * @brief inputtino触笔输入处理实现。包括触笔事件模拟和压感处理。
  */
 // lib includes
 #include <boost/locale.hpp>

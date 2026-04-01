@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/display.h
- * @brief Declarations for the Windows display backend.
+ * @brief Windows显示捕获后端声明。定义DXGI/D3D11显示捕获类、编码设备和硬件加速支持。
  */
 #pragma once
 

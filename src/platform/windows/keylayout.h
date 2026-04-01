@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/keylayout.h
- * @brief Keyboard layout mapping for scancode translation
+ * @brief 键盘布局扫描码映射。定义不同键盘布局的扫描码转换表。
  */
 #pragma once
 

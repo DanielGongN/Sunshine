@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/driver_settings.cpp
- * @brief Definitions for nvidia driver settings.
+ * @brief NVIDIA驱动设置实现。通过NVAPI读写驱动配置文件以调整渲染参数。
  */
 // this include
 #include "driver_settings.h"

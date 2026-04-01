@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/cuda.h
- * @brief Definitions for CUDA implementation.
+ * @brief Linux CUDA实现声明。提供NVIDIA GPU的CUDA显示捕获和编码支持。
  */
 #pragma once
 

@@ -1,22 +1,33 @@
 /**
  * @file src/crypto.cpp
- * @brief Definitions for cryptography functions.
+ * @brief 加密函数的实现
+ * 包含SHA-256哈希、AES-ECB/GCM/CBC加解密、X.509证书操作、RSA签名验证等
  */
-// lib includes
-#include <openssl/pem.h>
-#include <openssl/rsa.h>
+// 第三方库头文件
+#include <openssl/pem.h> // PEM格式证书/密钥解析
+#include <openssl/rsa.h> // RSA算法
 
-// local includes
+// 本地项目头文件
 #include "crypto.h"
 
 namespace crypto {
-  using asn1_string_t = util::safe_ptr<ASN1_STRING, ASN1_STRING_free>;
+  using asn1_string_t = util::safe_ptr<ASN1_STRING, ASN1_STRING_free>; // ASN.1字符串智能指针
 
+  /**
+   * @brief 证书链构造函数，初始化证书验证上下文
+   */
+  /**
+   * @brief 证书链构造函数，初始化证书验证上下文
+   */
   cert_chain_t::cert_chain_t():
       _certs {},
       _cert_ctx {X509_STORE_CTX_new()} {
   }
 
+  /**
+   * @brief 添加可信证书到证书链
+   * 为每个证书创建单独的X509_STORE，用于后续验证
+   */
   void cert_chain_t::add(x509_t &&cert) {
     x509_store_t x509_store {X509_STORE_new()};
 
@@ -24,10 +35,17 @@ namespace crypto {
     _certs.emplace_back(std::make_pair(std::move(cert), std::move(x509_store)));
   }
 
+  /**
+   * @brief 清空所有可信证书
+   */
   void cert_chain_t::clear() {
     _certs.clear();
   }
 
+  /**
+   * @brief OpenSSL证书验证回调：容许过期/未生效证书
+   * 嵌入式设备的时钟可能不准确，因此放宽时间验证
+   */
   static int openssl_verify_cb(int ok, X509_STORE_CTX *ctx) {
     int err_code = X509_STORE_CTX_get_error(ctx);
 
@@ -89,6 +107,9 @@ namespace crypto {
 
   namespace cipher {
 
+    /**
+     * @brief 初始化AES-128-GCM解密上下文
+     */
     static int init_decrypt_gcm(cipher_ctx_t &ctx, aes_t *key, aes_t *iv, bool padding) {
       ctx.reset(EVP_CIPHER_CTX_new());
 
@@ -112,6 +133,9 @@ namespace crypto {
       return 0;
     }
 
+    /**
+     * @brief 初始化AES-128-GCM加密上下文
+     */
     static int init_encrypt_gcm(cipher_ctx_t &ctx, aes_t *key, aes_t *iv, bool padding) {
       ctx.reset(EVP_CIPHER_CTX_new());
 
@@ -132,6 +156,9 @@ namespace crypto {
       return 0;
     }
 
+    /**
+     * @brief 初始化AES-128-CBC加密上下文
+     */
     static int init_encrypt_cbc(cipher_ctx_t &ctx, aes_t *key, aes_t *iv, bool padding) {
       ctx.reset(EVP_CIPHER_CTX_new());
 
@@ -145,6 +172,9 @@ namespace crypto {
       return 0;
     }
 
+    /**
+     * @brief AES-GCM解密：拆分GCM标签和密文，解密并验证完整性
+     */
     int gcm_t::decrypt(const std::string_view &tagged_cipher, std::vector<std::uint8_t> &plaintext, aes_t *iv) {
       if (!decrypt_ctx && init_decrypt_gcm(decrypt_ctx, &key, iv, padding)) {
         return -1;
@@ -221,6 +251,9 @@ namespace crypto {
       return encrypt(plaintext, tagged_cipher, tagged_cipher + tag_size, iv);
     }
 
+    /**
+     * @brief AES-ECB解密
+     */
     int ecb_t::decrypt(const std::string_view &cipher, std::vector<std::uint8_t> &plaintext) {
       auto fg = util::fail_guard([this]() {
         EVP_CIPHER_CTX_reset(decrypt_ctx.get());
@@ -249,6 +282,9 @@ namespace crypto {
       return 0;
     }
 
+    /**
+     * @brief AES-ECB加密
+     */
     int ecb_t::encrypt(const std::string_view &plaintext, std::vector<std::uint8_t> &cipher) {
       auto fg = util::fail_guard([this]() {
         EVP_CIPHER_CTX_reset(encrypt_ctx.get());
@@ -323,6 +359,9 @@ namespace crypto {
 
   }  // namespace cipher
 
+  /**
+   * @brief 从盐值和PIN码生成AES-128密钥（SHA-256截取16字节）
+   */
   aes_t gen_aes_key(const std::array<uint8_t, 16> &salt, const std::string_view &pin) {
     aes_t key(16);
 
@@ -339,12 +378,18 @@ namespace crypto {
     return key;
   }
 
+  /**
+   * @brief SHA-256哈希计算
+   */
   sha256_t hash(const std::string_view &plaintext) {
     sha256_t hsh;
     EVP_Digest(plaintext.data(), plaintext.size(), hsh.data(), nullptr, EVP_sha256(), nullptr);
     return hsh;
   }
 
+  /**
+   * @brief 从PEM格式字符串解析X.509证书对象
+   */
   x509_t x509(const std::string_view &x) {
     bio_t io {BIO_new(BIO_s_mem())};
 
@@ -356,6 +401,9 @@ namespace crypto {
     return p;
   }
 
+  /**
+   * @brief 从PEM格式字符串解析私钥对象
+   */
   pkey_t pkey(const std::string_view &k) {
     bio_t io {BIO_new(BIO_s_mem())};
 
@@ -367,6 +415,9 @@ namespace crypto {
     return p;
   }
 
+  /**
+   * @brief 将X.509证书序列化为PEM格式字符串
+   */
   std::string pem(x509_t &x509) {
     bio_t bio {BIO_new(BIO_s_mem())};
 
@@ -377,6 +428,9 @@ namespace crypto {
     return {mem_ptr->data, mem_ptr->length};
   }
 
+  /**
+   * @brief 将私钥序列化为PEM格式字符串
+   */
   std::string pem(pkey_t &pkey) {
     bio_t bio {BIO_new(BIO_s_mem())};
 
@@ -387,6 +441,9 @@ namespace crypto {
     return {mem_ptr->data, mem_ptr->length};
   }
 
+  /**
+   * @brief 提取X.509证书的签名数据
+   */
   std::string_view signature(const x509_t &x) {
     // X509_ALGOR *_ = nullptr;
 
@@ -396,6 +453,9 @@ namespace crypto {
     return {(const char *) asn1->data, (std::size_t) asn1->length};
   }
 
+  /**
+   * @brief 生成指定字节数的加密安全随机数
+   */
   std::string rand(std::size_t bytes) {
     std::string r;
     r.resize(bytes);
@@ -405,6 +465,9 @@ namespace crypto {
     return r;
   }
 
+  /**
+   * @brief 使用私钥对数据进行数字签名
+   */
   std::vector<uint8_t> sign(const pkey_t &pkey, const std::string_view &data, const EVP_MD *md) {
     md_ctx_t ctx {EVP_MD_CTX_create()};
 
@@ -429,6 +492,9 @@ namespace crypto {
     return digest;
   }
 
+  /**
+   * @brief 生成自签名X.509证书和RSA密钥对，用于TLS/配对
+   */
   creds_t gen_creds(const std::string_view &cn, std::uint32_t key_bits) {
     x509_t x509 {X509_new()};
     pkey_ctx_t ctx {EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr)};
@@ -472,10 +538,16 @@ namespace crypto {
     return {pem(x509), pem(pkey)};
   }
 
+  /**
+   * @brief 使用SHA-256签名
+   */
   std::vector<uint8_t> sign256(const pkey_t &pkey, const std::string_view &data) {
     return sign(pkey, data, EVP_sha256());
   }
 
+  /**
+   * @brief 使用证书公钥验证数字签名
+   */
   bool verify(const x509_t &x509, const std::string_view &data, const std::string_view &signature, const EVP_MD *md) {
     auto pkey = X509_get0_pubkey(x509.get());
 
@@ -496,6 +568,9 @@ namespace crypto {
     return true;
   }
 
+  /**
+   * @brief 使用SHA-256验证签名
+   */
   bool verify256(const x509_t &x509, const std::string_view &data, const std::string_view &signature) {
     return verify(x509, data, signature, EVP_sha256());
   }
@@ -504,6 +579,9 @@ namespace crypto {
     EVP_MD_CTX_destroy(ctx);
   }
 
+  /**
+   * @brief 生成随机字母表字符串（用于盐值等）
+   */
   std::string rand_alphabet(std::size_t bytes, const std::string_view &alphabet) {
     auto value = rand(bytes);
 

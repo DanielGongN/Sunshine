@@ -1,9 +1,9 @@
 /**
  * @file src/platform/macos/av_audio.h
- * @brief Declarations for macOS audio capture with dual input paths.
+ * @brief macOS音频捕获声明（双输入路径）。
  *
- * This header defines the AVAudio class which provides distinct audio capture methods:
- * 1. **Microphone capture** - Uses AVFoundation framework to capture from specific microphone devices
+ * 本头文件定义AVAudio类，提供两种不同的音频捕获方式：
+ * 1. **麦克风捕获** - 使用AVFoundation框架从特定麦克风设备捕获
  * 2. **System-wide audio tap** - Uses Core Audio taps to capture all system audio output (macOS 14.0+)
  *
  * The system-wide audio tap allows capturing audio from all applications and system sounds,

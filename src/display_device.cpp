@@ -1,17 +1,18 @@
 /**
  * @file src/display_device.cpp
- * @brief Definitions for display device handling.
+ * @brief 显示设备管理的实现
+ * 串流时自动调整显示器设置（分辨率、HDR、刷新率），结束后恢复原始状态
  */
-// header include
+// 本文件头文件
 #include "display_device.h"
 
-// lib includes
-#include <boost/algorithm/string.hpp>
-#include <display_device/audio_context_interface.h>
-#include <display_device/file_settings_persistence.h>
-#include <display_device/json.h>
-#include <display_device/retry_scheduler.h>
-#include <display_device/settings_manager_interface.h>
+// 第三方库头文件
+#include <boost/algorithm/string.hpp>                      // 字符串算法
+#include <display_device/audio_context_interface.h>         // 音频上下文接口
+#include <display_device/file_settings_persistence.h>       // 设置持久化
+#include <display_device/json.h>                            // JSON序列化
+#include <display_device/retry_scheduler.h>                 // 重试调度器
+#include <display_device/settings_manager_interface.h>      // 设置管理器接口
 #include <mutex>
 #include <regex>
 
@@ -745,6 +746,9 @@ namespace display_device {
     return std::make_unique<deinit_t>();
   }
 
+  /**
+   * @brief 将输出设备名映射为友好的显示名称
+   */
   std::string map_output_name(const std::string &output_name) {
     std::lock_guard lock {DD_DATA.mutex};
     if (!DD_DATA.sm_instance) {
@@ -757,6 +761,12 @@ namespace display_device {
     });
   }
 
+  /**
+   * @brief 应用显示设备配置更改：解析参数→重映射显示模式→应用分辨率/刷新率/HDR
+   */
+  /**
+   * @brief 解析并应用显示设备配置：分辨率、刷新率、HDR状态
+   */
   void configure_display(const config::video_t &video_config, const rtsp_stream::launch_session_t &session) {
     const auto result {parse_configuration(video_config, session)};
     if (const auto *parsed_config {std::get_if<SingleDisplayConfiguration>(&result)}; parsed_config) {
@@ -790,11 +800,17 @@ namespace display_device {
                                   {.m_sleep_durations = {DEFAULT_RETRY_INTERVAL}});
   }
 
+  /**
+   * @brief 恢复显示设备到原始配置状态
+   */
   void revert_configuration() {
     std::lock_guard lock {DD_DATA.mutex};
     revert_configuration_unlocked(revert_option_e::try_indefinitely_with_delay);
   }
 
+  /**
+   * @brief 重置显示设备持久化状态，停止所有调度器任务
+   */
   bool reset_persistence() {
     std::lock_guard lock {DD_DATA.mutex};
     if (!DD_DATA.sm_instance) {
@@ -810,6 +826,9 @@ namespace display_device {
     });
   }
 
+  /**
+   * @brief 枚举当前可用的显示设备列表
+   */
   EnumeratedDeviceList enumerate_devices() {
     std::lock_guard lock {DD_DATA.mutex};
     if (!DD_DATA.sm_instance) {
@@ -822,6 +841,9 @@ namespace display_device {
     });
   }
 
+  /**
+   * @brief 解析显示配置参数：设备准备、分辨率、刷新率、HDR和模式重映射
+   */
   std::variant<failed_to_parse_tag_t, configuration_disabled_tag_t, SingleDisplayConfiguration> parse_configuration(const config::video_t &video_config, const rtsp_stream::launch_session_t &session) {
     const auto device_prep {parse_device_prep_option(video_config)};
     if (!device_prep) {

@@ -1,22 +1,28 @@
 /**
  * @file src/uuid.h
- * @brief Declarations for UUID generation.
+ * @brief UUID生成的声明
+ * 提供128位通用唯一标识符的生成功能
  */
 #pragma once
 
-// standard includes
 #include <random>
 
 /**
- * @brief UUID utilities.
+ * @brief UUID工具命名空间
  */
 namespace uuid_util {
+  /**
+   * @brief 128位UUID联合体，支持以8/16/32/64位方式访问
+   */
   union uuid_t {
-    std::uint8_t b8[16];
-    std::uint16_t b16[8];
-    std::uint32_t b32[4];
-    std::uint64_t b64[2];
+    std::uint8_t b8[16];    // 16个字节
+    std::uint16_t b16[8];   // 8个16位字
+    std::uint32_t b32[4];   // 4个32位字
+    std::uint64_t b64[2];   // 2个64位字
 
+    /**
+     * @brief 使用随机引擎生成UUID v4
+     */
     static uuid_t generate(std::default_random_engine &engine) {
       std::uniform_int_distribution<std::uint8_t> dist(0, std::numeric_limits<std::uint8_t>::max());
 

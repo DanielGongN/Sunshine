@@ -1,14 +1,15 @@
 /**
  * @file src/video.cpp
- * @brief Definitions for video.
+ * @brief 视频捕获和编码的实现
+ * 屏幕捕获 -> 色彩空间转换 -> 硬件/软件编码(H.264/HEVC/AV1) -> 打包发送
  */
-// standard includes
+// 标准库头文件
 #include <atomic>
 #include <bitset>
 #include <list>
 #include <thread>
 
-// lib includes
+// 第三方库头文件
 #include <boost/pointer_cast.hpp>
 
 extern "C" {
@@ -71,16 +72,17 @@ namespace video {
     }
   }  // namespace
 
+  // === FFmpeg资源释放函数 ===
   void free_ctx(AVCodecContext *ctx) {
-    avcodec_free_context(&ctx);
+    avcodec_free_context(&ctx);  // 释放编码器上下文
   }
 
   void free_frame(AVFrame *frame) {
-    av_frame_free(&frame);
+    av_frame_free(&frame);  // 释放视频帧
   }
 
   void free_buffer(AVBufferRef *ref) {
-    av_buffer_unref(&ref);
+    av_buffer_unref(&ref);  // 释放缓冲区引用
   }
 
   namespace nv {
@@ -123,17 +125,20 @@ namespace video {
   util::Either<avcodec_buffer_t, int> cuda_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *);
   util::Either<avcodec_buffer_t, int> vt_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *);
 
+  /**
+   * @brief 软件编码设备类 - 使用CPU进行色彩空间转换和缩放
+   */
   class avcodec_software_encode_device_t: public platf::avcodec_encode_device_t {
   public:
     int convert(platf::img_t &img) override {
-      // If we need to add aspect ratio padding, we need to scale into an intermediate output buffer
+      // 检查是否需要宽高比填充（黑边），即输出尺寸与缩放后尺寸不同
       bool requires_padding = (sw_frame->width != sws_output_frame->width || sw_frame->height != sws_output_frame->height);
 
-      // Setup the input frame using the caller's img_t
+      // 设置输入帧数据指针：直接引用捕获图像的内存
       sws_input_frame->data[0] = img.data;
       sws_input_frame->linesize[0] = img.row_pitch;
 
-      // Perform color conversion and scaling to the final size
+      // 执行色彩空间转换和缩放（BGR0 -> YUV），如需填充则先缩放到中间缓冲区
       auto status = sws_scale_frame(sws.get(), requires_padding ? sws_output_frame.get() : sw_frame.get(), sws_input_frame.get());
       if (status < 0) {
         char string[AV_ERROR_MAX_STRING_SIZE];
@@ -141,24 +146,24 @@ namespace video {
         return -1;
       }
 
-      // If we require aspect ratio padding, copy the output frame into the final padded frame
+      // 如果需要宽高比填充，将缩放后的图像复制到带黑边的最终帧中
       if (requires_padding) {
         auto fmt_desc = av_pix_fmt_desc_get((AVPixelFormat) sws_output_frame->format);
         auto planes = av_pix_fmt_count_planes((AVPixelFormat) sws_output_frame->format);
+        // 遍历每个YUV平面（Y/U/V），处理色度子采样的偏移
         for (int plane = 0; plane < planes; plane++) {
-          auto shift_h = plane == 0 ? 0 : fmt_desc->log2_chroma_h;
-          auto shift_w = plane == 0 ? 0 : fmt_desc->log2_chroma_w;
+          auto shift_h = plane == 0 ? 0 : fmt_desc->log2_chroma_h;  // 色度垂直子采样
+          auto shift_w = plane == 0 ? 0 : fmt_desc->log2_chroma_w;  // 色度水平子采样
           auto offset = ((offsetW >> shift_w) * fmt_desc->comp[plane].step) + (offsetH >> shift_h) * sw_frame->linesize[plane];
 
-          // Copy line-by-line to preserve leading padding for each row
+          // 逐行复制以保持每行的前导填充（黑边）
           for (int line = 0; line < sws_output_frame->height >> shift_h; line++) {
             memcpy(sw_frame->data[plane] + offset + (line * sw_frame->linesize[plane]), sws_output_frame->data[plane] + (line * sws_output_frame->linesize[plane]), (size_t) (sws_output_frame->width >> shift_w) * fmt_desc->comp[plane].step);
           }
         }
       }
 
-      // If frame is not a software frame, it means we still need to transfer from main memory
-      // to vram memory
+      // 如果目标帧是硬件帧，需要从系统内存（RAM）上传到显存（VRAM）
       if (frame->hw_frames_ctx) {
         auto status = av_hwframe_transfer_data(frame, sw_frame.get(), 0);
         if (status < 0) {
@@ -174,7 +179,7 @@ namespace video {
     int set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx) override {
       this->frame = frame;
 
-      // If it's a hwframe, allocate buffers for hardware
+      // 如果是硬件帧，在GPU上分配帧缓冲区
       if (hw_frames_ctx) {
         hw_frame.reset(frame);
 
@@ -189,13 +194,12 @@ namespace video {
     }
 
     void apply_colorspace() override {
+      // 设置SWS色彩空间转换参数：源空间 -> 目标空间（Rec.601/709/2020）
       auto avcodec_colorspace = avcodec_colorspace_from_sunshine_colorspace(colorspace);
       sws_setColorspaceDetails(sws.get(), sws_getCoefficients(SWS_CS_DEFAULT), 0, sws_getCoefficients(avcodec_colorspace.software_format), avcodec_colorspace.range - 1, 0, 1 << 16, 1 << 16);
     }
 
-    /**
-     * When preserving aspect ratio, ensure that padding is black
-     */
+      // 用于保持宽高比时，预填充黑色背景
     void prefill() {
       auto frame = sw_frame ? sw_frame.get() : this->frame;
       av_frame_get_buffer(frame, 0);
@@ -204,8 +208,11 @@ namespace video {
       av_image_fill_black(frame->data, linesize, (AVPixelFormat) frame->format, frame->color_range, frame->width, frame->height);
     }
 
+    /**
+     * @brief 初始化软件编码设备：创建SWS缩放器，处理宽高比保持和黑边填充
+     */
     int init(int in_width, int in_height, AVFrame *frame, AVPixelFormat format, bool hardware) {
-      // If the device used is hardware, yet the image resides on main memory
+      // 硬件编码但图像在内存中时，需要额外的软件帧用于CPU->GPU传输
       if (hardware) {
         sw_frame.reset(av_frame_alloc());
 
@@ -227,20 +234,23 @@ namespace video {
       out_width = in_width * scalar;
       out_height = in_height * scalar;
 
+      // 输入帧：BGR0格式的捕获图像
       sws_input_frame.reset(av_frame_alloc());
       sws_input_frame->width = in_width;
       sws_input_frame->height = in_height;
       sws_input_frame->format = AV_PIX_FMT_BGR0;
 
+      // 输出帧：缩放后的YUV图像（可能小于最终帧尺寸）
       sws_output_frame.reset(av_frame_alloc());
       sws_output_frame->width = out_width;
       sws_output_frame->height = out_height;
       sws_output_frame->format = format;
 
-      // Result is always positive
+      // 计算宽高比填充的偏移量（两侧均匀分配黑边）
       offsetW = (frame->width - out_width) / 2;
       offsetH = (frame->height - out_height) / 2;
 
+      // 创建SWS缩放上下文，使用Lanczos算法进行高质量缩放
       sws.reset(sws_alloc_context());
       if (!sws) {
         return -1;
@@ -274,35 +284,37 @@ namespace video {
       return 0;
     }
 
-    // Store ownership when frame is hw_frame
-    avcodec_frame_t hw_frame;
+    avcodec_frame_t hw_frame;    // 硬件帧（GPU内存）
+    avcodec_frame_t sw_frame;     // 软件帧（系统内存）
+    avcodec_frame_t sws_input_frame;   // 色彩转换输入帧
+    avcodec_frame_t sws_output_frame;  // 色彩转换输出帧
+    sws_t sws;  // SWS缩放上下文
 
-    avcodec_frame_t sw_frame;
-    avcodec_frame_t sws_input_frame;
-    avcodec_frame_t sws_output_frame;
-    sws_t sws;
-
-    // Offset of input image to output frame in pixels
+    // 输入图像在输出帧中的像素偏移（用于宽高比填充）
     int offsetW;
     int offsetH;
   };
 
+  // === 编码器特性标志位 ===
   enum flag_e : uint32_t {
-    DEFAULT = 0,  ///< Default flags
-    PARALLEL_ENCODING = 1 << 1,  ///< Capture and encoding can run concurrently on separate threads
-    H264_ONLY = 1 << 2,  ///< When HEVC is too heavy
-    LIMITED_GOP_SIZE = 1 << 3,  ///< Some encoders don't like it when you have an infinite GOP_SIZE. e.g. VAAPI
-    SINGLE_SLICE_ONLY = 1 << 4,  ///< Never use multiple slices. Older intel iGPU's ruin it for everyone else
-    CBR_WITH_VBR = 1 << 5,  ///< Use a VBR rate control mode to simulate CBR
-    RELAXED_COMPLIANCE = 1 << 6,  ///< Use FF_COMPLIANCE_UNOFFICIAL compliance mode
-    NO_RC_BUF_LIMIT = 1 << 7,  ///< Don't set rc_buffer_size
-    REF_FRAMES_INVALIDATION = 1 << 8,  ///< Support reference frames invalidation
-    ALWAYS_REPROBE = 1 << 9,  ///< This is an encoder of last resort and we want to aggressively probe for a better one
-    YUV444_SUPPORT = 1 << 10,  ///< Encoder may support 4:4:4 chroma sampling depending on hardware
-    ASYNC_TEARDOWN = 1 << 11,  ///< Encoder supports async teardown on a different thread
-    FIXED_GOP_SIZE = 1 << 12,  ///< Use fixed small GOP size (encoder doesn't support on-demand IDR frames)
-  };
+    DEFAULT = 0,                      ///< 默认标志
+    PARALLEL_ENCODING = 1 << 1,       ///< 捕获和编码可以在不同线程上并行运行
+    H264_ONLY = 1 << 2,               ///< 仅支持H.264（HEVC太重时使用）
+    LIMITED_GOP_SIZE = 1 << 3,         ///< 部分编码器不支持无限GOP（如VAAPI）
+    SINGLE_SLICE_ONLY = 1 << 4,       ///< 禁用多切片（旧版Intel核显问题）
+    CBR_WITH_VBR = 1 << 5,            ///< 用VBR模式模拟CBR
+    RELAXED_COMPLIANCE = 1 << 6,      ///< 使用非官方合规模式
+    NO_RC_BUF_LIMIT = 1 << 7,         ///< 不设置rc_buffer_size
+    REF_FRAMES_INVALIDATION = 1 << 8, ///< 支持参考帧失效
+    ALWAYS_REPROBE = 1 << 9,          ///< 低优先级编码器，每次重新探测
+    YUV444_SUPPORT = 1 << 10,         ///< 可能支持YUV 4:4:4色度采样
+    ASYNC_TEARDOWN = 1 << 11,         ///< 支持异步拆除（避免NVENC挂起）
+    FIXED_GOP_SIZE = 1 << 12,         ///< 固定小GOP（不支持按需IDR帧）
+  };;
 
+  /**
+   * @brief AVCodec编码会话类 - 封装FFmpeg软件/硬件编码器
+   */
   class avcodec_encode_session_t: public encode_session_t {
   public:
     avcodec_encode_session_t() = default;
@@ -316,13 +328,13 @@ namespace video {
     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
 
     ~avcodec_encode_session_t() {
-      // Flush any remaining frames in the encoder
+      // 刷新编码器中的剩余帧
       if (avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
         packet_raw_avcodec pkt;
-        while (avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0);
+        while (avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0);  // 接收并丢弃缓存的包
       }
 
-      // Order matters here because the context relies on the hwdevice still being valid
+      // 释放顺序关键：编码器上下文依赖硬件设备，必须先释放上下文
       avcodec_ctx.reset();
       device.reset();
     }
@@ -380,6 +392,9 @@ namespace video {
     int inject;
   };
 
+  /**
+   * @brief NVENC编码会话类 - 封装NVIDIA硬件编码器
+   */
   class nvenc_encode_session_t: public encode_session_t {
   public:
     nvenc_encode_session_t(std::unique_ptr<platf::nvenc_encode_device_t> encode_device):
@@ -401,16 +416,23 @@ namespace video {
       force_idr = false;
     }
 
+    /**
+     * @brief 失效参考帧范围，失败时回退到强制IDR帧
+     */
     void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
       if (!device || !device->nvenc) {
         return;
       }
 
+      // 如果失效失败，强制下一帧为IDR关键帧
       if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
         force_idr = true;
       }
     }
 
+    /**
+     * @brief 调用NVENC编码一帧，编码后清除IDR强制标志
+     */
     nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index) {
       if (!device || !device->nvenc) {
         return {};
@@ -426,17 +448,18 @@ namespace video {
     bool force_idr = false;
   };
 
+  // === 同步编码会话的上下文和配置结构 ===
   struct sync_session_ctx_t {
-    safe::signal_t *join_event;
-    safe::mail_raw_t::event_t<bool> shutdown_event;
-    safe::mail_raw_t::queue_t<packet_t> packets;
-    safe::mail_raw_t::event_t<bool> idr_events;
-    safe::mail_raw_t::event_t<hdr_info_t> hdr_events;
-    safe::mail_raw_t::event_t<input::touch_port_t> touch_port_events;
+    safe::signal_t *join_event;                                // 线程完成信号
+    safe::mail_raw_t::event_t<bool> shutdown_event;            // 会话关闭事件
+    safe::mail_raw_t::queue_t<packet_t> packets;               // 编码后的数据包队列
+    safe::mail_raw_t::event_t<bool> idr_events;                // IDR帧请求事件
+    safe::mail_raw_t::event_t<hdr_info_t> hdr_events;          // HDR信息更新事件
+    safe::mail_raw_t::event_t<input::touch_port_t> touch_port_events;  // 触摸端口事件
 
-    config_t config;
-    int frame_nr;
-    void *channel_data;
+    config_t config;      // 编码配置
+    int frame_nr;         // 帧计数器
+    void *channel_data;   // 通道数据指针
   };
 
   struct sync_session_t {
@@ -1106,6 +1129,11 @@ namespace video {
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
   std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {};
 
+  // === 显示器重置和刷新 ===
+
+  /**
+   * @brief 重置显示设备，尝试两次初始化，失败时睡眠200ms重试
+   */
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
@@ -1121,11 +1149,8 @@ namespace video {
   }
 
   /**
-   * @brief Update the list of display names before or during a stream.
-   * @details This will attempt to keep `current_display_index` pointing at the same display.
-   * @param dev_type The encoder device type used for display lookup.
-   * @param display_names The list of display names to repopulate.
-   * @param current_display_index The current display index or -1 if not yet known.
+   * @brief 刷新显示器名称列表，保持当前显示器索引指向同一显示器。
+   * 更新流程：记住当前名称 -> 重新枚举 -> 在新列表中查找旧名称 -> 更新索引
    */
   void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
@@ -1174,6 +1199,11 @@ namespace video {
     }
   }
 
+  /**
+   * @brief 异步捕获线程主循环。
+   * 职责：管理显示器生命周期、图像池分配和回收、捕获帧分发给多个编码会话。
+   * 支持显示器切换和重新初始化。
+   */
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -1182,6 +1212,7 @@ namespace video {
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
 
+    // 失败守卫：退出时停止所有捕获上下文和编码会话
     auto fg = util::fail_guard([&]() {
       capture_ctx_queue->stop();
 
@@ -1196,31 +1227,36 @@ namespace video {
 
     auto switch_display_event = mail::man->event<int>(mail::switch_display);
 
-    // Wait for the initial capture context or a request to stop the queue
+    // 等待第一个捕获上下文（编码会话注册）或队列停止
     auto initial_capture_ctx = capture_ctx_queue->pop();
     if (!initial_capture_ctx) {
       return;
     }
     capture_ctxs.emplace_back(std::move(*initial_capture_ctx));
 
-    // Get all the monitor names now, rather than at boot, to
-    // get the most up-to-date list available monitors
+    // 在此时获取显示器名称（而不是启动时），以获取最新的可用显示器列表
     std::vector<std::string> display_names;
     int display_p = -1;
     refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+    // 创建显示设备（屏幕捕获后端）
     auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
     if (!disp) {
       return;
     }
     display_wp = disp;
 
-    constexpr auto capture_buffer_size = 12;
+    // === 图像缓冲池管理 ===
+    constexpr auto capture_buffer_size = 12;  // 最大缓冲池大小
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
 
+    // 图像使用时间戳记录，用于智能回收未使用的图像缓冲区
     std::vector<std::optional<std::chrono::steady_clock::time_point>> imgs_used_timestamps;
-    const std::chrono::seconds trim_timeot = 3s;
+    const std::chrono::seconds trim_timeot = 3s;  // 未使用图像的超时回收时间
+    /**
+     * @brief 图像池修剪函数：根据使用历史和超时时间回收未使用的图像缓冲区
+     */
     auto trim_imgs = [&]() {
-      // count allocated and used within current pool
+      // 统计当前池中已分配和正在使用的图像数量
       size_t allocated_count = 0;
       size_t used_count = 0;
       for (const auto &img : imgs) {
@@ -1232,15 +1268,14 @@ namespace video {
         }
       }
 
-      // remember the timestamp of currently used count
+      // 记录当前使用数量的时间戳
       const auto now = std::chrono::steady_clock::now();
       if (imgs_used_timestamps.size() <= used_count) {
         imgs_used_timestamps.resize(used_count + 1);
       }
       imgs_used_timestamps[used_count] = now;
 
-      // decide whether to trim allocated unused above the currently used count
-      // based on last used timestamp and universal timeout
+      // 根据最后使用时间戳和超时时间决定保留多少缓冲区
       size_t trim_target = used_count;
       for (size_t i = used_count; i < imgs_used_timestamps.size(); i++) {
         if (imgs_used_timestamps[i] && now - *imgs_used_timestamps[i] < trim_timeot) {
@@ -1248,25 +1283,29 @@ namespace video {
         }
       }
 
-      // trim allocated unused above the newly decided trim target
+      // 从后往前回收超出目标的未使用缓冲区（优先回收最旧的）
       if (allocated_count > trim_target) {
         size_t to_trim = allocated_count - trim_target;
-        // prioritize trimming least recently used
+                // prioritize trimming least recently used
         for (auto it = imgs.rbegin(); it != imgs.rend(); it++) {
           auto &img = *it;
           if (img && img.use_count() == 1) {
-            img.reset();
+            img.reset();  // 释放图像缓冲区
             to_trim -= 1;
             if (to_trim == 0) {
               break;
             }
           }
         }
-        // forget timestamps that no longer relevant
+        // 清理不再相关的时间戳记录
         imgs_used_timestamps.resize(trim_target + 1);
       }
     };
 
+    /**
+     * @brief 从图像池中获取空闲图像的回调函数。
+     * 优先复用已分配但未使用的图像，其次分配新图像，池满时等待。
+     */
     auto pull_free_image_callback = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
       img_out.reset();
       while (capture_ctx_queue->running()) {
@@ -1300,21 +1339,23 @@ namespace video {
         }
         if (img_out) {
           // trim allocated but unused portion of the pool based on timeouts
+        // 找到空闲图像后，修剪图像池并重置时间戳
           trim_imgs();
           img_out->frame_timestamp.reset();
           return true;
         } else {
-          // sleep and retry if image pool is full
+          // 图像池已满，睡眠1ms后重试
           std::this_thread::sleep_for(1ms);
         }
       }
       return false;
     };
 
-    // Capture takes place on this thread
+    // 捕获在此线程上进行，设置线程名和关键优先级
     platf::set_thread_name("video::capture");
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
+    // === 主捕获循环 ===
     while (capture_ctx_queue->running()) {
       bool artificial_reinit = false;
 
@@ -1337,10 +1378,12 @@ namespace video {
           return false;
         }
 
+        // 检查是否有新的捕获上下文要添加（新的编码会话）
         while (capture_ctx_queue->peek()) {
           capture_ctxs.emplace_back(std::move(*capture_ctx_queue->pop()));
         }
 
+        // 检查是否有显示器切换请求，需要重新初始化
         if (switch_display_event->peek()) {
           artificial_reinit = true;
           return false;
@@ -1360,21 +1403,17 @@ namespace video {
       switch (status) {
         case platf::capture_e::reinit:
           {
+            // 触发重新初始化事件，通知编码线程暂停
             reinit_event.raise(true);
 
-            // Some classes of images contain references to the display --> display won't delete unless img is deleted
+            // 释放所有图像（可能持有显示设备引用）
             for (auto &img : imgs) {
               img.reset();
             }
 
-            // display_wp is modified in this thread only
-            // Wait for the other shared_ptr's of display to be destroyed.
-            // New displays will only be created in this thread.
+            // 等待其他线程释放显示设备引用，确保安全重置
             while (display_wp->use_count() != 1) {
-              // Free images that weren't consumed by the encoders. These can reference the display and prevent
-              // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
-              // conditions where the encoding loop might free a good frame after reinitializing if we capture
-              // a new frame here before the encoder has finished reinitializing.
+              // 释放编码器未消费的帧，避免在此线程释放以防止竞态条件
               KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
                 if (!capture_ctx->images->running()) {
                   capture_ctx = capture_ctxs.erase(capture_ctx);
@@ -1392,14 +1431,13 @@ namespace video {
             }
 
             while (capture_ctx_queue->running()) {
-              // Release the display before reenumerating displays, since some capture backends
-              // only support a single display session per device/application.
+              // 释放显示设备后再重新枚举，因为某些捕获后端不支持多个会话
               disp.reset();
 
-              // Refresh display names since a display removal might have caused the reinitialization
+              // 刷新显示器列表（可能是显示器断开导致的重初始化）
               refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
 
-              // Process any pending display switch with the new list of displays
+              // 处理挂起的显示器切换请求
               if (switch_display_event->peek()) {
                 display_p = std::clamp(*switch_display_event->pop(), 0, (int) display_names.size() - 1);
               }
@@ -1431,16 +1469,20 @@ namespace video {
     }
   }
 
+  /**
+   * @brief AVCodec编码一帧：发送帧到FFmpeg编码器，接收编码后的数据包。
+   * 处理IDR帧检测、SPS/VPS注入（首帧时）、包分发。
+   */
   int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto &frame = session.device->frame;
-    frame->pts = frame_nr;
+    frame->pts = frame_nr;  // 设置显示时间戳
 
     auto &ctx = session.avcodec_ctx;
 
-    auto &sps = session.sps;
-    auto &vps = session.vps;
+    auto &sps = session.sps;  // 序列参数集
+    auto &vps = session.vps;  // 视频参数集（HEVC专用）
 
-    // send the frame to the encoder
+    // 将帧发送到编码器
     auto ret = avcodec_send_frame(ctx.get(), frame);
     if (ret < 0) {
       char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
@@ -1449,6 +1491,7 @@ namespace video {
       return -1;
     }
 
+    // 循环接收编码后的数据包（一帧可能给多个包）
     while (ret >= 0) {
       auto packet = std::make_unique<packet_raw_avcodec>();
       auto av_packet = packet.get()->av_packet;
@@ -1469,7 +1512,9 @@ namespace video {
       }
 
       if (session.inject) {
+        // 首次编码时提取并替换SPS/VPS参数，确保正确的色彩空间信息
         if (session.inject == 1) {
+          // H.264: 提取SPS
           auto h264 = cbs::make_sps_h264(ctx.get(), av_packet);
 
           sps = std::move(h264.sps);
@@ -1505,6 +1550,9 @@ namespace video {
     return 0;
   }
 
+  /**
+   * @brief NVENC编码一帧：调用NVENC SDK编码帧并封装为数据包
+   */
   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto encoded_frame = session.encode_frame(frame_nr);
     if (encoded_frame.data.empty()) {
@@ -1525,6 +1573,9 @@ namespace video {
     return 0;
   }
 
+  /**
+   * @brief 编码分发函数：根据会话类型调用对应的avcodec或nvenc编码函数
+   */
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
@@ -1535,6 +1586,16 @@ namespace video {
     return -1;
   }
 
+  /**
+   * @brief 创建AVCodec编码会话。
+   * 处理流程：
+   * 1. 查找编码器并验证编解码器支持
+   * 2. 配置AVCodecContext（分辨率、帧率、编码配置文件、色彩空间）
+   * 3. 初始化硬件帧上下文（如适用）
+   * 4. 设置比特率和缓冲区大小
+   * 5. 打开编码器（失败时使用回退选项重试）
+   * 6. 创建帧并附加HDR元数据（如适用）
+   */
   std::unique_ptr<avcodec_encode_session_t> make_avcodec_encode_session(
     platf::display_t *disp,
     const encoder_t &encoder,
@@ -1573,41 +1634,41 @@ namespace video {
       return nullptr;
     }
 
+    // 根据色彩深度和色度采样类型选择像素格式
     auto colorspace = encode_device->colorspace;
-    auto sw_fmt = (colorspace.bit_depth == 8 && config.chromaSamplingType == 0)  ? platform_formats->avcodec_pix_fmt_8bit :
-                  (colorspace.bit_depth == 8 && config.chromaSamplingType == 1)  ? platform_formats->avcodec_pix_fmt_yuv444_8bit :
-                  (colorspace.bit_depth == 10 && config.chromaSamplingType == 0) ? platform_formats->avcodec_pix_fmt_10bit :
-                  (colorspace.bit_depth == 10 && config.chromaSamplingType == 1) ? platform_formats->avcodec_pix_fmt_yuv444_10bit :
+    auto sw_fmt = (colorspace.bit_depth == 8 && config.chromaSamplingType == 0)  ? platform_formats->avcodec_pix_fmt_8bit :     // 8位 YUV420
+                  (colorspace.bit_depth == 8 && config.chromaSamplingType == 1)  ? platform_formats->avcodec_pix_fmt_yuv444_8bit :  // 8位 YUV444
+                  (colorspace.bit_depth == 10 && config.chromaSamplingType == 0) ? platform_formats->avcodec_pix_fmt_10bit :    // 10位 YUV420
+                  (colorspace.bit_depth == 10 && config.chromaSamplingType == 1) ? platform_formats->avcodec_pix_fmt_yuv444_10bit : // 10位 YUV444
                                                                                    AV_PIX_FMT_NONE;
 
-    // Allow up to 1 retry to apply the set of fallback options.
-    //
-    // Note: If we later end up needing multiple sets of
-    // fallback options, we may need to allow more retries
-    // to try applying each set.
+    // 允许一次重试以应用回退配置选项
     avcodec_ctx_t ctx;
     for (int retries = 0; retries < 2; retries++) {
+      // 创建AVCodecContext并设置基本参数
       ctx.reset(avcodec_alloc_context3(codec));
-      ctx->width = config.width;
-      ctx->height = config.height;
-      ctx->time_base = AVRational {1, config.framerate};
-      ctx->framerate = AVRational {config.framerate, 1};
+      ctx->width = config.width;    // 视频宽度
+      ctx->height = config.height;  // 视频高度
+      ctx->time_base = AVRational {1, config.framerate};  // 时间基准
+      ctx->framerate = AVRational {config.framerate, 1};  // 帧率
+      // 支持小数帧率（如119.88fps）
       if (config.framerateX100 > 0) {
         AVRational fps = video::framerateX100_to_rational(config.framerateX100);
         ctx->framerate = fps;
         ctx->time_base = AVRational {fps.den, fps.num};
       }
 
+      // 根据视频格式设置编码配置文件
       switch (config.videoFormat) {
         case 0:
-          // 10-bit h264 encoding is not supported by our streaming protocol
+          // H.264: 不支持10位编码，根据YUV444选择配置文件
           assert(!config.dynamicRange);
           ctx->profile = (config.chromaSamplingType == 1) ? AV_PROFILE_H264_HIGH_444_PREDICTIVE : AV_PROFILE_H264_HIGH;
           break;
 
         case 1:
+          // HEVC: 8位和10位YUV444使用相同的RExt配置文件
           if (config.chromaSamplingType == 1) {
-            // HEVC uses the same RExt profile for both 8 and 10 bit YUV 4:4:4 encoding
             ctx->profile = AV_PROFILE_HEVC_REXT;
           } else {
             ctx->profile = config.dynamicRange ? AV_PROFILE_HEVC_MAIN_10 : AV_PROFILE_HEVC_MAIN;
@@ -1615,20 +1676,18 @@ namespace video {
           break;
 
         case 2:
-          // AV1 supports both 8 and 10 bit encoding with the same Main profile
-          // but YUV 4:4:4 sampling requires High profile
+          // AV1: Main配置支持两种位深，YUV444需要High配置
           ctx->profile = (config.chromaSamplingType == 1) ? AV_PROFILE_AV1_HIGH : AV_PROFILE_AV1_MAIN;
           break;
       }
 
-      // B-frames delay decoder output, so never use them
+      // B帧会延迟解码器输出，因此禁用
       ctx->max_b_frames = 0;
 
-      // Use an infinite GOP length since I-frames are generated on demand
-      // Exception: encoders with FIXED_GOP_SIZE flag don't support on-demand IDR
+      // 设置GOP大小：默认无限GOP，IDR帧按需生成
       if (encoder.flags & FIXED_GOP_SIZE) {
-        // Fixed GOP for encoders that don't support on-demand IDR (e.g. Media Foundation)
-        ctx->gop_size = 120;  // ~2 seconds at 60 FPS - larger to reduce oversized IDR frame frequency
+        // 固定GOP（如Media Foundation不支持按需IDR）
+        ctx->gop_size = 120;  // 约60fps下约2秒
         ctx->keyint_min = 120;
       } else {
         ctx->gop_size = encoder.flags & LIMITED_GOP_SIZE ?
@@ -1637,7 +1696,7 @@ namespace video {
         ctx->keyint_min = std::numeric_limits<int>::max();
       }
 
-      // Some client decoders have limits on the number of reference frames
+      // 部分客户端解码器有参考帧数量限制
       if (config.numRefFrames) {
         if (video_format[encoder_t::REF_FRAMES_RESTRICT]) {
           ctx->refs = config.numRefFrames;
@@ -1646,12 +1705,13 @@ namespace video {
         }
       }
 
-      // We forcefully reset the flags to avoid clash on reuse of AVCodecContext
+      // 强制重置标志位以避免AVCodecContext复用时的冲突
       ctx->flags = 0;
-      ctx->flags |= AV_CODEC_FLAG_CLOSED_GOP | AV_CODEC_FLAG_LOW_DELAY;
+      ctx->flags |= AV_CODEC_FLAG_CLOSED_GOP | AV_CODEC_FLAG_LOW_DELAY;  // 封闭GOP + 低延迟
 
-      ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+      ctx->flags2 |= AV_CODEC_FLAG2_FAST;  // 允许非规范的加速技巧
 
+      // 设置色彩空间参数（Rec.601/709/2020、Range、传输函数）
       auto avcodec_colorspace = avcodec_colorspace_from_sunshine_colorspace(colorspace);
 
       ctx->color_range = avcodec_colorspace.range;
@@ -1659,9 +1719,10 @@ namespace video {
       ctx->color_trc = avcodec_colorspace.transfer_function;
       ctx->colorspace = avcodec_colorspace.matrix;
 
-      // Used by cbs::make_sps_hevc
+      // SPS生成时使用的像素格式
       ctx->sw_pix_fmt = sw_fmt;
 
+      // === 硬件编码初始化 ===
       if (hardware) {
         avcodec_buffer_t encoding_stream_context;
 
@@ -1694,8 +1755,7 @@ namespace video {
           encoding_stream_context = std::move(derived_context);
         }
 
-        // Initialize avcodec hardware frames
-        {
+          // 初始化硬件帧上下文（GPU显存中的帧缓冲区）
           avcodec_buffer_t frame_ref {av_hwframe_ctx_alloc(encoding_stream_context.get())};
 
           auto frame_ctx = (AVHWFramesContext *) frame_ref->data;
@@ -1715,23 +1775,22 @@ namespace video {
           ctx->hw_frames_ctx = av_buffer_ref(frame_ref.get());
         }
 
-        ctx->slices = config.slicesPerFrame;
-      } else /* software */ {
+        ctx->slices = config.slicesPerFrame;  // 硬件编码用客户端请求的切片数
+      } else /* 软件编码 */ {
         ctx->pix_fmt = sw_fmt;
 
-        // Clients will request for the fewest slices per frame to get the
-        // most efficient encode, but we may want to provide more slices than
-        // requested to ensure we have enough parallelism for good performance.
+        // 保证切片数足够以充分利用CPU并行性
         ctx->slices = std::max(config.slicesPerFrame, config::video.min_threads);
       }
 
       if (encoder.flags & SINGLE_SLICE_ONLY) {
-        ctx->slices = 1;
+        ctx->slices = 1;  // 部分编码器不支持多切片
       }
 
-      ctx->thread_type = FF_THREAD_SLICE;
-      ctx->thread_count = ctx->slices;
+      ctx->thread_type = FF_THREAD_SLICE;  // 使用切片级别的多线程
+      ctx->thread_count = ctx->slices;     // 线程数 = 切片数
 
+      // === 应用编码器特定选项 ===
       AVDictionary *options {nullptr};
       auto handle_option = [&options, &config](const encoder_t::option_t &option) {
         std::visit(
@@ -1766,7 +1825,7 @@ namespace video {
         );
       };
 
-      // Apply common options, then format-specific overrides
+      // 应用通用选项，然后是特定格式的覆盖选项
       for (auto &option : video_format.common_options) {
         handle_option(option);
       }
@@ -1784,28 +1843,27 @@ namespace video {
         }
       }
 
+      // 设置比特率：如果配置了最大比特率限制，取较小值
       auto bitrate = ((config::video.max_bitrate > 0) ? std::min(config.bitrate, config::video.max_bitrate) : config.bitrate) * 1000;
       BOOST_LOG(info) << "Streaming bitrate is " << bitrate;
       ctx->rc_max_rate = bitrate;
       ctx->bit_rate = bitrate;
 
       if (encoder.flags & CBR_WITH_VBR) {
-        // Ensure rc_max_bitrate != bit_rate to force VBR mode
+        // 确保rc_max_bitrate != bit_rate以强制VBR模式
         ctx->bit_rate--;
       } else {
-        ctx->rc_min_rate = bitrate;
+        ctx->rc_min_rate = bitrate;  // 使用严格的CBR模式
       }
 
       if (encoder.flags & RELAXED_COMPLIANCE) {
         ctx->strict_std_compliance = FF_COMPLIANCE_UNOFFICIAL;
       }
 
+      // 设置率控缓冲区大小
       if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
         if (!hardware && (ctx->slices > 1 || config.videoFormat == 1)) {
-          // Use a larger rc_buffer_size for software encoding when slices are enabled,
-          // because libx264 can severely degrade quality if the buffer is too small.
-          // libx265 encounters this issue more frequently, so always scale the
-          // buffer by 1.5x for software HEVC encoding.
+          // 软件编码多切片时使用较大的缓冲区，避免libx264/libx265质量严重下降
           ctx->rc_buffer_size = bitrate / ((config.framerate * 10) / 15);
         } else {
           ctx->rc_buffer_size = bitrate / config.framerate;
@@ -1854,7 +1912,7 @@ namespace video {
     frame->colorspace = ctx->colorspace;
     frame->chroma_location = ctx->chroma_sample_location;
 
-    // Attach HDR metadata to the AVFrame
+    // 附加HDR元数据到AVFrame
     if (colorspace_is_hdr(colorspace)) {
       SS_HDR_METADATA hdr_metadata;
       if (disp->get_hdr_metadata(hdr_metadata)) {
@@ -1939,6 +1997,10 @@ namespace video {
     return nullptr;
   }
 
+  /**
+   * @brief 编码主循环：持续从图像队列读取帧、转换格式、编码、发送。
+   * 处理IDR帧请求、参考帧失效、最小帧率保证。
+   */
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -1955,14 +2017,10 @@ namespace video {
       return;
     }
 
-    // As a workaround for NVENC hangs and to generally speed up encoder reinit,
-    // we will complete the encoder teardown in a separate thread if supported.
-    // This will move expensive processing off the encoder thread to allow us
-    // to restart encoding as soon as possible. For cases where the NVENC driver
-    // hang occurs, this thread may probably never exit, but it will allow
-    // streaming to continue without requiring a full restart of Sunshine.
+    // 为避免NVENC挂起和加速编码器重新初始化，在单独线程上完成编码器拆除
     auto fail_guard = util::fail_guard([&encoder, &session] {
       if (encoder.flags & ASYNC_TEARDOWN) {
+        // 异步拆除：将耗时的清理操作移到后台线程
         std::thread encoder_teardown_thread {[session = std::move(session)]() mutable {
           BOOST_LOG(info) << "Starting async encoder teardown";
           session.reset();
@@ -1972,7 +2030,7 @@ namespace video {
       }
     });
 
-    // set max frame time based on client-requested target framerate (or 0.5fps/2000ms for event-driven capture)
+    // 根据客户端目标帧率设置最大帧时间（事件驱动捕获时使用极低最小帧率）
     double def_fps_target = (disp->is_event_driven() ? 1 : config.framerate);
     double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : def_fps_target;
     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
@@ -1984,10 +2042,7 @@ namespace video {
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
 
     {
-      // Load a dummy image into the AVFrame to ensure we have something to encode
-      // even if we timeout waiting on the first frame. This is a relatively large
-      // allocation which can be freed immediately after convert(), so we do this
-      // in a separate scope.
+      // 加载虚拟图像以确保等待第一帧超时时仍有内容可编码
       auto dummy_img = disp->alloc_img();
       if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
         return;
@@ -1995,19 +2050,15 @@ namespace video {
     }
 
     while (true) {
-      // Break out of the encoding loop if any of the following are true:
-      // a) The stream is ending
-      // b) Sunshine is quitting
-      // c) The capture side is waiting to reinit and we've encoded at least one frame
-      //
-      // If we have to reinit before we have received any captured frames, we will encode
-      // the blank dummy frame just to let Moonlight know that we're alive.
+      // 退出编码循环的条件：
+      // a) 流结束  b) Sunshine退出  c) 捕获端等待重新初始化且已编码至少一帧
       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
         break;
       }
 
       bool requested_idr_frame = false;
 
+      // 处理参考帧失效请求（网络丢包后的恢复机制）
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
           session->invalidate_ref_frames(frames->first, frames->second);
@@ -2025,7 +2076,7 @@ namespace video {
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
 
-      // Encode at a minimum FPS to avoid image quality issues with static content
+      // 以最低帧率编码以避免静态内容的图像质量问题
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
           frame_timestamp = img->frame_timestamp;
@@ -2045,12 +2096,15 @@ namespace video {
 
       session->request_normal_frame();
 
-      // While streaming check to see if the mouse is present and enable Mouse Keys to force the cursor to appear
-      // This is useful for KVM switch scenarios where mouse may disappear during streaming
+      // 流式传输时检查鼠标是否存在，启用Mouse Keys强制光标显示（KVM场景）
       platf::enable_mouse_keys();
     }
   }
 
+  /**
+   * @brief 计算触摸端口映射：将显示器坐标转换为客户端坐标。
+   * 处理宽高比计算、偏移量、缩放比例和逻辑分辨率映射。
+   */
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
     float wd = display->width;
     float hd = display->height;
@@ -2096,6 +2150,10 @@ namespace video {
     };
   }
 
+  /**
+   * @brief 创建编码设备：根据配置选择像素格式和色彩空间，
+   * 创建AVCodec或NVENC编码设备实例。
+   */
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
     std::unique_ptr<platf::encode_device_t> result;
 
@@ -2537,6 +2595,15 @@ namespace video {
     return flag;
   }
 
+  /**
+   * @brief 验证编码器是否可用。
+   * 测试流程：
+   * 1. 测试H.264基本可用性（带/不带最大参考帧限制）
+   * 2. 测试HEVC支持（如已启用）
+   * 3. 测试AV1支持（如已启用）
+   * 4. 测试HDR和YUV444支持
+   * 5. 验证VUI参数正确性
+   */
   bool validate_encoder(encoder_t &encoder, bool expect_failure) {
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
@@ -2718,6 +2785,14 @@ namespace video {
     return true;
   }
 
+  /**
+   * @brief 探测并选择最佳编码器。
+   * 策略：
+   * 1. 如果用户指定了编码器，优先使用
+   * 2. 否则查找满足HEVC/AV1要求的编码器
+   * 3. 最后尝试所有剩余编码器，取第一个通过验证的
+   * 编码器优先级：NVENC > QSV > AMF > VAAPI > VideoToolbox > 软件
+   */
   int probe_encoders() {
     if (!allow_encoder_probing()) {
       // Error already logged
@@ -2726,18 +2801,21 @@ namespace video {
 
     auto encoder_list = encoders;
 
-    // If we already have a good encoder, check to see if another probe is required
+    // 如果已有可用编码器且不需要重新探测，直接返回
     if (chosen_encoder && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
       return 0;
     }
 
-    // Restart encoder selection
+    // 重置编码器选择过程
     auto previous_encoder = chosen_encoder;
-    chosen_encoder = nullptr;
-    active_hevc_mode = config::video.hevc_mode;
-    active_av1_mode = config::video.av1_mode;
+    chosen_encoder = nullptr;  // 清除当前选择
+    active_hevc_mode = config::video.hevc_mode;  // 重置HEVC模式
+    active_av1_mode = config::video.av1_mode;    // 重置AV1模式
     last_encoder_probe_supported_ref_frames_invalidation = false;
 
+    /**
+     * @brief 调整编码器约束：如果编码器不支持指定的编解码器，降级为自动选择
+     */
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
       if (active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) {
@@ -2757,8 +2835,8 @@ namespace video {
       }
     };
 
+    // 如果用户指定了编码器名称，优先初始化该编码器
     if (!config::video.encoder.empty()) {
-      // If there is a specific encoder specified, use it if it passes validation
       KITTY_WHILE_LOOP(auto pos = std::begin(encoder_list), pos != std::end(encoder_list), {
         auto encoder = *pos;
 
@@ -3026,6 +3104,7 @@ namespace video {
   void end_capture_sync(capture_thread_sync_ctx_t &ctx) {
   }
 
+    // 套接字类型映射: FFmpeg硬件设备类型 -> Sunshine内存类型
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type) {
     switch (type) {
       case AV_HWDEVICE_TYPE_D3D11VA:
@@ -3045,6 +3124,7 @@ namespace video {
     return platf::mem_type_e::unknown;
   }
 
+    // 像素格式映射: FFmpeg像素格式 -> Sunshine像素格式
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt) {
     switch (fmt) {
       case AV_PIX_FMT_VUYX:

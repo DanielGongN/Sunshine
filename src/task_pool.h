@@ -1,10 +1,11 @@
 /**
  * @file src/task_pool.h
- * @brief Declarations for the task pool system.
+ * @brief 任务池系统的声明
+ * 支持延迟任务、定时任务、异步结果等功能的任务调度器
  */
 #pragma once
 
-// standard includes
+// 标准库头文件
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -15,9 +16,9 @@
 #include <utility>
 #include <vector>
 
-// local includes
-#include "move_by_copy.h"
-#include "utility.h"
+// 本地项目头文件
+#include "move_by_copy.h" // 移动语义工具
+#include "utility.h"      // 通用工具
 
 namespace task_pool_util {
 

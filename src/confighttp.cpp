@@ -1,12 +1,11 @@
 /**
  * @file src/confighttp.cpp
- * @brief Definitions for the Web UI Config HTTP server.
- *
- * @todo Authentication, better handling of routes common to nvhttp, cleanup
+ * @brief Web管理界面HTTP服务器的实现
+ * 提供基于Web的配置管理、应用列表管理、PIN配对等REST API
  */
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
-// standard includes
+// 标准库头文件
 #include <algorithm>
 #include <filesystem>
 #include <format>
@@ -71,14 +70,10 @@ namespace confighttp {
   std::map<std::string, csrf_token_t, std::less<>> csrf_tokens;  // NOSONAR(cpp:S5421) - intentionally mutable global
   std::mutex csrf_tokens_mutex;  // NOSONAR(cpp:S5421) - intentionally mutable global
 
-  // CSRF token configuration
-  constexpr auto CSRF_TOKEN_SIZE = 32;  // 32 bytes = 256 bits
-  constexpr auto CSRF_TOKEN_LIFETIME = std::chrono::hours(1);  // Tokens valid for 1 hour
+  // CSRF令牌配置
+  constexpr auto CSRF_TOKEN_SIZE = 32;  // 32字节 = 256位随机数
+  constexpr auto CSRF_TOKEN_LIFETIME = std::chrono::hours(1);  // 令牌有效期1小时
 
-  /**
-   * @brief Log the request details.
-   * @param request The HTTP request object.
-   */
   void print_req(const req_https_t &request) {
     BOOST_LOG(debug) << "METHOD :: "sv << request->method;
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
@@ -153,10 +148,7 @@ namespace confighttp {
   }
 
   /**
-   * @brief Authenticate the user.
-   * @param response The HTTP response object.
-   * @param request The HTTP request object.
-   * @return True if the user is authenticated, false otherwise.
+   * @brief 身份验证：检查IP白名单、用户名设置、Basic Auth凭据、密码哈希匹配
    */
   bool authenticate(const resp_https_t &response, const req_https_t &request) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
@@ -301,6 +293,9 @@ namespace confighttp {
    * @param client_id A unique identifier for the client (e.g., session ID or username).
    * @return The generated CSRF token.
    */
+  /**
+   * @brief 生成CSRF令牌：使用OpenSSL随机数生成并存储带过期时间的令牌
+   */
   std::string generate_csrf_token(const std::string &client_id) {
     // Generate a cryptographically secure random token
     std::string token = crypto::rand_alphabet(CSRF_TOKEN_SIZE);
@@ -359,6 +354,9 @@ namespace confighttp {
     return true;
   }
 
+  /**
+   * @brief 验证CSRF令牌：检查Origin/Referer头、允许源列表和令牌有效性
+   */
   bool validate_csrf_token(const resp_https_t &response, const req_https_t &request, const std::string &client_id) {
     // Helper function to check if a URL starts with any allowed origin
     auto is_allowed_origin = [](const std::string_view url) {
@@ -514,6 +512,9 @@ namespace confighttp {
    * @param query The path to check.
    * @return True if the path is a child of the base path, false otherwise.
    */
+  /**
+   * @brief 检查路径是否是基础路径的子路径（防止目录遍历攻击）
+   */
   bool isChildPath(fs::path const &base, fs::path const &query) {
     auto relPath = fs::relative(base, query);
     return *(relPath.begin()) != fs::path("..");
@@ -590,6 +591,9 @@ namespace confighttp {
    * @param request The HTTP request object.
    *
    * @api_examples{/api/apps| GET| null}
+   */
+  /**
+   * @brief API: 获取应用程序列表，支持向后兼容的类型转换
    */
   void getApps(const resp_https_t &response, const req_https_t &request) {
     if (!authenticate(response, request)) {
@@ -675,6 +679,9 @@ namespace confighttp {
    * @endcode
    *
    * @api_examples{/api/apps| POST| {"name":"Hello, World!","index":-1}}
+   */
+  /**
+   * @brief API: 保存/更新应用程序，index=-1时创建新应用
    */
   void saveApp(const resp_https_t &response, const req_https_t &request) {
     if (!check_content_type(response, request, "application/json")) {
@@ -927,6 +934,9 @@ namespace confighttp {
    *
    * @api_examples{/api/config| GET| null}
    */
+  /**
+   * @brief API: 获取配置设置，包括平台、版本、音频设备、显示器等信息
+   */
   void getConfig(const resp_https_t &response, const req_https_t &request) {
     if (!authenticate(response, request)) {
       return;
@@ -980,6 +990,9 @@ namespace confighttp {
    * @attention{It is recommended to ONLY save the config settings that differ from the default behavior.}
    *
    * @api_examples{/api/config| POST| {"key":"value"}}
+   */
+  /**
+   * @brief API: 保存配置文件，将键值对写入配置文件
    */
   void saveConfig(const resp_https_t &response, const req_https_t &request) {
     if (!check_content_type(response, request, "application/json")) {
@@ -1188,6 +1201,9 @@ namespace confighttp {
    *
    * @api_examples{/api/password| POST| {"currentUsername":"admin","currentPassword":"admin","newUsername":"admin","newPassword":"admin","confirmNewPassword":"admin"}}
    */
+  /**
+   * @brief API: 更新用户凭据，验证旧密码并生成新的盐值和哈希
+   */
   void savePassword(const resp_https_t &response, const req_https_t &request) {
     if (!check_content_type(response, request, "application/json")) {
       return;
@@ -1265,6 +1281,9 @@ namespace confighttp {
    * @endcode
    *
    * @api_examples{/api/pin| POST| {"pin":"1234","name":"My PC"}}
+   */
+  /**
+   * @brief API: 在配对过程中保存客户端PIN码和设备名称
    */
   void savePin(const resp_https_t &response, const req_https_t &request) {
     if (!check_content_type(response, request, "application/json")) {
@@ -1589,6 +1608,9 @@ namespace confighttp {
    *
    * @api_examples{/api/browse?path=/home/user&type=directory| GET| null}
    */
+  /**
+   * @brief API: 浏览服务器文件系统，支持类型过滤（目录/可执行文件/文件/全部）
+   */
   void browseDirectory(const resp_https_t &response, const req_https_t &request) {
     if (!authenticate(response, request)) {
       return;
@@ -1665,6 +1687,9 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief 启动HTTPS配置服务器：设置所有REST API路由、静态资源、SSL配置
+   */
   void start() {
     platf::set_thread_name("confighttp");
     const auto shutdown_event = mail::man->event<bool>(mail::shutdown);

@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/publish.cpp
- * @brief Definitions for publishing services on macOS.
+ * @brief macOS mDNS服务发布实现。使用DNS-SD API发布Sunshine服务。
  */
 // standard includes
 #include <thread>
@@ -22,6 +22,12 @@ namespace platf::publish {
     struct ServiceRefDeleter {
       typedef DNSServiceRef pointer;  ///< Type of object to be deleted.
 
+      /**
+       * @brief 释放DNS服务引用的自定义删除器。
+       *
+       * 用于在unique_ptr析构时自动释放DNSServiceRef资源，并记录注销日志。
+       * @param serviceRef DNS服务引用。
+       */
       void operator()(pointer serviceRef) {
         DNSServiceRefDeallocate(serviceRef);
         BOOST_LOG(info) << "Deregistered DNS service."sv;
@@ -81,6 +87,12 @@ namespace platf::publish {
     /** @brief Callback that will be invoked when the mDNS service finishes registering our service.
      *  @param errorCode Describes whether the registration was successful.
      */
+    /**
+     * @brief mDNS服务注册回调。
+     *
+     * 当mDNS服务完成注册时调用，根据errorCode判断注册是否成功并记录日志。
+     * @param errorCode 注册结果错误码。
+     */
     void registrationCallback(DNSServiceRef /*serviceRef*/, DNSServiceFlags /*flags*/, DNSServiceErrorType errorCode, const char * /*name*/, const char * /*regtype*/, const char * /*domain*/, void * /*context*/) {
       if (errorCode != kDNSServiceErr_NoError) {
         BOOST_LOG(error) << "Failed to register DNS service: Error "sv << errorCode;
@@ -101,6 +113,12 @@ namespace platf::publish {
    *         which will manage polling for a response from the mDNS service, and then, when
    *         deconstructed, will deregister the service.
    */
+    /**
+     * @brief 启动macOS平台服务发布。
+     *
+     * 连接macOS的mDNS服务并异步注册Sunshine服务，返回管理mDNS轮询和注销的deinit_t对象。
+     * @return 注册失败返回nullptr，成功返回deinit_t智能指针。
+     */
   [[nodiscard]] std::unique_ptr<::platf::deinit_t> start() {
     auto serviceRef = DNSServiceRef {};
     const auto status = DNSServiceRegister(

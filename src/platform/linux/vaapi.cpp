@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/vaapi.cpp
- * @brief Definitions for VA-API hardware accelerated capture.
+ * @brief VA-API硬件加速捕获实现。包括VA显示初始化、硬件帧上下文、编码设备创建等。
  */
 // standard includes
 #include <fcntl.h>
@@ -109,6 +109,9 @@ namespace va {
 
   class va_t: public platf::avcodec_encode_device_t {
   public:
+    /**
+     * @brief 初始化VA-API编码设备：GBM/EGL上下文创建→VA显示初始化→着色器配置
+     */
     int init(int in_width, int in_height, file_t &&render_device) {
       file = std::move(render_device);
 
@@ -508,6 +511,9 @@ namespace va {
     av_freep(&priv);
   }
 
+  /**
+   * @brief 创建FFmpeg VA-API硬件设备上下文（将DRM FD包装为AVBuffer）
+   */
   int vaapi_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *base, AVBufferRef **hw_device_buf) {
     auto va = (va::va_t *) base;
     auto fd = dup(va->file.el);
@@ -585,6 +591,9 @@ namespace va {
     return false;
   }
 
+  /**
+   * @brief 验证DRM设备是否支持VA-API编码（H264/HEVC配置文件查询）
+   */
   bool validate(int fd) {
     va::display_t display {vaGetDisplayDRM(fd)};
     if (!display) {
@@ -621,6 +630,9 @@ namespace va {
     return true;
   }
 
+  /**
+   * @brief 创建VA-API编码设备工厂函数（支持RAM/VRAM两种模式）
+   */
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(int width, int height, file_t &&card, int offset_x, int offset_y, bool vram) {
     if (vram) {
       auto egl = std::make_unique<va::va_vram_t>();

@@ -1,17 +1,19 @@
 /**
  * @file src/nvenc/nvenc_base.cpp
- * @brief Definitions for abstract platform-agnostic base of standalone NVENC encoder.
+ * @brief NVENC编码器平台无关抽象基类实现。
+ *        包括编码器创建（会话打开、编解码器能力查询、编解码格式配置、编码参数设置）、
+ *        编码器销毁、帧编码（输入映射、编码、输出锁定）、参考帧失效(RFI)和版本兼容性处理。
  */
-// this include
+// 本模块头文件
 #include "nvenc_base.h"
 
-// standard includes
-#include <format>
+// 标准库头文件
+#include <format>  // 字符串格式化
 
-// local includes
-#include "src/config.h"
-#include "src/logging.h"
-#include "src/utility.h"
+// 本地头文件
+#include "src/config.h"  // 配置系统
+#include "src/logging.h"  // 日志系统
+#include "src/utility.h"  // 工具函数（fail_guard等）
 
 #define MAKE_NVENC_VER(major, minor) ((major) | ((minor) << 24))
 
@@ -464,6 +466,9 @@ namespace nvenc {
     return true;
   }
 
+  /**
+   * @brief 销毁NVENC编码器：释放输入/输出缓冲区、位流缓冲区和编码器实例
+   */
   void nvenc_base::destroy_encoder() {
     if (output_bitstream) {
       if (nvenc_failed(nvenc->nvEncDestroyBitstreamBuffer(encoder, output_bitstream))) {
@@ -495,6 +500,9 @@ namespace nvenc {
     encoder_params = {};
   }
 
+  /**
+   * @brief 编码一帧：同步输入缓冲→发送编码命令→等待完成→读取编码数据
+   */
   nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
     if (!encoder) {
       return {};
@@ -579,6 +587,9 @@ namespace nvenc {
     return encoded_frame;
   }
 
+  /**
+   * @brief 参考帧失效（RFI）：将指定范围内的参考帧标记为无效
+   */
   bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
     if (!encoder || !encoder_params.rfi) {
       return false;

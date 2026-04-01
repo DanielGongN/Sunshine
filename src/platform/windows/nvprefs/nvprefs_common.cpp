@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/nvprefs_common.cpp
- * @brief Definitions for common nvidia preferences.
+ * @brief NVIDIA偏好设置公共实现。提供共享的工具函数和内部逻辑。
  */
 // this include
 #include "nvprefs_common.h"

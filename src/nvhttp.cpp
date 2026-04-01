@@ -1,11 +1,11 @@
 /**
  * @file src/nvhttp.cpp
- * @brief Definitions for the nvhttp (GameStream) server.
+ * @brief NVIDIA GameStream HTTP服务器的实现
+ * 处理设备配对、应用列表查询、串流会话启动等GameStream API请求
  */
-// macros
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
-// standard includes
+// 标准库头文件
 #include <filesystem>
 #include <format>
 #include <string>
@@ -166,6 +166,9 @@ namespace nvhttp {
     return it->second;
   }
 
+  /**
+   * @brief 保存配对状态：序列化已配对客户端证书列表和服务器标识符到JSON文件
+   */
   void save_state() {
     pt::ptree root;
 
@@ -202,6 +205,9 @@ namespace nvhttp {
     }
   }
 
+  /**
+   * @brief 加载配对状态：从配置文件反序列化已配对客户端证书和服务器标识符
+   */
   void load_state() {
     if (!fs::exists(config::nvhttp.file_state)) {
       BOOST_LOG(info) << "File "sv << config::nvhttp.file_state << " doesn't exist"sv;
@@ -279,6 +285,9 @@ namespace nvhttp {
     }
   }
 
+  /**
+   * @brief 创建启动会话对象：解析客户端参数（分辨率、FPS、加密密钥等）
+   */
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, const args_t &args) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
@@ -547,6 +556,9 @@ namespace nvhttp {
   }
 
   template<class T>
+  /**
+   * @brief GameStream配对协议核心函数：分为4个阶段处理证书交换和挑战验证
+   */
   void pair(std::shared_ptr<safe::queue_t<crypto::x509_t>> &add_cert, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
 
@@ -628,6 +640,9 @@ namespace nvhttp {
     }
   }
 
+  /**
+   * @brief 验证PIN码并完成配对流程的第一阶段
+   */
   bool pin(std::string pin, std::string name) {
     pt::ptree tree;
     if (map_id_sess.empty()) {
@@ -677,6 +692,9 @@ namespace nvhttp {
   }
 
   template<class T>
+  /**
+   * @brief 返回服务器信息：名称、版本、编码器支持、配对状态、MAC地址等
+   */
   void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
 
@@ -769,6 +787,9 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  /**
+   * @brief 获取所有已配对客户端的名称和UUID列表
+   */
   nlohmann::json get_all_clients() {
     nlohmann::json named_cert_nodes = nlohmann::json::array();
     client_t &client = client_root;
@@ -782,6 +803,9 @@ namespace nvhttp {
     return named_cert_nodes;
   }
 
+  /**
+   * @brief 返回应用程序列表（XML格式，包含应用名和ID）
+   */
   void applist(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -810,6 +834,9 @@ namespace nvhttp {
     }
   }
 
+  /**
+   * @brief 启动应用和RTSP会话：验证配对→配置显示器→启动进程→创建流会话
+   */
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -921,6 +948,9 @@ namespace nvhttp {
     revert_display_configuration = false;
   }
 
+  /**
+   * @brief 恢复已运行应用的流：重新配置显示器并创建新流会话
+   */
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -1012,6 +1042,9 @@ namespace nvhttp {
     rtsp_stream::launch_session_raise(launch_session);
   }
 
+  /**
+   * @brief 取消当前串流会话并终止运行中的应用
+   */
   void cancel(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -1037,6 +1070,9 @@ namespace nvhttp {
     display_device::revert_configuration();
   }
 
+  /**
+   * @brief 返回应用图标资源（PNG格式）
+   */
   void appasset(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -1055,6 +1091,12 @@ namespace nvhttp {
     conf_intern.servercert = cert;
   }
 
+  /**
+   * @brief 创建并启动HTTPS和HTTP服务器：设置GameStream协议API路由
+   */
+  /**
+   * @brief 创建并启动HTTPS/HTTP服务器，设置GameStream协议API路由
+   */
   void start() {
     platf::set_thread_name("nvhttp");
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
@@ -1201,6 +1243,9 @@ namespace nvhttp {
     tcp.join();
   }
 
+  /**
+   * @brief 清除所有已配对的客户端证书
+   */
   void erase_all_clients() {
     client_t client;
     client_root = client;
@@ -1208,6 +1253,9 @@ namespace nvhttp {
     save_state();
   }
 
+  /**
+   * @brief 根据UUID取消指定客户端的配对
+   */
   bool unpair_client(const std::string_view uuid) {
     bool removed = false;
     client_t &client = client_root;

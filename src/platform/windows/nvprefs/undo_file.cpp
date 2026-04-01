@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/undo_file.cpp
- * @brief Definitions for the nvidia undo file.
+ * @brief NVIDIA撤销文件实现。读写撤销数据到磁盘文件。
  */
 // local includes
 #include "undo_file.h"

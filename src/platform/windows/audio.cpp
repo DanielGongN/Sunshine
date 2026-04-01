@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/audio.cpp
- * @brief Definitions for Windows audio capture.
+ * @brief Windows音频捕获实现。使用WASAPI进行音频采集和音频设备管理。
  */
 #define INITGUID
 
@@ -276,8 +276,12 @@ namespace platf::audio {
     },
   };
 
+  /**
+   * @brief 创建WASAPI音频客户端：激活设备→获取混音格式→初始化共享模式捕获
+   */
   audio_client_t make_audio_client(device_t &device, const format_t &format) {
     audio_client_t audio_client;
+    // 激活IAudioClient接口（WASAPI核心接口）
     auto status = device->Activate(
       IID_IAudioClient,
       CLSCTX_ALL,
@@ -315,6 +319,10 @@ namespace platf::audio {
                       << ((mixer_waveformat->nSamplesPerSec != 48000) ? "will be resampled to 48000 by Windows"sv : "no resampling needed"sv);
     }
 
+    // 初始化共享模式环回捕获（捕获系统音频输出）
+    // LOOPBACK: 捕获系统播放的音频
+    // EVENTCALLBACK: 基于事件而非轮询
+    // AUTOCONVERTPCM + SRC_DEFAULT_QUALITY: 自动重采样到指定的48kHz
     status = audio_client->Initialize(
       AUDCLNT_SHAREMODE_SHARED,
       AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
@@ -426,13 +434,18 @@ namespace platf::audio {
 
   class mic_wasapi_t: public mic_t {
   public:
+    /**
+     * @brief 从WASAPI缓冲区捕获音频采样：填充输出缓冲区并处理多余采样
+     */
     capture_e sample(std::vector<float> &sample_out) override {
       auto sample_size = sample_out.size();
 
+      // 循环填充采样缓冲区直到有足够的数据
       // Refill the sample buffer if needed
       while (sample_buf_pos - std::begin(sample_buf) < sample_size) {
         auto capture_result = _fill_buffer();
         if (capture_result == capture_e::timeout && continuous_audio) {
+          // 连续音频模式下超时时填充静音
           // Write silence to sample_buf
           std::fill_n(sample_buf_pos, sample_size, 0.0f);
           sample_buf_pos += sample_size;
@@ -441,9 +454,11 @@ namespace platf::audio {
         }
       }
 
+      // 复制采样到输出缓冲区
       // Fill the output buffer with samples
       std::copy_n(std::begin(sample_buf), sample_size, std::begin(sample_out));
 
+      // 将多余采样移到缓冲区前端（避免丢弃）
       // Move any excess samples to the front of the buffer
       std::move(&sample_buf[sample_size], sample_buf_pos, std::begin(sample_buf));
       sample_buf_pos -= sample_size;
@@ -451,6 +466,9 @@ namespace platf::audio {
       return capture_e::ok;
     }
 
+    /**
+     * @brief 初始化WASAPI麦克风捕获：创建事件→激活音频客户端→启动录音
+     */
     int init(std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t channels_out, bool continuous) {
       audio_event.reset(CreateEventA(nullptr, FALSE, FALSE, nullptr));
       if (!audio_event) {
@@ -573,6 +591,9 @@ namespace platf::audio {
     }
 
   private:
+    /**
+     * @brief 从 WASAPI 捕获缓冲区读取数据，检查设备变更并处理音频包
+     */
     capture_e _fill_buffer() {
       HRESULT status;
 
@@ -587,6 +608,7 @@ namespace platf::audio {
         std::uint32_t audio_sample_size;
       } block_aligned;
 
+      // 检查默认音频设备是否已变更
       // Check if the default audio device has changed
       if (endpt_notification.check_default_render_device_changed()) {
         // Invoke the audio_control_t's callback if it wants one
@@ -609,6 +631,7 @@ namespace platf::audio {
           return capture_e::error;
       }
 
+      // 遍历所有可用的音频包
       std::uint32_t packet_size {};
       for (
         status = audio_capture->GetNextPacketSize(&packet_size);
@@ -690,6 +713,9 @@ namespace platf::audio {
 
   class audio_control_t: public ::platf::audio_control_t {
   public:
+    /**
+     * @brief 返回可用音频接收器信息（默认设备+虚拟Steam音箱）
+     */
     std::optional<sink_t> sink_info() override {
       sink_t sink;
 
@@ -854,6 +880,9 @@ namespace platf::audio {
       return std::nullopt;
     }
 
+    /**
+     * @brief 设置默认音频端点：先设置格式，再将其设为所有角色的默认设备
+     */
     int set_sink(const std::string &sink) override {
       auto device_id = set_format(sink);
       if (!device_id) {

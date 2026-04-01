@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/av_img_t.h
- * @brief Declarations for AV image types on macOS.
+ * @brief macOS AV图像类型声明。定义CoreVideo像素缓冲区包装的图像结构。
  */
 #pragma once
 

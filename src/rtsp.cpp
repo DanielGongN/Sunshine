@@ -1,15 +1,16 @@
 /**
  * @file src/rtsp.cpp
- * @brief Definitions for RTSP streaming.
+ * @brief RTSP串流协议的实现
+ * 处理Moonlight客户端的RTSP会话协商（ANNOUNCE/SETUP/PLAY等）
  */
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 extern "C" {
-#include <moonlight-common-c/src/Limelight-internal.h>
-#include <moonlight-common-c/src/Rtsp.h>
+#include <moonlight-common-c/src/Limelight-internal.h> // Moonlight协议内部接口
+#include <moonlight-common-c/src/Rtsp.h>               // RTSP协议定义
 }
 
-// standard includes
+// 标准库头文件
 #include <array>
 #include <cctype>
 #include <format>
@@ -40,6 +41,9 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace rtsp_stream {
+  /**
+   * @brief 释放RTSP消息资源
+   */
   void free_msg(PRTSP_MESSAGE msg) {
     freeMessage(msg);
 
@@ -624,10 +628,16 @@ namespace rtsp_stream {
 
   rtsp_server_t server {};
 
+  /**
+   * @brief 触发新的串流会话启动事件
+   */
   void launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
     server.session_raise(std::move(launch_session));
   }
 
+  /**
+   * @brief 清除指定的启动会话
+   */
   void launch_session_clear(uint32_t launch_session_id) {
     server.session_clear(launch_session_id);
   }
@@ -639,10 +649,16 @@ namespace rtsp_stream {
     return server.session_count();
   }
 
+  /**
+   * @brief 终止所有活动会话
+   */
   void terminate_sessions() {
     server.clear(true);
   }
 
+  /**
+   * @brief 通过TCP发送数据，确保完整发送
+   */
   int send(tcp::socket &sock, const std::string_view &sv) {
     std::size_t bytes_send = 0;
 
@@ -659,6 +675,9 @@ namespace rtsp_stream {
     return 0;
   }
 
+  /**
+   * @brief 发送RTSP响应（支持加密和明文两种模式）
+   */
   void respond(tcp::socket &sock, launch_session_t &session, msg_t &resp) {
     auto payload = std::make_pair(resp->payload, resp->payloadLength);
 
@@ -738,6 +757,9 @@ namespace rtsp_stream {
     respond(sock, session, nullptr, 404, "NOT FOUND", req->sequenceNumber, {});
   }
 
+  /**
+   * @brief 处理RTSP OPTIONS请求：返回支持的RTSP方法列表
+   */
   void cmd_option(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
 
@@ -750,6 +772,9 @@ namespace rtsp_stream {
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 
+  /**
+   * @brief 处理RTSP DESCRIBE请求：生成并返回SDP会话描述（音视频参数）
+   */
   void cmd_describe(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
 
@@ -833,6 +858,9 @@ namespace rtsp_stream {
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, ss.str());
   }
 
+  /**
+   * @brief 处理RTSP SETUP请求：协商传输参数（视频/音频/控制端口）
+   */
   void cmd_setup(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM options[4] {};
 
@@ -892,6 +920,9 @@ namespace rtsp_stream {
     respond(sock, session, &seqn, 200, "OK", req->sequenceNumber, {});
   }
 
+  /**
+   * @brief 处理RTSP ANNOUNCE请求：解析音视频编码参数、分辨率、FPS、加密等
+   */
   void cmd_announce(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
 
@@ -1108,6 +1139,9 @@ namespace rtsp_stream {
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 
+  /**
+   * @brief 处理RTSP PLAY请求：确认会话就绪，开始传输
+   */
   void cmd_play(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
 
@@ -1120,6 +1154,9 @@ namespace rtsp_stream {
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 
+  /**
+   * @brief RTSP服务主循环：绑定端口、注册命令处理器、处理连接直到关闭
+   */
   void start() {
     platf::set_thread_name("rtsp");
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
@@ -1164,6 +1201,9 @@ namespace rtsp_stream {
     rtsp_thread.join();
   }
 
+  /**
+   * @brief 调试输出RTSP消息内容（类型、序号、负载、选项等）
+   */
   void print_msg(PRTSP_MESSAGE msg) {
     std::string_view type = msg->type == TYPE_RESPONSE ? "RESPONSE"sv : "REQUEST"sv;
 

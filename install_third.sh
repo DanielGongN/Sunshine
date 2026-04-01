@@ -6,13 +6,13 @@ pacman -S mingw-w64-x86_64-toolchain \
 # 基础开发库 (Core Libraries)
 pacman -S mingw-w64-x86_64-boost \
           mingw-w64-x86_64-opus \
-          mingw-w64-x86_64-minhook-git \
+          mingw-w64-x86_64-minhook \
           mingw-w64-x86_64-libvpl \
           mingw-w64-x86_64-openssl \
           mingw-w64-x86_64-curl --noconfirm
 
 # 多媒体与串流依赖 (Multimedia & Streaming)
-pacman -S mingw-w64-x86_64-ffmpeg -noconfirm
+pacman -S mingw-w64-x86_64-ffmpeg --noconfirm
 
 # 前端与文档工具 (WebUI & Documentation)
 

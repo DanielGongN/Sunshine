@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/portalgrab.cpp
- * @brief Definitions for XDG portal grab.
+ * @brief XDG Portal屏幕捕获实现。通过D-Bus XDG Desktop Portal API进行屏幕捕获。
  */
 // standard includes
 #include <array>
@@ -215,8 +215,10 @@ namespace portal {
       }
     }
 
+    /**
+     * @brief 初始化D-Bus连接和Portal代理（RemoteDesktop/ScreenCast）
+     */
     int init() {
-      restore_token_t::load();
 
       conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
       if (!conn) {
@@ -1214,6 +1216,9 @@ namespace portal {
 
   class portal_t: public platf::display_t {
   public:
+    /**
+     * @brief 初始化Portal捕获：建立Portal会话→请求捕获源→创建PipeWire流
+     */
     int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
       // calculate frame interval we should capture at
       framerate = config.framerate;

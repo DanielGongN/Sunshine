@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/display_base.cpp
- * @brief Definitions for the Windows display base code.
+ * @brief Windows显示捕获基础代码实现。DXGI输出复制、显示器枚举、GPU检测、光标捕获等。
  */
 // standard includes
 #include <cmath>
@@ -48,31 +48,33 @@ namespace platf::dxgi {
 
   /**
    * DDAPI-specific initialization goes here.
+   * @brief 初始化DXGI桌面复制接口（DDA）：尝试DuplicateOutput1/DuplicateOutput
    */
   int duplication_t::init(display_base_t *display, const ::video::config_t &config) {
     HRESULT status;
 
-    // Capture format will be determined from the first call to AcquireNextFrame()
+    // 捕获格式将在第一次AcquireNextFrame()时确定
     display->capture_format = DXGI_FORMAT_UNKNOWN;
 
     // FIXME: Duplicate output on RX580 in combination with DOOM (2016) --> BSOD
     {
-      // IDXGIOutput5 is optional, but can provide improved performance and wide color support
+      // IDXGIOutput5是可选的，但能提供更好的性能和宽色域支持
       dxgi::output5_t output5 {};
       status = display->output->QueryInterface(IID_IDXGIOutput5, (void **) &output5);
       if (SUCCEEDED(status)) {
-        // Ask the display implementation which formats it supports
+        // 查询显示实现支持的捕获格式列表
         auto supported_formats = display->get_supported_capture_formats();
         if (supported_formats.empty()) {
           BOOST_LOG(warning) << "No compatible capture formats for this encoder"sv;
           return -1;
         }
 
-        // We try this twice, in case we still get an error on reinitialization
+        // 重试两次以应对重新初始化时的竞争条件
         for (int x = 0; x < 2; ++x) {
-          // Ensure we can duplicate the current display
+          // 同步线程桌面，确保当前线程可以访问目标桌面
           syncThreadDesktop();
 
+          // DuplicateOutput1支持指定多种首选格式，驱动会选择最优的
           status = output5->DuplicateOutput1((IUnknown *) display->device.get(), 0, supported_formats.size(), supported_formats.data(), &dup);
           if (SUCCEEDED(status)) {
             break;
@@ -80,6 +82,7 @@ namespace platf::dxgi {
           std::this_thread::sleep_for(200ms);
         }
 
+        // DuplicateOutput1失败时不回退到DuplicateOutput，因为可能正在与模式切换竞争
         // We don't retry with DuplicateOutput() because we can hit this codepath when we're racing
         // with mode changes and we don't want to accidentally fall back to suboptimal capture if
         // we get unlucky and succeed below.
@@ -88,6 +91,7 @@ namespace platf::dxgi {
           return -1;
         }
       } else {
+        // IDXGIOutput5不可用，回退到IDXGIOutput1的DuplicateOutput（不支持格式选择）
         BOOST_LOG(warning) << "IDXGIOutput5 is not supported by your OS. Capture performance may be reduced."sv;
 
         dxgi::output1_t output1 {};
@@ -115,6 +119,7 @@ namespace platf::dxgi {
       }
     }
 
+    // 获取复制接口的描述，记录桌面分辨率、格式、刷新率
     DXGI_OUTDUPL_DESC dup_desc;
     dup->GetDesc(&dup_desc);
 
@@ -136,15 +141,18 @@ namespace platf::dxgi {
   }
 
   capture_e duplication_t::next_frame(DXGI_OUTDUPL_FRAME_INFO &frame_info, std::chrono::milliseconds timeout, resource_t::pointer *res_p) {
+    // 先释放上一帧（DDA要求必须先释放当前帧才能获取下一帧）
     auto capture_status = release_frame();
     if (capture_status != capture_e::ok) {
       return capture_status;
     }
 
+    // 等待并获取下一帧桌面图像
     auto status = dup->AcquireNextFrame(timeout.count(), &frame_info, res_p);
 
     switch (status) {
       case S_OK:
+        // 检测DRM保护内容遮罩（每10秒最多警告一次）
         // ProtectedContentMaskedOut seems to semi-randomly be TRUE or FALSE even when protected content
         // is on screen the whole time, so we can't just print when it changes. Instead we'll keep track
         // of the last time we printed the warning and print another if we haven't printed one recently.
@@ -203,13 +211,17 @@ namespace platf::dxgi {
     release_frame();
   }
 
+  /**
+   * @brief 主捕获循环：帧节奏控制、截图、游标合成、显示器状态监控
+   */
   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
+    // 计算调整后的客户端帧率（尽量匹配显示器刷新率避免帧抖动）
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
-      // Use exactly the requested rate if the client sent an X100 value
+      // 如果客户端发送了精确帧率（X100值）则直接使用
       if (client_frame_rate_strict.Numerator > 0) {
         return client_frame_rate_strict;
       }
-      // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
+      // 显示刷新率非整数但接近请求fps时，微调捕获间隔以减少累积漂移
       if (display_refresh_rate.Denominator > 1) {
         DXGI_RATIONAL candidate = display_refresh_rate;
         if (client_frame_rate % display_refresh_rate_rounded == 0) {
@@ -218,6 +230,7 @@ namespace platf::dxgi {
           candidate.Denominator *= display_refresh_rate_rounded / client_frame_rate;
         }
         double candidate_rate = (double) candidate.Numerator / candidate.Denominator;
+        // 只能降低帧率不能提高，否则客户端会累积帧导致延迟增加
         // Can only decrease requested fps, otherwise client may start accumulating frames and suffer increased latency.
         if (client_frame_rate > candidate_rate && candidate_rate / client_frame_rate > 0.99) {
           BOOST_LOG(info) << "Adjusted capture rate to " << candidate_rate << "fps to better match display";
@@ -229,9 +242,11 @@ namespace platf::dxgi {
     };
 
     DXGI_RATIONAL client_frame_rate_adjusted = adjust_client_frame_rate();
+    // 帧节奏组：用于精确计算每一帧的睡眠目标时间
     std::optional<std::chrono::steady_clock::time_point> frame_pacing_group_start;
     uint32_t frame_pacing_group_frames = 0;
 
+    // 保持显示器唤醒状态，防止捕获期间屏幕休眠导致循环唤醒
     // Keep the display awake during capture. If the display goes to sleep during
     // capture, best case is that capture stops until it powers back on. However,
     // worst case it will trigger us to reinit DD, waking the display back up in
@@ -244,6 +259,7 @@ namespace platf::dxgi {
     sleep_overshoot_logger.reset();
 
     while (true) {
+      // DXGI工厂状态检查：GPU/显示器变化时返回false，需要重新初始化
       // This will return false if the HDR state changes or for any number of other
       // display or GPU changes. We should reinit to examine the updated state of
       // the display subsystem. It is recommended to call this once per frame.
@@ -254,8 +270,11 @@ namespace platf::dxgi {
       platf::capture_e status = capture_e::ok;
       std::shared_ptr<img_t> img_out;
 
+      // === 尝试继续当前帧节奏组 ===
+      // 等待客户端帧间隔后以零超时调用snapshot()，尽量精确对齐帧时序
       // Try to continue frame pacing group, snapshot() is called with zero timeout after waiting for client frame interval
       if (frame_pacing_group_start) {
+        // 基于分数帧率精确计算下一帧的目标时间点（避免浮点累积误差）
         const uint32_t seconds = (uint64_t) frame_pacing_group_frames * client_frame_rate_adjusted.Denominator / client_frame_rate_adjusted.Numerator;
         const uint32_t remainder = (uint64_t) frame_pacing_group_frames * client_frame_rate_adjusted.Denominator % client_frame_rate_adjusted.Numerator;
         const auto sleep_target = *frame_pacing_group_start +
@@ -264,11 +283,12 @@ namespace platf::dxgi {
         const auto sleep_period = sleep_target - std::chrono::steady_clock::now();
 
         if (sleep_period <= 0ns) {
-          // We missed next frame time, invalidating current frame pacing group
+          // 错过了下一帧截止时间，当前帧节奏组失效
           frame_pacing_group_start = std::nullopt;
           frame_pacing_group_frames = 0;
           status = capture_e::timeout;
         } else {
+          // 高精度定时器睡眠到目标时间点
           timer->sleep_for(sleep_period);
           sleep_overshoot_logger.first_point(sleep_target);
           sleep_overshoot_logger.second_point_now_and_log();
@@ -284,11 +304,14 @@ namespace platf::dxgi {
         }
       }
 
+      // === 如必要则启动新的帧节奏组 ===
+      // snapshot()使用200ms超时等待新帧
       // Start new frame pacing group if necessary, snapshot() is called with non-zero timeout
       if (status == capture_e::timeout || (status == capture_e::ok && !frame_pacing_group_start)) {
         status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
 
         if (status == capture_e::ok && img_out) {
+          // 用帧时间戳作为新节奏组的起始点
           frame_pacing_group_start = img_out->frame_timestamp;
 
           if (!frame_pacing_group_start) {
@@ -298,6 +321,10 @@ namespace platf::dxgi {
 
           frame_pacing_group_frames = 1;
         } else if (status == platf::capture_e::timeout) {
+          // === 缓解编码线程的锁饥饿问题 ===
+          // D3D11设备被非公平锁保护，AcquireNextFrame()期间一直持有该锁。
+          // 当无新帧时，捕获线程几乎100%时间占用此锁，可能饥饿编码线程。
+          // 在超时后短暂释放锁，让编码线程有机会访问设备。
           // The D3D11 device is protected by an unfair lock that is held the entire time that
           // IDXGIOutputDuplication::AcquireNextFrame() is running. This is normally harmless,
           // however sometimes the encoding thread needs to interact with our ID3D11Device to
@@ -349,13 +376,11 @@ namespace platf::dxgi {
   }
 
   /**
-   * @brief Tests to determine if the Desktop Duplication API can capture the given output.
-   * @details When testing for enumeration only, we avoid resyncing the thread desktop.
-   * @param adapter The DXGI adapter to use for capture.
-   * @param output The DXGI output to capture.
-   * @param enumeration_only Specifies whether this test is occurring for display enumeration.
+   * @brief 测试DDA是否可用于指定输出
+   * @details 创建D3D11设备并尝试DuplicateOutput。枚举模式下跳过桌面重同步。
    */
   bool test_dxgi_duplication(adapter_t &adapter, output_t &output, bool enumeration_only) {
+    // D3D特性级别列表（从11.1到9.1降级尝试）
     D3D_FEATURE_LEVEL featureLevels[] {
       D3D_FEATURE_LEVEL_11_1,
       D3D_FEATURE_LEVEL_11_0,
@@ -391,10 +416,12 @@ namespace platf::dxgi {
       return false;
     }
 
+    // 检查是否能对此输出使用DDA（重试2次）
     // Check if we can use the Desktop Duplication API on this output
     for (int x = 0; x < 2; ++x) {
       dup_t dup;
 
+      // 枚举模式下不重同步桌面，若无权限则直接返回
       // Only resynchronize the thread desktop when not enumerating displays.
       // During enumeration, the caller will do this only once to ensure
       // a consistent view of available outputs.
@@ -439,10 +466,15 @@ namespace platf::dxgi {
     }
   }
 
+  /**
+   * @brief 初始化显示捕获：枚举GPU适配器→创建D3D11设备→查找目标显示输出→初始化DDA/WGC
+   */
   int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
+    // 仅执行一次的全局初始化
     std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
+      // 设置每监视器DPI感知，确保获取真实分辨率而非缩放值
       DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
 
       typedef BOOL (*User32_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
@@ -458,6 +490,8 @@ namespace platf::dxgi {
       }
 
       {
+        // Hook win32u.dll的GPU偏好查询函数，防欢DXGI重新绑定输出到渲染GPU
+        // 这会破坏DDA捕获（因为DDA需要在输出的真实适配器上工作）
         // We aren't calling MH_Uninitialize(), but that's okay because this hook lasts for the life of the process
         MH_Initialize();
         MH_CreateHookApi(L"win32u.dll", "NtGdiDdDDIGetCachedHybridQueryValue", (void *) NtGdiDdDDIGetCachedHybridQueryValueHook, nullptr);
@@ -465,7 +499,7 @@ namespace platf::dxgi {
       }
     });
 
-    // Get rectangle of full desktop for absolute mouse coordinates
+    // 获取虚拟桌面总尺寸（用于绝对坐标鼠标输入）
     env_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     env_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
@@ -480,6 +514,7 @@ namespace platf::dxgi {
     auto adapter_name = utf_utils::from_utf8(config::video.adapter_name);
     auto output_name = utf_utils::from_utf8(display_name);
 
+    // 遍历所有GPU适配器和其输出，找到匹配的显示器
     adapter_t::pointer adapter_p;
     for (int tries = 0; tries < 2; ++tries) {
       for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
@@ -506,11 +541,13 @@ namespace platf::dxgi {
           if (desc.AttachedToDesktop && test_dxgi_duplication(adapter_tmp, output_tmp, false)) {
             output = std::move(output_tmp);
 
+            // 记录显示器坐标和尺寸
             offset_x = desc.DesktopCoordinates.left;
             offset_y = desc.DesktopCoordinates.top;
             width = desc.DesktopCoordinates.right - offset_x;
             height = desc.DesktopCoordinates.bottom - offset_y;
 
+            // 记录旋转信息，90/270度旋转时宽高互换
             display_rotation = desc.Rotation;
             if (display_rotation == DXGI_MODE_ROTATION_ROTATE90 ||
                 display_rotation == DXGI_MODE_ROTATION_ROTATE270) {
@@ -521,6 +558,7 @@ namespace platf::dxgi {
               height_before_rotation = height;
             }
 
+            // 将显示器偏移转换为从(0,0)开始的绝对坐标
             // left and bottom may be negative, yet absolute mouse coordinates start at 0x0
             // Ensure offset starts at 0x0
             offset_x -= GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -540,6 +578,7 @@ namespace platf::dxgi {
         break;
       }
 
+      // 未找到输出时，尝试唤醒显示器后重试
       // If we made it here without finding an output, try to power on the display and retry.
       if (tries == 0) {
         SetThreadExecutionState(ES_DISPLAY_REQUIRED);
@@ -552,6 +591,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // 为捕获端创建D3D11设备（与编码器设备分离）
     D3D_FEATURE_LEVEL featureLevels[] {
       D3D_FEATURE_LEVEL_11_1,
       D3D_FEATURE_LEVEL_11_0,
@@ -589,6 +629,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // 打印GPU适配器详细信息（名称、厂商ID、显存、特性级别等）
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 
@@ -606,8 +647,10 @@ namespace platf::dxgi {
       << "Offset             : "sv << offset_x << 'x' << offset_y << std::endl
       << "Virtual Desktop    : "sv << env_width << 'x' << env_height;
 
+    // 提升GPU线程优先级（需要管理员权限）
     // Bump up thread priority
     {
+      // 获取进程令牌并启用提升基本优先级权限
       const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
       TOKEN_PRIVILEGES tp;
       HANDLE token;
@@ -628,6 +671,7 @@ namespace platf::dxgi {
 
       HMODULE gdi32 = GetModuleHandleA("GDI32");
       if (gdi32) {
+        // 检查GPU是否启用了硬件加速GPU调度（HAGS）
         auto check_hags = [&](const LUID &adapter) -> bool {
           auto d3dkmt_open_adapter = (PD3DKMTOpenAdapterFromLuid) GetProcAddress(gdi32, "D3DKMTOpenAdapterFromLuid");
           auto d3dkmt_query_adapter_info = (PD3DKMTQueryAdapterInfo) GetProcAddress(gdi32, "D3DKMTQueryAdapterInfo");
@@ -672,6 +716,7 @@ namespace platf::dxgi {
           auto priority = D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME;
           bool hags_enabled = check_hags(adapter_desc.AdapterLuid);
           if (adapter_desc.VendorId == 0x10DE) {
+            // NVIDIA在HAGS开启时使用realtime优先级可能导致编码冻结或驱动崩溃
             // As of 2023.07, NVIDIA driver has unfixed bug(s) where "realtime" can cause unrecoverable encoding freeze or outright driver crash
             // This issue happens more frequently with HAGS, in DX12 games or when VRAM is filled close to max capacity
             // Track OBS to see if they find better workaround or NVIDIA fixes it on their end, they seem to be in communication
@@ -696,12 +741,14 @@ namespace platf::dxgi {
         return -1;
       }
 
+      // 提升捕获端GPU线程优先级（最高7）
       status = dxgi->SetGPUThreadPriority(7);
       if (FAILED(status)) {
         BOOST_LOG(warning) << "Failed to increase capture GPU thread priority. Please run application as administrator for optimal performance.";
       }
     }
 
+    // 设置最大帧延迟为1，减少DXGI内部队列引入的延迟
     // Try to reduce latency
     {
       dxgi::dxgi1_t dxgi {};
@@ -717,6 +764,7 @@ namespace platf::dxgi {
       }
     }
 
+    // 设置客户端帧率（支持普速ficefps和X100精确模式）
     client_frame_rate = config.framerate;
     client_frame_rate_strict = {0, 0};
     if (config.framerateX100 > 0) {
@@ -724,6 +772,7 @@ namespace platf::dxgi {
       client_frame_rate_strict = DXGI_RATIONAL {static_cast<UINT>(fps.num), static_cast<UINT>(fps.den)};
     }
 
+    // 查询IDXGIOutput6获取色彩空间、亮度等HDR相关元数据
     dxgi::output6_t output6 {};
     status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
     if (SUCCEEDED(status)) {
@@ -743,6 +792,7 @@ namespace platf::dxgi {
         << "Max Full Luminance : "sv << desc1.MaxFullFrameLuminance << " nits"sv;
     }
 
+    // 检查高精度定时器是否可用
     if (!timer || !*timer) {
       BOOST_LOG(error) << "Uninitialized high precision timer";
       return -1;
@@ -751,6 +801,9 @@ namespace platf::dxgi {
     return 0;
   }
 
+  /**
+   * @brief 检查显示器是否支持HDR（通过DXGI_OUTPUT_DESC1查询色彩空间）
+   */
   bool display_base_t::is_hdr() {
     dxgi::output6_t output6 {};
 
@@ -766,6 +819,9 @@ namespace platf::dxgi {
     return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
   }
 
+  /**
+   * @brief 获取显示器HDR元数据（主色、白点、亮度范围）
+   */
   bool display_base_t::get_hdr_metadata(SS_HDR_METADATA &metadata) {
     dxgi::output6_t output6 {};
 
@@ -780,6 +836,9 @@ namespace platf::dxgi {
     DXGI_OUTPUT_DESC1 desc1;
     output6->GetDesc1(&desc1);
 
+    // 此接口报告的主色似乎是scRGB(Rec.709)
+    // 我们在scRGB FP16→PQ着色器中已转换为Rec.2020
+    // 为避免混淆客户端，直接报告Rec.2020主色和D65白点
     // The primaries reported here seem to correspond to scRGB (Rec. 709)
     // which we then convert to Rec 2020 in our scRGB FP16 -> PQ shader
     // prior to encoding. It's not clear to me if we're supposed to report
@@ -797,6 +856,7 @@ namespace platf::dxgi {
     desc1.WhitePoint[0] = 0.3127f;
     desc1.WhitePoint[1] = 0.3290f;
 
+    // 主色和白点按CIE 1931坐标缩放50000倍（Moonlight协议要求）
     metadata.displayPrimaries[0].x = desc1.RedPrimary[0] * 50000;
     metadata.displayPrimaries[0].y = desc1.RedPrimary[1] * 50000;
     metadata.displayPrimaries[1].x = desc1.GreenPrimary[0] * 50000;
@@ -808,6 +868,7 @@ namespace platf::dxgi {
     metadata.whitePoint.y = desc1.WhitePoint[1] * 50000;
 
     metadata.maxDisplayLuminance = desc1.MaxLuminance;
+    // minDisplayLuminance缩放10000倍（协议使用0.0001 nit精度）
     metadata.minDisplayLuminance = desc1.MinLuminance * 10000;
 
     // These are content-specific metadata parameters that this interface doesn't give us
@@ -1001,18 +1062,21 @@ namespace platf::dxgi {
 
 namespace platf {
   /**
-   * Pick a display adapter and capture method.
-   * @param hwdevice_type enables possible use of hardware encoder
+   * @brief 根据硬件设备类型和捕获方式选择合适的显示捕获实现
+   * @details 优先尝试DDA（ddx），回退到WGC；同时根据编码类型选择VRAM或RAM路径
    */
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    // 尝试DDA（Desktop Duplication API）捕获
     if (config::video.capture == "ddx" || config::video.capture.empty()) {
       if (hwdevice_type == mem_type_e::dxgi) {
+        // VRAM路径：GPU纹理直接传递给编码器，零拷贝
         auto disp = std::make_shared<dxgi::display_ddup_vram_t>();
 
         if (!disp->init(config, display_name)) {
           return disp;
         }
       } else if (hwdevice_type == mem_type_e::system) {
+        // RAM路径：帧数据读回系统内存，用于软件编码
         auto disp = std::make_shared<dxgi::display_ddup_ram_t>();
 
         if (!disp->init(config, display_name)) {
@@ -1021,6 +1085,7 @@ namespace platf {
       }
     }
 
+    // DDA不可用时尝试WGC（Windows.Graphics.Capture）
     if (config::video.capture == "wgc" || config::video.capture.empty()) {
       if (hwdevice_type == mem_type_e::dxgi) {
         auto disp = std::make_shared<dxgi::display_wgc_vram_t>();
@@ -1037,6 +1102,7 @@ namespace platf {
       }
     }
 
+    // DDA和WGC都失败
     // ddx and wgc failed
     return nullptr;
   }
@@ -1048,6 +1114,8 @@ namespace platf {
 
     BOOST_LOG(debug) << "Detecting monitors..."sv;
 
+    // 在枚举前同步桌面一次，确保所有GPU枚举结果一致
+    // 关键：必须完全成功或完全失败，否则捕获代码可能意外切换显示器
     // We sync the thread desktop once before we start the enumeration process
     // to ensure test_dxgi_duplication() returns consistent results for all GPUs
     // even if the current desktop changes during our enumeration process.
@@ -1109,14 +1177,16 @@ namespace platf {
   }
 
   /**
-   * @brief Returns if GPUs/drivers have changed since the last call to this function.
-   * @return `true` if a change has occurred or if it is unknown whether a change occurred.
+   * @brief 检查GPU/驱动是否发生变化，需要重新枚举编码器
+   * @details 保持DXGI工厂引用以跟踪变化。首次调用总是返回true。
    */
   bool needs_encoder_reenumeration() {
+    // 串行化访问静态DXGI工厂
     // Serialize access to the static DXGI factory
     static std::mutex reenumeration_state_lock;
     auto lg = std::lock_guard(reenumeration_state_lock);
 
+    // 保持DXGI工厂引用，通过IsCurrent()检测GPU/驱动变化
     // Keep a reference to the DXGI factory, which will keep track of changes internally.
     static dxgi::factory1_t factory;
     if (!factory || !factory->IsCurrent()) {

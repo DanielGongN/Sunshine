@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/wayland.h
- * @brief Declarations for Wayland capture.
+ * @brief Wayland显示捕获声明。提供Wayland合成器下的屏幕捕获支持。
  */
 #pragma once
 

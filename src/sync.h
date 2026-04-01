@@ -1,10 +1,10 @@
 /**
  * @file src/sync.h
- * @brief Declarations for synchronization utilities.
+ * @brief 同步工具的声明
+ * 提供线程安全的数据包装器，通过互斥锁保护共享数据
  */
 #pragma once
 
-// standard includes
 #include <array>
 #include <mutex>
 #include <utility>

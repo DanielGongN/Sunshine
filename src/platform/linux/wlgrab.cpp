@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/wlgrab.cpp
- * @brief Definitions for wlgrab capture.
+ * @brief Wayland wlr-screencopy捕获实现。使用wlr-screencopy协议进行屏幕捕获。
  */
 // standard includes
 #include <thread>
@@ -151,6 +151,9 @@ namespace wl {
 
   class wlr_ram_t: public wlr_t {
   public:
+    /**
+     * @brief Wayland RAM捕获主循环：帧节奏控制→截图→OpenGL转换→分发
+     */
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
       auto next_frame = std::chrono::steady_clock::now();
 
@@ -284,6 +287,9 @@ namespace wl {
 
   class wlr_vram_t: public wlr_t {
   public:
+    /**
+     * @brief Wayland VRAM捕获主循环：帧节奏控制→DMA-BUF截图→分发
+     */
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
       auto next_frame = std::chrono::steady_clock::now();
 

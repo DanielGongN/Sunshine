@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino.cpp
- * @brief Definitions for the inputtino Linux input handling.
+ * @brief Linux inputtino输入处理实现。提供基于inputtino库的虚拟输入设备管理。
  */
 // lib includes
 #include <inputtino/input.hpp>

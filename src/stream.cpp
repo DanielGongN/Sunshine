@@ -1,16 +1,17 @@
 /**
  * @file src/stream.cpp
- * @brief Definitions for the streaming protocols.
+ * @brief 串流协议的实现
+ * 处理视频/音频/控制数据的实时传输，包括FEC纠错、加密、QoS等
  */
 
-// standard includes
+// 标准库头文件
 #include <fstream>
 #include <future>
 #include <queue>
 
-// lib includes
-#include <boost/endian/arithmetic.hpp>
-#include <openssl/err.h>
+// 第三方库头文件
+#include <boost/endian/arithmetic.hpp> // 字节序转换
+#include <openssl/err.h>                // OpenSSL错误处理
 
 extern "C" {
   // clang-format off
@@ -245,8 +246,7 @@ namespace stream {
   using message_queue_t = std::shared_ptr<safe::queue_t<std::pair<udp::endpoint, std::string>>>;
   using message_queue_queue_t = std::shared_ptr<safe::queue_t<std::tuple<socket_e, av_session_id_t, message_queue_t>>>;
 
-  // return bytes written on success
-  // return -1 on error
+  // 音频编码：如果加密则用CBC加密，否则直接复制
   static inline int encode_audio(bool encrypted, const audio::buffer_t &plaintext, uint8_t *destination, crypto::aes_t &iv, crypto::cipher::cbc_t &cbc) {
     // If encryption isn't enabled
     if (!encrypted) {
@@ -257,6 +257,7 @@ namespace stream {
     return cbc.encrypt(std::string_view {(char *) std::begin(plaintext), plaintext.size()}, destination, &iv);
   }
 
+  // 等待会话状态从SATRTING转变为其他状态
   static inline void while_starting_do_nothing(std::atomic<session::state_e> &state) {
     while (state.load(std::memory_order_acquire) == session::state_e::STARTING) {
       std::this_thread::sleep_for(1ms);
@@ -607,6 +608,10 @@ namespace stream {
     }
   }
 
+  /**
+   * @brief FEC前向纠错编码命名空间。
+   * 使用Reed-Solomon算法生成奇偶校验分片，实现丢包恢复。
+   */
   namespace fec {
     using rs_t = util::safe_ptr<reed_solomon, [](reed_solomon *rs) {
       reed_solomon_release(rs);
@@ -638,6 +643,13 @@ namespace stream {
       }
     };
 
+    /**
+     * @brief FEC编码：将负载分割为数据分片+奇偶校验分片。
+     * 流程：
+     * 1. 计算数据分片数和奇偶分片数（根据纠错百分比）
+     * 2. 将负载分割到分片指针数组，最后一块補零
+     * 3. 调用Reed-Solomon编码生成奇偶分片
+     */
     static fec_t encode(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
       auto payload_size = payload.size();
 
@@ -919,6 +931,10 @@ namespace stream {
     return 0;
   }
 
+  /**
+   * @brief 控制流广播线程：处理控制层消息（输入、IDR请求、参考帧失效、手柄反馈、HDR模式）。
+   * 注册所有控制消息类型的回调处理函数，主循环处理会话超时和进程终止。
+   */
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1173,6 +1189,10 @@ namespace stream {
     server->flush();
   }
 
+  /**
+   * @brief UDP接收线程：将视频/音频UDP包分发到对应的会话队列。
+   * 根据源地址或实测负载匹配会话。
+   */
   void recvThread(broadcast_ctx_t &ctx) {
     std::map<av_session_id_t, message_queue_t> peer_to_video_session;
     std::map<av_session_id_t, message_queue_t> peer_to_audio_session;
@@ -1268,6 +1288,16 @@ namespace stream {
     }
   }
 
+  /**
+   * @brief 视频广播线程：将编码后的视频包分片、FEC编码、加密、送出。
+   * 流程：
+   * 1. 接收编码后的视频包
+   * 2. 应用SPS/VPS替换（IDR帧）
+   * 3. 添加帧头（帧类型、延迟信息）
+   * 4. 分割为FEC块，Reed-Solomon编码
+   * 5. 填充RTP/NV包头、GCM加密（可选）
+   * 6. 批量发送，用速率控制限制带宽
+   */
   void videoBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     auto packets = mail::man->queue<video::packet_t>(mail::video_packets);
@@ -1592,6 +1622,10 @@ namespace stream {
     shutdown_event->raise(true);
   }
 
+  /**
+   * @brief 音频广播线程：将音频数据 CBC加密、RTP封装、发送。
+   * 每RTPA_DATA_SHARDS个包后生成FEC奇偶校验包。
+   */
   void audioBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
@@ -1697,6 +1731,9 @@ namespace stream {
     shutdown_event->raise(true);
   }
 
+  /**
+   * @brief 启动广播上下文：绑定控制/视频/音频端口，启动四个广播线程
+   */
   int start_broadcast(broadcast_ctx_t &ctx) {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     auto protocol = address_family == net::IPV4 ? udp::v4() : udp::v6();
@@ -1764,6 +1801,9 @@ namespace stream {
     return 0;
   }
 
+  /**
+   * @brief 停止广播：停止所有队列和套接字，等待所有线程结束
+   */
   void end_broadcast(broadcast_ctx_t &ctx) {
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
 
@@ -1798,6 +1838,9 @@ namespace stream {
     broadcast_shutdown_event->reset();
   }
 
+  /**
+   * @brief 等待视频/音频PING消息以确认客户端连接，超时返回错误
+   */
   int recv_ping(session_t *session, decltype(broadcast)::ptr_t ref, socket_e type, std::string_view expected_payload, udp::endpoint &peer, std::chrono::milliseconds timeout) {
     auto messages = std::make_shared<message_queue_t::element_type>(30);
     av_session_id_t session_id = std::string {expected_payload};
@@ -1851,6 +1894,9 @@ namespace stream {
     return -1;
   }
 
+  /**
+   * @brief 视频会话线程：等待PING→启用QoS→开始视频捕获编码
+   */
   void videoThread(session_t *session) {
     platf::set_thread_name("session::video");
     auto fg = util::fail_guard([&]() {
@@ -1873,6 +1919,9 @@ namespace stream {
     video::capture(session->mail, session->config.monitor, session);
   }
 
+  /**
+   * @brief 音频会话线程：等待PING→启用QoS→开始音频捕获编码
+   */
   void audioThread(session_t *session) {
     platf::set_thread_name("session::audio");
     auto fg = util::fail_guard([&]() {
@@ -1902,6 +1951,9 @@ namespace stream {
       return session.state.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief 停止会话：原子操作将状态从SRUNNING变为STOPPING，触发关闭事件
+     */
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
       auto expected = state_e::RUNNING;
@@ -1913,6 +1965,10 @@ namespace stream {
       session.shutdown_event->raise(true);
     }
 
+    /**
+     * @brief 等待会话结束：等待视频/音频/控制线程，重置输入，恢复显示配置。
+     * 包含挂起检测：如果10秒内未结束则强制终止（NVENC挂起bug）。
+     */
     void join(session_t &session) {
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
       // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
@@ -1960,6 +2016,9 @@ namespace stream {
       BOOST_LOG(debug) << "Session ended"sv;
     }
 
+    /**
+     * @brief 启动会话：初始化输入、广播引用、启动音视频线程、调用平台回调
+     */
     int start(session_t &session, const std::string &addr_string) {
       session.input = input::alloc(session.mail);
 
@@ -2002,6 +2061,9 @@ namespace stream {
       return 0;
     }
 
+    /**
+     * @brief 分配会话对象：初始化加密密钥、音视频配置、FEC缓冲区、事件队列
+     */
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session) {
       auto session = std::make_shared<session_t>();
 

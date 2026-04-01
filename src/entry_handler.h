@@ -1,135 +1,114 @@
 /**
  * @file entry_handler.h
- * @brief Declarations for entry handling functions.
+ * @brief 入口处理函数的声明
+ * 包含命令行参数处理、程序生命周期管理、服务控制等功能
  */
 #pragma once
 
-// standard includes
-#include <atomic>
-#include <string_view>
+// 标准库头文件
+#include <atomic>      // 原子操作（线程安全的退出码）
+#include <string_view> // 字符串视图
 
-// local includes
-#include "thread_pool.h"
-#include "thread_safe.h"
+// 本地项目头文件
+#include "thread_pool.h" // 线程池
+#include "thread_safe.h" // 线程安全工具
 
 /**
- * @brief Launch the Web UI.
- * @param path Optional path to append to the base URL.
- * @examples
- * launch_ui();
- * launch_ui("/pin");
- * @examples_end
+ * @brief 启动Web管理界面（在默认浏览器中打开）
+ * @param path 可选的URL子路径（如 "/pin" 打开PIN配对页面）
  */
 void launch_ui(const std::optional<std::string> &path = std::nullopt);
 
 /**
- * @brief Functions for handling command line arguments.
+ * @brief 命令行参数处理函数命名空间
+ * 处理子命令：creds（凭证）、help（帮助）、version（版本）等
  */
 namespace args {
   /**
-   * @brief Reset the user credentials.
-   * @param name The name of the program.
-   * @param argc The number of arguments.
-   * @param argv The arguments.
-   * @examples
-   * creds("sunshine", 2, {"new_username", "new_password"});
-   * @examples_end
+   * @brief 重置Web管理界面的用户凭证（用户名和密码）
+   * @param name 程序名称
+   * @param argc 参数数量
+   * @param argv 参数数组（[0]=用户名, [1]=密码）
    */
   int creds(const char *name, int argc, char *argv[]);
 
   /**
-   * @brief Print help to stdout, then exit.
-   * @param name The name of the program.
-   * @examples
-   * help("sunshine");
-   * @examples_end
+   * @brief 打印帮助信息到标准输出
+   * @param name 程序名称
    */
   int help(const char *name);
 
   /**
-   * @brief Print the version to stdout, then exit.
-   * @examples
-   * version();
-   * @examples_end
+   * @brief 打印版本信息到标准输出
    */
   int version();
 
 #ifdef _WIN32
   /**
-   * @brief Restore global NVIDIA control panel settings.
-   * If Sunshine was improperly terminated, this function restores
-   * the global NVIDIA control panel settings to the undo file left
-   * by Sunshine. This function is typically called by the uninstaller.
-   * @examples
-   * restore_nvprefs_undo();
-   * @examples_end
+   * @brief 恢复NVIDIA控制面板全局设置
+   * 当Sunshine异常终止后，从撤销文件恢复NVIDIA设置
+   * 通常由卸载程序调用
    */
   int restore_nvprefs_undo();
 #endif
 }  // namespace args
 
 /**
- * @brief Functions for handling the lifetime of Sunshine.
+ * @brief Sunshine程序生命周期管理命名空间
+ * 提供优雅退出、调试中断等功能
  */
 namespace lifetime {
-  extern char **argv;
-  extern std::atomic_int desired_exit_code;
+  extern char **argv;                      // 命令行参数数组
+  extern std::atomic_int desired_exit_code; // 期望的退出码（原子操作，线程安全）
 
   /**
-   * @brief Terminates Sunshine gracefully with the provided exit code.
-   * @param exit_code The exit code to return from main().
-   * @param async Specifies whether our termination will be non-blocking.
+   * @brief 优雅地终止Sunshine程序
+   * @param exit_code 程序退出码
+   * @param async true=异步非阻塞退出, false=阻塞直到程序实际退出
    */
   void exit_sunshine(int exit_code, bool async);
 
   /**
-   * @brief Breaks into the debugger or terminates Sunshine if no debugger is attached.
+   * @brief 触发调试器断点，若无调试器附加则强制终止程序
    */
   void debug_trap();
 
   /**
-   * @brief Get the argv array passed to main().
+   * @brief 获取传递给main()的命令行参数数组
    */
   char **get_argv();
 }  // namespace lifetime
 
 /**
- * @brief Log the publisher metadata provided from CMake.
+ * @brief 记录发布者元数据（从CMake编译时注入的发布者名称、网站、支持链接等）
  */
 void log_publisher_data();
 
 #ifdef _WIN32
 /**
- * @brief Check if NVIDIA's GameStream software is running.
- * @return `true` if GameStream is enabled, `false` otherwise.
+ * @brief 检测NVIDIA GeForce Experience中的GameStream是否启用
+ * GameStream与Sunshine使用相同端口，启用会导致冲突
+ * @return true=GameStream已启用, false=未启用
  */
 bool is_gamestream_enabled();
 
 /**
- * @brief Namespace for controlling the Sunshine service model on Windows.
+ * @brief Windows服务控制命名空间
+ * 提供Sunshine Windows服务的查询、启动、等待就绪等功能
  */
 namespace service_ctrl {
   /**
-   * @brief Check if the service is running.
-   * @examples
-   * is_service_running();
-   * @examples_end
+   * @brief 检查Sunshine Windows服务是否正在运行
    */
   bool is_service_running();
 
   /**
-   * @brief Start the service and wait for startup to complete.
-   * @examples
-   * start_service();
-   * @examples_end
+   * @brief 启动Sunshine Windows服务并等待启动完成
    */
   bool start_service();
 
   /**
-   * @brief Wait for the UI to be ready after Sunshine startup.
-   * @examples
-   * wait_for_ui_ready();
-   * @examples_end
+   * @brief 等待Web管理界面就绪（通过查询TCP监听端口确认）
    */
   bool wait_for_ui_ready();
 }  // namespace service_ctrl

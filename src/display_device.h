@@ -1,15 +1,17 @@
 /**
  * @file src/display_device.h
- * @brief Declarations for display device handling.
+ * @brief 显示设备管理的声明
+ * 在串流时自动调整显示器分辨率、HDR、刷新率等设置
+ * 串流结束后自动恢复原始设置
  */
 #pragma once
 
-// standard includes
+// 标准库头文件
 #include <filesystem>
 #include <memory>
 
-// lib includes
-#include <display_device/types.h>
+// 第三方库头文件
+#include <display_device/types.h> // 显示设备类型定义
 
 // forward declarations
 namespace platf {
@@ -26,38 +28,24 @@ namespace rtsp_stream {
 
 namespace display_device {
   /**
-   * @brief Initialize the implementation and perform the initial state recovery (if needed).
-   * @param persistence_filepath File location for reading/saving persistent state.
-   * @param video_config User's video related configuration.
-   * @returns A deinit_t instance that performs cleanup when destroyed.
-   *
-   * @examples
-   * const config::video_t &video_config { config::video };
-   * const auto init_guard { init("/my/persitence/file.state", video_config) };
-   * @examples_end
+   * @brief 初始化显示设备管理并执行崩溃恢复（如需要）
+   * @param persistence_filepath 状态持久化文件路径
+   * @param video_config 用户的视频配置
+   * @returns RAII守卫对象，销毁时执行清理
    */
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init(const std::filesystem::path &persistence_filepath, const config::video_t &video_config);
 
   /**
-   * @brief Map the output name to a specific display.
-   * @param output_name The user-configurable output name.
-   * @returns Mapped display name or empty string if the output name could not be mapped.
-   *
-   * @examples
-   * const auto mapped_name_config { map_output_name(config::video.output_name) };
-   * const auto mapped_name_custom { map_output_name("{some-device-id}") };
-   * @examples_end
+   * @brief 将配置中的输出名称映射到实际显示器
+   * @param output_name 用户配置的输出名称
+   * @returns 映射后的显示器名称，映射失败返回空字符串
    */
   [[nodiscard]] std::string map_output_name(const std::string &output_name);
 
   /**
-   * @brief Configure the display device based on the user configuration and the session information.
-   * @note This is a convenience method for calling similar method of a different signature.
-   *
-   * @param video_config User's video related configuration.
-   * @param session Session information.
-   *
-   * @examples
+   * @brief 根据用户配置和会话信息配置显示设备
+   * 包括分辨率、刷新率、HDR等参数调整
+   */
    * const std::shared_ptr<rtsp_stream::launch_session_t> launch_session;
    * const config::video_t &video_config { config::video };
    *

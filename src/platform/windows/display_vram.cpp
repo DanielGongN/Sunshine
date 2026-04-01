@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/display_vram.cpp
- * @brief Definitions for handling video ram.
+ * @brief 显存（VRAM）显示捕获实现。使用D3D11着色器在GPU上直接进行色彩空间转换。
  */
 // standard includes
 #include <cmath>
@@ -387,7 +387,7 @@ namespace platf::dxgi {
   class d3d_base_encode_device final {
   public:
     int convert(platf::img_t &img_base) {
-      // Garbage collect mapped capture images whose weak references have expired
+      // 垃圾回收：清理弱引用已过期的捕获图像上下文
       for (auto it = img_ctx_map.begin(); it != img_ctx_map.end();) {
         if (it->second.img_weak.expired()) {
           it = img_ctx_map.erase(it);
@@ -400,31 +400,35 @@ namespace platf::dxgi {
       if (!img.blank) {
         auto &img_ctx = img_ctx_map[img.id];
 
-        // Open the shared capture texture with our ID3D11Device
+        // 用编码器的D3D设备打开捕获端共享纹理
         if (initialize_image_context(img, img_ctx)) {
           return -1;
         }
 
-        // Acquire encoder mutex to synchronize with capture code
+        // 获取编码器互斥锁，与捕获线程同步访问共享纹理
         auto status = img_ctx.encoder_mutex->AcquireSync(0, INFINITE);
         if (status != S_OK) {
           BOOST_LOG(error) << "Failed to acquire encoder mutex [0x"sv << util::hex(status).to_string_view() << ']';
           return -1;
         }
 
+        // draw: GPU上执行RGB→YUV色彩转换的核心绘制lambda
         auto draw = [&](auto &input, auto &y_or_yuv_viewports, auto &uv_viewport) {
+          // 绑定输入纹理（捕获的RGB帧）到像素着色器资源槽0
           device_ctx->PSSetShaderResources(0, 1, &input);
 
-          // Draw Y/YUV
+          // === 第一步：渲染Y平面（亮度）或完整YUV（打包格式）===
           device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
           device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
+          // HDR（fp16）输入使用专用的感知量化/线性着色器
           device_ctx->PSSetShader(img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
+          // YUV444平面格式需要3个viewport分别渲染Y/U/V平面
           auto viewport_count = (format == DXGI_FORMAT_R16_UINT) ? 3 : 1;
           assert(viewport_count <= y_or_yuv_viewports.size());
           device_ctx->RSSetViewports(viewport_count, y_or_yuv_viewports.data());
-          device_ctx->Draw(3 * viewport_count, 0);  // vertex shader will spread vertices across viewports
+          device_ctx->Draw(3 * viewport_count, 0);  // 顶点着色器将顶点分散到各viewport
 
-          // Draw UV if needed
+          // === 第二步：渲染UV平面（色度），仅NV12/P010半平面格式需要 ===
           if (out_UV_rtv) {
             assert(format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_P010);
             device_ctx->OMSetRenderTargets(1, &out_UV_rtv, nullptr);
@@ -435,7 +439,7 @@ namespace platf::dxgi {
           }
         };
 
-        // Clear render target view(s) once so that the aspect ratio mismatch "bars" appear black
+        // 首次渲染时用黑色填充整个输出区域，使宽高比不匹配的"黑边"正确显示
         if (!rtvs_cleared) {
           auto black = create_black_texture_for_rtv_clear();
           if (black) {
@@ -444,12 +448,13 @@ namespace platf::dxgi {
           rtvs_cleared = true;
         }
 
-        // Draw captured frame
+        // 执行实际的RGB→YUV色彩转换绘制
         draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport);
 
-        // Release encoder mutex to allow capture code to reuse this image
+        // 释放编码器互斥锁，允许捕获线程继续写入此纹理
         img_ctx.encoder_mutex->ReleaseSync(0);
 
+        // 解绑着色器资源，避免后续操作冲突
         ID3D11ShaderResourceView *emptyShaderResourceView = nullptr;
         device_ctx->PSSetShaderResources(0, 1, &emptyShaderResourceView);
       }
@@ -483,7 +488,7 @@ namespace platf::dxgi {
     }
 
     int init_output(ID3D11Texture2D *frame_texture, int width, int height) {
-      // The underlying frame pool owns the texture, so we must reference it for ourselves
+      // 帧池拥有纹理所有权，我们必须自己增加引用计数
       frame_texture->AddRef();
       output_texture.reset(frame_texture);
 
@@ -500,11 +505,13 @@ namespace platf::dxgi {
     return -1; \
   }
 
+      // 是否需要下采样（捕获分辨率 > 编码分辨率）
       const bool downscaling = display->width > width || display->height > height;
 
+      // 根据输出像素格式选择对应的顶点/像素着色器组合
       switch (format) {
         case DXGI_FORMAT_NV12:
-          // Semi-planar 8-bit YUV 4:2:0
+          // NV12: 半平面8位 YUV 4:2:0，Y和UV分开渲染
           create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
           create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
           create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
@@ -520,7 +527,7 @@ namespace platf::dxgi {
           break;
 
         case DXGI_FORMAT_P010:
-          // Semi-planar 16-bit YUV 4:2:0, 10 most significant bits store the value
+          // P010: 半平面16位 YUV 4:2:0，高10位存储值，用于HDR
           create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
           create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
           if (display->is_hdr()) {
@@ -548,7 +555,7 @@ namespace platf::dxgi {
           break;
 
         case DXGI_FORMAT_R16_UINT:
-          // Planar 16-bit YUV 4:4:4, 10 most significant bits store the value
+          // R16_UINT: 平面16位 YUV 4:4:4，高10位存储值，3个平面分别渲染
           create_vertex_shader_helper(convert_yuv444_planar_vs_hlsl, convert_Y_or_YUV_vs);
           create_pixel_shader_helper(convert_yuv444_planar_ps_hlsl, convert_Y_or_YUV_ps);
           if (display->is_hdr()) {
@@ -559,14 +566,14 @@ namespace platf::dxgi {
           break;
 
         case DXGI_FORMAT_AYUV:
-          // Packed 8-bit YUV 4:4:4
+          // AYUV: 打包8位 YUV 4:4:4，一次渲染整个YUV
           create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
           create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_hlsl, convert_Y_or_YUV_ps);
           create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
           break;
 
         case DXGI_FORMAT_Y410:
-          // Packed 10-bit YUV 4:4:4
+          // Y410: 打包10位 YUV 4:4:4，一次渲染整个YUV
           create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
           create_pixel_shader_helper(convert_yuv444_packed_y410_ps_hlsl, convert_Y_or_YUV_ps);
           if (display->is_hdr()) {
@@ -590,27 +597,30 @@ namespace platf::dxgi {
       float in_width = display->width;
       float in_height = display->height;
 
-      // Ensure aspect ratio is maintained
+      // 计算等比缩放因子，保持捕获图像的宽高比
       auto scalar = std::fminf(out_width / in_width, out_height / in_height);
       auto out_width_f = in_width * scalar;
       auto out_height_f = in_height * scalar;
 
-      // result is always positive
+      // 计算居中偏移（用于上下/左右黑边填充）
       auto offsetX = (out_width - out_width_f) / 2;
       auto offsetY = (out_height - out_height_f) / 2;
 
-      out_Y_or_YUV_viewports[0] = {offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f};  // Y plane
-      out_Y_or_YUV_viewports[1] = out_Y_or_YUV_viewports[0];  // U plane
+      // 设置Y/U/V平面viewport（平面格式时3个，平面纵向排列）
+      out_Y_or_YUV_viewports[0] = {offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f};  // Y平面
+      out_Y_or_YUV_viewports[1] = out_Y_or_YUV_viewports[0];  // U平面
       out_Y_or_YUV_viewports[1].TopLeftY += out_height;
-      out_Y_or_YUV_viewports[2] = out_Y_or_YUV_viewports[1];  // V plane
+      out_Y_or_YUV_viewports[2] = out_Y_or_YUV_viewports[1];  // V平面
       out_Y_or_YUV_viewports[2].TopLeftY += out_height;
 
-      out_Y_or_YUV_viewports_for_clear[0] = {0, 0, (float) out_width, (float) out_height, 0.0f, 1.0f};  // Y plane
-      out_Y_or_YUV_viewports_for_clear[1] = out_Y_or_YUV_viewports_for_clear[0];  // U plane
+      // 用于首次清屏的全尺viewport（填充黑边）
+      out_Y_or_YUV_viewports_for_clear[0] = {0, 0, (float) out_width, (float) out_height, 0.0f, 1.0f};  // Y平面
+      out_Y_or_YUV_viewports_for_clear[1] = out_Y_or_YUV_viewports_for_clear[0];  // U平面
       out_Y_or_YUV_viewports_for_clear[1].TopLeftY += out_height;
-      out_Y_or_YUV_viewports_for_clear[2] = out_Y_or_YUV_viewports_for_clear[1];  // V plane
+      out_Y_or_YUV_viewports_for_clear[2] = out_Y_or_YUV_viewports_for_clear[1];  // V平面
       out_Y_or_YUV_viewports_for_clear[2].TopLeftY += out_height;
 
+      // UV平面viewport（分辨率为Y平面的一半，4:2:0下采样）
       out_UV_viewport = {offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f};
       out_UV_viewport_for_clear = {0, 0, (float) out_width / 2, (float) out_height / 2, 0.0f, 1.0f};
 
@@ -710,6 +720,7 @@ namespace platf::dxgi {
     }
 
     int init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
+      // 将Sunshine内部像素格式映射为DXGI纹理格式
       switch (pix_fmt) {
         case pix_fmt_e::nv12:
           format = DXGI_FORMAT_NV12;
@@ -746,6 +757,7 @@ namespace platf::dxgi {
         D3D_FEATURE_LEVEL_9_1
       };
 
+      // 为编码器创建独立的D3D11设备（与捕获设备分离，支持VIDEO_SUPPORT用于硬编码）
       HRESULT status = D3D11CreateDevice(
         adapter_p,
         D3D_DRIVER_TYPE_UNKNOWN,
@@ -764,6 +776,7 @@ namespace platf::dxgi {
         return -1;
       }
 
+      // 提升编码器GPU线程优先级（最高7），减少GPU调度延迟
       dxgi::dxgi_t dxgi;
       status = device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi);
       if (FAILED(status)) {
@@ -776,6 +789,7 @@ namespace platf::dxgi {
         BOOST_LOG(warning) << "Failed to increase encoding GPU thread priority. Please run application as administrator for optimal performance.";
       }
 
+      // 创建默认色彩矩阵常量缓冲区（Rec.601），后续apply_colorspace()会按实际色彩空间更新
       auto default_color_vectors = ::video::color_vectors_from_colorspace({::video::colorspace_e::rec601, false, 8}, true);
       if (!default_color_vectors) {
         BOOST_LOG(error) << "Missing color vectors for Rec. 601"sv;
@@ -796,11 +810,13 @@ namespace platf::dxgi {
       }
       display = nullptr;
 
+      // 创建禁用混合的混合状态（色彩转换时不需要alpha混合）
       blend_disable = make_blend(device.get(), false, false);
       if (!blend_disable) {
         return -1;
       }
 
+      // 创建线性采样器：用于纹理缩放时的双线性插值
       D3D11_SAMPLER_DESC sampler_desc {};
       sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
       sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -816,6 +832,7 @@ namespace platf::dxgi {
         return -1;
       }
 
+      // 设置渲染管线初始状态：禁用混合、绑定线性采样器、使用三角形列表拓扑
       device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
       device_ctx->PSSetSamplers(0, 1, &sampler_linear);
       device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1055,6 +1072,9 @@ namespace platf::dxgi {
 
   class d3d_nvenc_encode_device_t: public nvenc_encode_device_t {
   public:
+    /**
+     * @brief 初始化NVENC编码设备：创建D3D11设备→初始化GPU转换→创建NVENC会话
+     */
     bool init_device(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
       buffer_format = nvenc::nvenc_format_from_sunshine_format(pix_fmt);
       if (buffer_format == NV_ENC_BUFFER_FORMAT_UNDEFINED) {
@@ -1144,11 +1164,15 @@ namespace platf::dxgi {
     return true;
   }
 
+  /**
+   * @brief VRAM捕获截图（DDA方式）：获取桌面帧→GPU上色彩转换→游标合成
+   */
   capture_e display_ddup_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     HRESULT status;
     DXGI_OUTDUPL_FRAME_INFO frame_info;
 
     resource_t::pointer res_p {};
+    // 从DDA获取下一帧桌面图像
     auto capture_status = dup.next_frame(frame_info, timeout, &res_p);
     resource_t res {res_p};
 
@@ -1156,6 +1180,7 @@ namespace platf::dxgi {
       return capture_status;
     }
 
+    // 检查是否有鼠标更新或新帧
     const bool mouse_update_flag = frame_info.LastMouseUpdateTime.QuadPart != 0 || frame_info.PointerShapeBufferSize > 0;
     const bool frame_update_flag = frame_info.LastPresentTime.QuadPart != 0;
     const bool update_flag = mouse_update_flag || frame_update_flag;
@@ -1166,10 +1191,11 @@ namespace platf::dxgi {
 
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
     if (auto qpc_displayed = std::max(frame_info.LastPresentTime.QuadPart, frame_info.LastMouseUpdateTime.QuadPart)) {
-      // Translate QueryPerformanceCounter() value to steady_clock time point
+      // 将QPC时间戳转换为steady_clock时间点
       frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), qpc_displayed);
     }
 
+    // === 处理鼠标光标形状更新 ===
     if (frame_info.PointerShapeBufferSize > 0) {
       DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info {};
 
@@ -1183,6 +1209,7 @@ namespace platf::dxgi {
         return capture_e::error;
       }
 
+      // 生成alpha混合和XOR混合两种光标纹理
       auto alpha_cursor_img = make_cursor_alpha_image(img_data, shape_info);
       auto xor_cursor_img = make_cursor_xor_image(img_data, shape_info);
 
@@ -1192,17 +1219,20 @@ namespace platf::dxgi {
       }
     }
 
+    // === 更新光标位置 ===
     if (frame_info.LastMouseUpdateTime.QuadPart) {
       cursor_alpha.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, width, height, display_rotation, frame_info.PointerPosition.Visible);
 
       cursor_xor.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, width, height, display_rotation, frame_info.PointerPosition.Visible);
     }
 
+    // 是否需要将鼠标光标混合到图像上
     const bool blend_mouse_cursor_flag = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible;
 
+    // === 获取新帧纹理并检查分辨率/格式变化 ===
     texture2d_t src {};
     if (frame_update_flag) {
-      // Get the texture object from this frame
+      // 从DXGI资源获取D3D11纹理对象
       status = res->QueryInterface(IID_ID3D11Texture2D, (void **) &src);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Couldn't query interface [0x"sv << util::hex(status).to_string_view() << ']';
@@ -1212,91 +1242,76 @@ namespace platf::dxgi {
       D3D11_TEXTURE2D_DESC desc;
       src->GetDesc(&desc);
 
-      // It's possible for our display enumeration to race with mode changes and result in
-      // mismatched image pool and desktop texture sizes. If this happens, just reinit again.
+      // 检查分辨率是否变化（可能与模式切换竞争）
       if (desc.Width != width_before_rotation || desc.Height != height_before_rotation) {
         BOOST_LOG(info) << "Capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height << ']';
         return capture_e::reinit;
       }
 
-      // If we don't know the capture format yet, grab it from this texture
+      // 首次捕获时记录像素格式
       if (capture_format == DXGI_FORMAT_UNKNOWN) {
         capture_format = desc.Format;
         BOOST_LOG(info) << "Capture format ["sv << dxgi_format_to_string(capture_format) << ']';
       }
 
-      // It's also possible for the capture format to change on the fly. If that happens,
-      // reinitialize capture to try format detection again and create new images.
+      // 检查像素格式是否变化，变化则重新初始化
       if (capture_format != desc.Format) {
         BOOST_LOG(info) << "Capture format changed ["sv << dxgi_format_to_string(capture_format) << " -> "sv << dxgi_format_to_string(desc.Format) << ']';
         return capture_e::reinit;
       }
     }
 
+    // === 帧操作决策逻辑：根据是否有新帧和是否需要光标混合来决定如何处理 ===
     enum class lfa {
-      nothing,
-      replace_surface_with_img,
-      replace_img_with_surface,
-      copy_src_to_img,
-      copy_src_to_surface,
+      nothing,                      // 不做任何事
+      replace_surface_with_img,     // 中间表面→图像（光标消失时释放表面内存）
+      replace_img_with_surface,     // 图像→中间表面（光标出现时需要可重复混合的表面）
+      copy_src_to_img,              // 新帧→图像（无光标时直接复制）
+      copy_src_to_surface,          // 新帧→中间表面（有光标时保存副本以便多次混合）
     };
 
     enum class ofa {
-      forward_last_img,
-      copy_last_surface_and_blend_cursor,
-      dummy_fallback,
+      forward_last_img,                    // 直接转发上次的图像（避免复制）
+      copy_last_surface_and_blend_cursor,  // 从中间表面复制并混合光标
+      dummy_fallback,                      // 输出黑色占位图（格式未知时）
     };
 
     auto last_frame_action = lfa::nothing;
     auto out_frame_action = ofa::dummy_fallback;
 
     if (capture_format == DXGI_FORMAT_UNKNOWN) {
-      // We don't know the final capture format yet, so we will encode a black dummy image
+      // 像素格式未知，输出黑色占位帧
       last_frame_action = lfa::nothing;
       out_frame_action = ofa::dummy_fallback;
     } else {
       if (src) {
-        // We got a new frame from DesktopDuplication...
+        // 从DDA获取到新帧...
         if (blend_mouse_cursor_flag) {
-          // ...and we need to blend the mouse cursor onto it.
-          // Copy the frame to intermediate surface so we can blend this and future mouse cursor updates
-          // without new frames from DesktopDuplication. We use direct3d surface directly here and not
-          // an image from pull_free_image_cb mainly because it's lighter (surface sharing between
-          // direct3d devices produce significant memory overhead).
+          // ...且需要混合光标：复制到中间表面以便后续无新帧时也能混合光标
           last_frame_action = lfa::copy_src_to_surface;
-          // Copy the intermediate surface to a new image from pull_free_image_cb and blend the mouse cursor onto it.
           out_frame_action = ofa::copy_last_surface_and_blend_cursor;
         } else {
-          // ...and we don't need to blend the mouse cursor.
-          // Copy the frame to a new image from pull_free_image_cb and save the shared pointer to the image
-          // in case the mouse cursor appears without a new frame from DesktopDuplication.
+          // ...且不需光标：直接复制到输出图像，保存共享指针以备后用
           last_frame_action = lfa::copy_src_to_img;
-          // Use saved last image shared pointer as output image evading copy.
           out_frame_action = ofa::forward_last_img;
         }
       } else if (!std::holds_alternative<std::monostate>(last_frame_variant)) {
-        // We didn't get a new frame from DesktopDuplication...
+        // 没有新帧，但有之前的缓存帧...
         if (blend_mouse_cursor_flag) {
-          // ...but we need to blend the mouse cursor.
+          // ...且需要混合光标
           if (std::holds_alternative<std::shared_ptr<platf::img_t>>(last_frame_variant)) {
-            // We have the shared pointer of the last image, replace it with intermediate surface
-            // while copying contents so we can blend this and future mouse cursor updates.
+            // 有上次的图像共享指针，将其替换为中间表面以便反复混合光标
             last_frame_action = lfa::replace_img_with_surface;
           }
-          // Copy the intermediate surface which contains last DesktopDuplication frame
-          // to a new image from pull_free_image_cb and blend the mouse cursor onto it.
+          // 从中间表面复制并混合光标
           out_frame_action = ofa::copy_last_surface_and_blend_cursor;
         } else {
-          // ...and we don't need to blend the mouse cursor.
-          // This happens when the mouse cursor disappears from screen,
-          // or there's mouse cursor on screen, but its drawing is disabled in sunshine.
+          // ...且不需光标（光标消失或禁用）
           if (std::holds_alternative<texture2d_t>(last_frame_variant)) {
-            // We have the intermediate surface that was used as the mouse cursor blending base.
-            // Replace it with an image from pull_free_image_cb copying contents and freeing up the surface memory.
-            // Save the shared pointer to the image in case the mouse cursor reappears.
+            // 有中间表面，替换为图像以释放表面内存
             last_frame_action = lfa::replace_surface_with_img;
           }
-          // Use saved last image shared pointer as output image evading copy.
+          // 直接转发上次图像
           out_frame_action = ofa::forward_last_img;
         }
       }
@@ -1442,11 +1457,13 @@ namespace platf::dxgi {
         }
     }
 
+    // === 光标混合lambda：将alpha和XOR光标纹理叠加到捕获图像上 ===
     auto blend_cursor = [&](img_d3d_t &d3d_img) {
       device_ctx->VSSetShader(cursor_vs.get(), nullptr, 0);
       device_ctx->PSSetShader(cursor_ps.get(), nullptr, 0);
       device_ctx->OMSetRenderTargets(1, &d3d_img.capture_rt, nullptr);
 
+      // alpha混合：渲染半透明光标
       if (cursor_alpha.texture.get()) {
         // Perform an alpha blending operation
         device_ctx->OMSetBlendState(blend_alpha.get(), nullptr, 0xFFFFFFFFu);
@@ -1456,6 +1473,7 @@ namespace platf::dxgi {
         device_ctx->Draw(3, 0);
       }
 
+      // XOR混合：渲染反色光标（单色/掩码光标的反转部分）
       if (cursor_xor.texture.get()) {
         // Perform an invert blending without touching alpha values
         device_ctx->OMSetBlendState(blend_invert.get(), nullptr, 0x00FFFFFFu);
@@ -1558,10 +1576,12 @@ namespace platf::dxgi {
   }
 
   int display_ddup_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
+    // 先初始化基类（D3D设备、输出枚举）和DDA复制接口
     if (display_base_t::init(config, display_name) || dup.init(this, config)) {
       return -1;
     }
 
+    // 创建线性纹理采样器（用于光标纹理缩放）
     D3D11_SAMPLER_DESC sampler_desc {};
     sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -1577,6 +1597,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // 创建光标顶点着色器（处理光标位置和旋转）
     status = device->CreateVertexShader(cursor_vs_hlsl->GetBufferPointer(), cursor_vs_hlsl->GetBufferSize(), nullptr, &cursor_vs);
     if (status) {
       BOOST_LOG(error) << "Failed to create scene vertex shader [0x"sv << util::hex(status).to_string_view() << ']';
@@ -1584,6 +1605,7 @@ namespace platf::dxgi {
     }
 
     {
+      // 创建显示旋转常量缓冲区，供光标顶点着色器补偿屏幕旋转
       int32_t rotation_modifier = display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ? 0 : display_rotation - 1;
       int32_t rotation_data[16 / sizeof(int32_t)] {rotation_modifier};  // aligned to 16-byte
       auto rotation = make_buffer(device.get(), rotation_data);
@@ -1595,13 +1617,14 @@ namespace platf::dxgi {
     }
 
     if (config.dynamicRange && is_hdr()) {
-      // This shader will normalize scRGB white levels to a user-defined white level
+      // HDR模式下使用白点归一化像素着色器，将scRGB白色映射到用户定义的SDR白亮度
       status = device->CreatePixelShader(cursor_ps_normalize_white_hlsl->GetBufferPointer(), cursor_ps_normalize_white_hlsl->GetBufferSize(), nullptr, &cursor_ps);
       if (status) {
         BOOST_LOG(error) << "Failed to create cursor blending (normalized white) pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
       }
 
+      // 目标SDR白色设为300nit（理想情况下应获取用户SDR白点设置，但Win32无此API）
       // Use a 300 nit target for the mouse cursor. We should really get
       // the user's SDR white level in nits, but there is no API that
       // provides that information to Win32 apps.
@@ -1621,6 +1644,7 @@ namespace platf::dxgi {
       }
     }
 
+    // 创建alpha混合、反色混合、禁用混合三种混合状态（分别用于普通光标、反色光标、色彩转换）
     blend_alpha = make_blend(device.get(), true, false);
     blend_invert = make_blend(device.get(), true, true);
     blend_disable = make_blend(device.get(), false, false);
@@ -1629,6 +1653,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // 设置捕获端渲染管线初始状态
     device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
     device_ctx->PSSetSamplers(0, 1, &sampler_linear);
     device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1638,6 +1663,7 @@ namespace platf::dxgi {
 
   /**
    * Get the next frame from the Windows.Graphics.Capture API and copy it into a new snapshot texture.
+   * @brief WGC方式VRAM截图：从图形捕获API获取帧并复制到共享纹理
    * @param pull_free_image_cb call this to get a new free image from the video subsystem.
    * @param img_out the captured frame is returned here
    * @param timeout how long to wait for the next frame
@@ -1646,23 +1672,26 @@ namespace platf::dxgi {
   capture_e display_wgc_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     texture2d_t src;
     uint64_t frame_qpc;
+    // WGC API可以原生控制光标可见性（与DDA不同，无需手动混合）
     dup.set_cursor_visible(cursor_visible);
+    // 获取下一帧截图和QPC时间戳
     auto capture_status = dup.next_frame(timeout, &src, frame_qpc);
     if (capture_status != capture_e::ok) {
       return capture_status;
     }
 
+    // 将QPC时间戳转换为steady_clock时间点
     auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
     D3D11_TEXTURE2D_DESC desc;
     src->GetDesc(&desc);
 
-    // It's possible for our display enumeration to race with mode changes and result in
-    // mismatched image pool and desktop texture sizes. If this happens, just reinit again.
+    // 检查分辨率是否变化（与模式切换竞争）
     if (desc.Width != width_before_rotation || desc.Height != height_before_rotation) {
       BOOST_LOG(info) << "Capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height << ']';
       return capture_e::reinit;
     }
 
+    // 检查捕获格式是否变化
     // It's also possible for the capture format to change on the fly. If that happens,
     // reinitialize capture to try format detection again and create new images.
     if (capture_format != desc.Format) {
@@ -1670,13 +1699,15 @@ namespace platf::dxgi {
       return capture_e::reinit;
     }
 
+    // 从空闲池获取一个图像对象
     std::shared_ptr<platf::img_t> img;
     if (!pull_free_image_cb(img)) {
       return capture_e::interrupted;
     }
 
     auto d3d_img = std::static_pointer_cast<img_d3d_t>(img);
-    d3d_img->blank = false;  // image is always ready for capture
+    d3d_img->blank = false;  // 标记图像已有内容
+    // 完成图像初始化（创建纹理/互斥/共享句柄），然后加锁并复制帧数据
     if (complete_img(d3d_img.get(), false) == 0) {
       texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
       if (lock_helper.lock()) {
@@ -1711,7 +1742,7 @@ namespace platf::dxgi {
   std::shared_ptr<platf::img_t> display_vram_t::alloc_img() {
     auto img = std::make_shared<img_d3d_t>();
 
-    // Initialize format-independent fields
+    // 初始化与格式无关的基本字段（尺寸用旋转前的值，分配ID用于编码器端上下文跟踪）
     img->width = width_before_rotation;
     img->height = height_before_rotation;
     img->id = next_image_id++;
@@ -1720,22 +1751,22 @@ namespace platf::dxgi {
     return img;
   }
 
-  // This cannot use ID3D11DeviceContext because it can be called concurrently by the encoding thread
+  // 不能使用ID3D11DeviceContext，因为编码线程可能并发调用此函数
   int display_vram_t::complete_img(platf::img_t *img_base, bool dummy) {
     auto img = (img_d3d_t *) img_base;
 
-    // If this already has a capture texture and it's not switching dummy state, nothing to do
+    // 如果已有捕获纹理且dummy状态未变，无需重新创建
     if (img->capture_texture && img->dummy == dummy) {
       return 0;
     }
 
-    // If this is not a dummy image, we must know the format by now
+    // 非dummy图像必须已知捕获格式（等待第一帧DDA/WGC回报格式）
     if (!dummy && capture_format == DXGI_FORMAT_UNKNOWN) {
       BOOST_LOG(error) << "display_vram_t::complete_img() called with unknown capture format!";
       return -1;
     }
 
-    // Reset the image (in case this was previously a dummy)
+    // 重置图像资源（可能从dummy切换为真实图像）
     img->capture_texture.reset();
     img->capture_rt.reset();
     img->capture_mutex.reset();
@@ -1745,12 +1776,14 @@ namespace platf::dxgi {
       img->encoder_texture_handle = nullptr;
     }
 
-    // Initialize format-dependent fields
+    // 初始化格式相关字段
     img->pixel_pitch = get_pixel_pitch();
     img->row_pitch = img->pixel_pitch * img->width;
     img->dummy = dummy;
+    // dummy用BGRA8格式（黑色占位图），真实图像用实际捕获格式
     img->format = (capture_format == DXGI_FORMAT_UNKNOWN) ? DXGI_FORMAT_B8G8R8A8_UNORM : capture_format;
 
+    // 创建共享D3D11纹理：支持SRV+RTV绑定，并启用KeyedMutex跨设备共享
     D3D11_TEXTURE2D_DESC t {};
     t.Width = img->width;
     t.Height = img->height;
@@ -1760,6 +1793,7 @@ namespace platf::dxgi {
     t.Usage = D3D11_USAGE_DEFAULT;
     t.Format = img->format;
     t.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    // SHARED_NTHANDLE + SHARED_KEYEDMUTEX 启用跨D3D设备共享和同步
     t.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 
     auto status = device->CreateTexture2D(&t, nullptr, &img->capture_texture);
@@ -1768,12 +1802,14 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // 创建渲染目标视图（用于光标混合绘制）
     status = device->CreateRenderTargetView(img->capture_texture.get(), nullptr, &img->capture_rt);
     if (FAILED(status)) {
       BOOST_LOG(error) << "Failed to create render target view [0x"sv << util::hex(status).to_string_view() << ']';
       return -1;
     }
 
+    // 获取KeyedMutex用于捕获端和编码端之间的同步
     // Get the keyed mutex to synchronize with the encoding code
     status = img->capture_texture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void **) &img->capture_mutex);
     if (FAILED(status)) {
@@ -1788,6 +1824,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // 创建NT共享句柄，编码器D3D设备通过此句柄打开同一纹理
     // Create a handle for the encoder device to use to open this texture
     status = resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr, &img->encoder_texture_handle);
     if (FAILED(status)) {
@@ -1795,6 +1832,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // data指向纹理对象（不是内存映射，仅作为标识用于编码器端AVFrame）
     img->data = (std::uint8_t *) img->capture_texture.get();
 
     return 0;
@@ -1839,15 +1877,17 @@ namespace platf::dxgi {
    * @return `true` if supported, `false` otherwise.
    */
   bool display_vram_t::is_codec_supported(std::string_view name, const ::video::config_t &config) {
+    // 获取GPU厂商ID，根据厂商匹配对应的硬件编码器
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 
-    if (adapter_desc.VendorId == 0x1002) {  // AMD
-      // If it's not an AMF encoder, it's not compatible with an AMD GPU
+    if (adapter_desc.VendorId == 0x1002) {  // AMD显卡
+      // AMD只支持AMF编码器
       if (!boost::algorithm::ends_with(name, "_amf")) {
         return false;
       }
 
+      // 检查AMF运行时版本，旧版本可能崩溃或不支持某些编码模式
       // Perform AMF version checks if we're using an AMD GPU. This check is placed in display_vram_t
       // to avoid hitting the display_ram_t path which uses software encoding and doesn't touch AMF.
       HMODULE amfrt = LoadLibraryW(AMF_DLL_NAME);
@@ -1862,6 +1902,7 @@ namespace platf::dxgi {
           auto result = fnAMFQueryVersion(&version);
           if (result == AMF_OK) {
             if (config.videoFormat == 2 && version < AMF_MAKE_FULL_VERSION(1, 4, 30, 0)) {
+              // AMF 1.4.30新增AV1超低延迟模式，对应驱动版本23.5.2+
               // AMF 1.4.30 adds ultra low latency mode for AV1. Don't use AV1 on earlier versions.
               // This corresponds to driver version 23.5.2 (23.10.01.45) or newer.
               BOOST_LOG(warning) << "AV1 encoding is disabled on AMF version "sv
@@ -1872,6 +1913,7 @@ namespace platf::dxgi {
               BOOST_LOG(warning) << "If your AMD GPU supports AV1 encoding, update your graphics drivers!"sv;
               return false;
             } else if (config.dynamicRange && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
+              // AMF 1.4.23引入HEVC Main10编码，旧版本输入P010表面可能崩溃
               // Older versions of the AMD AMF runtime can crash when fed P010 surfaces.
               // Fail if AMF version is below 1.4.23 where HEVC Main10 encoding was introduced.
               // AMF 1.4.23 corresponds to driver version 21.12.1 (21.40.11.03) or newer.
@@ -1892,26 +1934,26 @@ namespace platf::dxgi {
       } else {
         BOOST_LOG(warning) << "Detected AMD GPU but AMF failed to load"sv;
       }
-    } else if (adapter_desc.VendorId == 0x8086) {  // Intel
-      // If it's not a QSV encoder, it's not compatible with an Intel GPU
+    } else if (adapter_desc.VendorId == 0x8086) {  // Intel显卡
+      // Intel只支持QSV编码器
       if (!boost::algorithm::ends_with(name, "_qsv")) {
         return false;
       }
       if (config.chromaSamplingType == 1) {
         if (config.videoFormat == 0 || config.videoFormat == 2) {
-          // QSV doesn't support 4:4:4 in H.264 or AV1
+          // QSV不支持H.264或AV1的4:4:4色度采样
           return false;
         }
         // TODO: Blacklist HEVC 4:4:4 based on adapter model
       }
-    } else if (adapter_desc.VendorId == 0x10de) {  // Nvidia
-      // If it's not an NVENC encoder, it's not compatible with an Nvidia GPU
+    } else if (adapter_desc.VendorId == 0x10de) {  // Nvidia显卡
+      // Nvidia只支持NVENC编码器
       if (!boost::algorithm::ends_with(name, "_nvenc")) {
         return false;
       }
-    } else if (adapter_desc.VendorId == 0x4D4F4351 ||  // Qualcomm (QCOM as MOQC reversed)
-               adapter_desc.VendorId == 0x5143) {  // Qualcomm alternate ID
-      // If it's not a MediaFoundation encoder, it's not compatible with a Qualcomm GPU
+    } else if (adapter_desc.VendorId == 0x4D4F4351 ||  // 高通 (QCOM的ASCII反转)
+               adapter_desc.VendorId == 0x5143) {  // 高通备用ID
+      // 高通只支持MediaFoundation编码器
       if (!boost::algorithm::ends_with(name, "_mf")) {
         return false;
       }
@@ -1938,6 +1980,9 @@ namespace platf::dxgi {
     return device;
   }
 
+  /**
+   * @brief 编译所有GPU着色器（色彩转换、游标混合等）
+   */
   int init() {
     BOOST_LOG(info) << "Compiling shaders..."sv;
 

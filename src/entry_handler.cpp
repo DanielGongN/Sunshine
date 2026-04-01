@@ -1,61 +1,80 @@
 /**
  * @file entry_handler.cpp
- * @brief Definitions for entry handling functions.
+ * @brief 入口处理函数的实现
+ * 包含命令行参数处理、程序生命周期管理、Windows服务控制等
  */
-// standard includes
-#include <csignal>
-#include <format>
-#include <iostream>
-#include <thread>
+// 标准库头文件
+#include <csignal>    // 信号处理
+#include <format>     // C++20格式化
+#include <iostream>   // 标准输出
+#include <thread>     // 线程支持
 
-// local includes
-#include "config.h"
-#include "confighttp.h"
-#include "entry_handler.h"
-#include "globals.h"
-#include "httpcommon.h"
-#include "logging.h"
-#include "network.h"
-#include "platform/common.h"
+// 本地项目头文件
+#include "config.h"          // 配置管理
+#include "confighttp.h"      // HTTP配置服务
+#include "entry_handler.h"   // 本文件头文件
+#include "globals.h"         // 全局变量
+#include "httpcommon.h"      // HTTP公共接口
+#include "logging.h"         // 日志系统
+#include "network.h"         // 网络工具（端口映射等）
+#include "platform/common.h" // 平台公共接口
 
 extern "C" {
 #ifdef _WIN32
-  #include <iphlpapi.h>
+  #include <iphlpapi.h> // Windows IP辅助API（查询TCP表用于检测服务就绪）
 #endif
 }
 
 using namespace std::literals;
 
+/**
+ * @brief 启动Web管理界面
+ * 拼接HTTPS URL并在默认浏览器中打开
+ */
 void launch_ui(const std::optional<std::string> &path) {
+  // 拼接完整的HTTPS管理界面URL
   std::string url = std::format("https://localhost:{}", static_cast<int>(net::map_port(confighttp::PORT_HTTPS)));
   if (path) {
-    url += *path;
+    url += *path; // 追加可选的子路径
   }
-  platf::open_url(url);
+  platf::open_url(url); // 调用平台接口打开URL
 }
 
 namespace args {
+  /**
+   * @brief 处理凭证管理命令
+   * 参数不足时显示帮助，否则保存新的用户名和密码
+   */
   int creds(const char *name, int argc, char *argv[]) {
     if (argc < 2 || argv[0] == "help"sv || argv[1] == "help"sv) {
-      help(name);
+      help(name); // 参数不足或请求帮助时显示帮助
     }
 
-    http::save_user_creds(config::sunshine.credentials_file, argv[0], argv[1]);
+    http::save_user_creds(config::sunshine.credentials_file, argv[0], argv[1]); // 保存用户凭证
 
     return 0;
   }
 
+  /**
+   * @brief 显示帮助信息
+   */
   int help(const char *name) {
     logging::print_help(name);
     return 0;
   }
 
+  /**
+   * @brief 显示版本信息（版本已在启动时通过日志输出）
+   */
   int version() {
-    // version was already logged at startup
     return 0;
   }
 
 #ifdef _WIN32
+  /**
+   * @brief Windows专用：恢复NVIDIA控制面板设置
+   * 加载NVIDIA设置库，从撤销文件恢复设置，然后卸载库
+   */
   int restore_nvprefs_undo() {
     if (nvprefs_instance.load()) {
       nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
@@ -67,24 +86,33 @@ namespace args {
 }  // namespace args
 
 namespace lifetime {
-  char **argv;
-  std::atomic_int desired_exit_code;
+  char **argv;                        // 程序命令行参数
+  std::atomic_int desired_exit_code;   // 程序期望退出码（原子变量，线程安全）
 
-  void exit_sunshine(int exit_code, bool async) {
-    // Store the exit code of the first exit_sunshine() call
+  /**
+   * @brief 优雅退出Sunshine
+   * 通过触发SIGINT信号启动终止流程
+   * async=false时会阻塞当前线程直到程序实际退出
+   */    /**
+     * @brief 优雅或强制退出Sunshine程序
+     */  void exit_sunshine(int exit_code, bool async) {
+    // 仅保存第一次调用时的退出码（原子比较交换）
     int zero = 0;
     desired_exit_code.compare_exchange_strong(zero, exit_code);
 
-    // Raise SIGINT to start termination
+    // 触发SIGINT信号启动关闭流程
     std::raise(SIGINT);
 
-    // Termination will happen asynchronously, but the caller may
-    // have wanted synchronous behavior.
+    // 终止将异步进行，但调用者可能要求同步行为
     while (!async) {
-      std::this_thread::sleep_for(1s);
+      std::this_thread::sleep_for(1s); // 阻塞等待
     }
   }
 
+  /**
+   * @brief 触发调试器断点
+   * Windows上使用DebugBreak()API，其他平台使用SIGTRAP信号
+   */
   void debug_trap() {
 #ifdef _WIN32
     DebugBreak();
@@ -98,6 +126,10 @@ namespace lifetime {
   }
 }  // namespace lifetime
 
+/**
+ * @brief 记录发布者元数据到日志
+ * 输出发布者名称、网站和支持链接（编译时注入）
+ */
 void log_publisher_data() {
   BOOST_LOG(info) << "Package Publisher: "sv << SUNSHINE_PUBLISHER_NAME;
   BOOST_LOG(info) << "Publisher Website: "sv << SUNSHINE_PUBLISHER_WEBSITE;
@@ -105,6 +137,10 @@ void log_publisher_data() {
 }
 
 #ifdef _WIN32
+/**
+ * @brief 检查NVIDIA GameStream是否启用
+ * 通过读取注册表键值判断 GeForce Experience 中的GameStream是否开启
+ */
 bool is_gamestream_enabled() {
   DWORD enabled;
   DWORD size = sizeof(enabled);

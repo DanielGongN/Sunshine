@@ -1,9 +1,10 @@
 /**
  * @file src/nvenc/nvenc_d3d11.cpp
- * @brief Definitions for abstract Direct3D11 NVENC encoder.
+ * @brief Direct3D11 NVENC编码器抽象基类实现。
+ *        包括异步事件创建、nvEncodeAPI64.dll加载、API函数指针初始化、异步等待。
  */
-// local includes
-#include "src/logging.h"
+// 本地头文件
+#include "src/logging.h"  // 日志系统
 
 #ifdef _WIN32
   #include "nvenc_d3d11.h"
@@ -25,6 +26,9 @@ namespace nvenc {
     }
   }
 
+  /**
+   * @brief 加载nvEncodeAPI DLL并初始化NvEncode函数指针
+   */
   bool nvenc_d3d11::init_library() {
     if (dll) {
       return true;
@@ -61,6 +65,9 @@ namespace nvenc {
     return false;
   }
 
+  /**
+   * @brief 等待NVENC异步编码完成事件
+   */
   bool nvenc_d3d11::wait_for_async_event(uint32_t timeout_ms) {
     return WaitForSingleObject(async_event_handle, timeout_ms) == WAIT_OBJECT_0;
   }

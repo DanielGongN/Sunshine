@@ -1,6 +1,6 @@
 /**
  * @file src/thread_safe.h
- * @brief Declarations for thread-safe data structures.
+ * @brief 线程安全数据结构声明。定义线程安全的队列、邮箱系统（mail）和事件通知机制。
  */
 #pragma once
 

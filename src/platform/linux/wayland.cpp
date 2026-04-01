@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/wayland.cpp
- * @brief Definitions for Wayland capture.
+ * @brief Wayland显示捕获实现。包括Wayland显示连接、DMA-BUF导入、帧回调等。
  */
 // standard includes
 #include <cstdlib>
@@ -48,6 +48,9 @@ namespace wl {
     .failed = dmabuf_t::buffer_params_failed
   };
 
+  /**
+   * @brief 连接到Wayland显示服务器并绑定协议接口
+   */
   int display_t::init(const char *display_name) {
     if (!display_name) {
       display_name = std::getenv("WAYLAND_DISPLAY");
@@ -289,6 +292,9 @@ namespace wl {
   }
 
   // Start capture
+  /**
+   * @brief 启动wlr-screencopy捕获会话（配置DMA-BUF和SHM缓冲区）
+   */
   void dmabuf_t::listen(
     zwlr_screencopy_manager_v1 *screencopy_manager,
     zwp_linux_dmabuf_v1 *dmabuf_interface,

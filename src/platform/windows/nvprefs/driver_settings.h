@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/driver_settings.h
- * @brief Declarations for nvidia driver settings.
+ * @brief NVIDIA驱动设置声明。用于访问和修改NVIDIA驱动的渲染配置文件。
  */
 #pragma once
 

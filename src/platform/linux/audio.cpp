@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/audio.cpp
- * @brief Definitions for audio control on Linux.
+ * @brief Linux音频控制实现。使用PulseAudio/PipeWire进行音频采集和设备管理。
  */
 // standard includes
 #include <bitset>
@@ -33,6 +33,9 @@ namespace platf {
     PA_CHANNEL_POSITION_SIDE_RIGHT,
   };
 
+  /**
+   * @brief 创建PulseAudio空接收器配置字符串（指定采样率、通道映射）
+   */
   std::string to_string(const char *name, const std::uint8_t *mapping, int channels) {
     std::stringstream ss;
 
@@ -68,6 +71,9 @@ namespace platf {
     }
   };
 
+  /**
+   * @brief 创建PulseAudio麦克风捕获对象（配置采样格式和通道映射）
+   */
   std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, std::string source_name) {
     auto mic = std::make_unique<mic_attr_t>();
 
@@ -198,6 +204,9 @@ namespace platf {
 
       std::thread worker;
 
+      /**
+       * @brief 初始化PulseAudio上下文、主循环和事件处理
+       */
       int init() {
         events = std::make_unique<safe::event_t<ctx_event_e>>();
         loop.reset(pa_mainloop_new());

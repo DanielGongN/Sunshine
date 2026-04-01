@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/nv12_zero_device.cpp
- * @brief Definitions for NV12 zero copy device on macOS.
+ * @brief macOS NV12零拷贝设备实现。将CoreVideo像素缓冲区直接映射到FFmpeg帧。
  */
 // standard includes
 #include <utility>
@@ -16,10 +16,23 @@ extern "C" {
 
 namespace platf {
 
+  /**
+   * @brief 释放AVFrame帧内存。
+   *
+   * 调用FFmpeg的av_frame_free释放帧资源。
+   * @param frame AVFrame指针。
+   */
   void free_frame(AVFrame *frame) {
     av_frame_free(&frame);
   }
 
+  /**
+   * @brief 释放CVPixelBuffer内存。
+   *
+   * 用于释放macOS下的CVPixelBuffer对象。
+   * @param opaque 未使用。
+   * @param data CVPixelBuffer指针。
+   */
   void free_buffer(void *opaque, uint8_t *data) {
     CVPixelBufferRelease((CVPixelBufferRef) data);
   }

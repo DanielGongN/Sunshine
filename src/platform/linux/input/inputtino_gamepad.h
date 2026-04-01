@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_gamepad.h
- * @brief Declarations for inputtino gamepad input handling.
+ * @brief inputtino手柄输入处理声明。定义虚拟手柄设备的创建和管理接口。
  */
 #pragma once
 

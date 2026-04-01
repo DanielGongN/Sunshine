@@ -1,7 +1,7 @@
 /**
  * @file src/platform/windows/PolicyConfig.h
- * @brief Undocumented COM-interface IPolicyConfig.
- * @details Use for setting default audio render endpoint.
+ * @brief 未公开的COM接口IPolicyConfig声明。
+ * @details 用于设置默认音频渲染端点设备。
  * @author EreTIk
  * @see https://kitere.github.io/
  */

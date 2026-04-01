@@ -1,6 +1,7 @@
 /**
  * @file src/process.h
- * @brief Declarations for the startup and shutdown of the apps started by a streaming Session.
+ * @brief 串流会话启动的应用程序进程管理的声明
+ * 负责启动/停止游戏或应用程序，管理预备命令、进程生命周期等
  */
 #pragma once
 
@@ -8,65 +9,54 @@
   #define __kernel_entry
 #endif
 
-// standard includes
+// 标准库头文件
 #include <optional>
 #include <unordered_map>
 
-// lib includes
-#include <boost/process/v1.hpp>
+// 第三方库头文件
+#include <boost/process/v1.hpp> // 进程管理库
 
-// local includes
-#include "config.h"
-#include "platform/common.h"
-#include "rtsp.h"
-#include "utility.h"
+// 本地项目头文件
+#include "config.h"          // 配置管理
+#include "platform/common.h" // 平台公共接口
+#include "rtsp.h"            // RTSP会话信息
+#include "utility.h"          // 工具函数
 
-#define DEFAULT_APP_IMAGE_PATH SUNSHINE_ASSETS_DIR "/box.png"
+#define DEFAULT_APP_IMAGE_PATH SUNSHINE_ASSETS_DIR "/box.png" // 默认应用图标路径
 
 namespace proc {
-  using file_t = util::safe_ptr_v2<FILE, int, fclose>;
+  using file_t = util::safe_ptr_v2<FILE, int, fclose>; // FILE指针智能包装
 
-  typedef config::prep_cmd_t cmd_t;
+  typedef config::prep_cmd_t cmd_t; // 预备命令类型别名
 
   /**
-   * pre_cmds -- guaranteed to be executed unless any of the commands fail.
-   * detached -- commands detached from Sunshine
-   * cmd -- Runs indefinitely until:
-   *    No session is running and a different set of commands it to be executed
-   *    Command exits
-   * working_dir -- the process working directory. This is required for some games to run properly.
-   * cmd_output --
-   *    empty    -- The output of the commands are appended to the output of sunshine
-   *    "null"   -- The output of the commands are discarded
-   *    filename -- The output of the commands are appended to filename
+   * @brief 应用程序上下文结构体
+   * prep_cmds  -- 预备命令（启动前执行，任一失败则停止）
+   * detached   -- 分离命令（后台进程，Sunshine不管理其生命周期）
+   * cmd        -- 主程序命令（持续运行直到会话结束或进程退出）
+   * working_dir-- 工作目录（某些游戏需要正确的工作目录才能运行）
+   * cmd_output -- 输出重定向（空=追加到Sunshine输出, "null"=丢弃, 其他=写入指定文件）
    */
   struct ctx_t {
-    std::vector<cmd_t> prep_cmds;
+    std::vector<cmd_t> prep_cmds; // 预备命令列表
 
     /**
-     * Some applications, such as Steam, either exit quickly, or keep running indefinitely.
-     *
-     * Apps that launch normal child processes and terminate will be handled by the process
-     * grouping logic (wait_all). However, apps that launch child processes indirectly or
-     * into another process group (such as UWP apps) can only be handled by the auto-detach
-     * heuristic which catches processes that exit 0 very quickly, but we won't have proper
-     * process tracking for those.
-     *
-     * For cases where users just want to kick off a background process and never manage the
-     * lifetime of that process, they can use detached commands for that.
+     * 分离命令列表
+     * 某些应用（如Steam）会快速退出或无限期运行
+     * 用户可以用分离命令来启动后台进程，Sunshine不会管理其生命周期
      */
     std::vector<std::string> detached;
 
-    std::string name;
-    std::string cmd;
-    std::string working_dir;
-    std::string output;
-    std::string image_path;
-    std::string id;
-    bool elevated;
-    bool auto_detach;
-    bool wait_all;
-    std::chrono::seconds exit_timeout;
+    std::string name;          // 应用名称
+    std::string cmd;           // 主程序启动命令
+    std::string working_dir;   // 工作目录
+    std::string output;        // 输出重定向目标
+    std::string image_path;    // 应用图标路径
+    std::string id;            // 应用唯一标识
+    bool elevated;             // 是否以管理员权限运行
+    bool auto_detach;          // 自动分离（进程快速退出时不视为失败）
+    bool wait_all;             // 等待所有子进程结束
+    std::chrono::seconds exit_timeout; // 退出超时时间
   };
 
   class proc_t {

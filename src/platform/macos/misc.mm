@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/misc.mm
- * @brief Miscellaneous definitions for macOS platform.
+ * @brief macOS平台杂项实现。包括线程优先级、网络发送、QoS、进程管理等。
  */
 
 // Required for IPV6_PKTINFO with Darwin headers

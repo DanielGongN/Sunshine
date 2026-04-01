@@ -1,10 +1,10 @@
 /**
  * @file src/round_robin.h
- * @brief Declarations for a round-robin iterator.
+ * @brief 循环迭代器的声明
+ * 提供在容器上循环遍历的迭代器，到末尾自动回到开头
  */
 #pragma once
 
-// standard includes
 #include <iterator>
 
 /**

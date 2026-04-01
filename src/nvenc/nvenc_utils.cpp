@@ -1,16 +1,19 @@
 /**
  * @file src/nvenc/nvenc_utils.cpp
- * @brief Definitions for NVENC utilities.
+ * @brief NVENC工具函数实现。提供像素格式和色彩空间的平台间转换。
  */
-// standard includes
-#include <cassert>
+// 标准库头文件
+#include <cassert>  // 断言宏
 
-// local includes
-#include "nvenc_utils.h"
+// 本地头文件
+#include "nvenc_utils.h"  // 本模块声明
 
 namespace nvenc {
 
 #ifdef _WIN32
+  /**
+   * @brief 将NVENC格式转换为DXGI纹理格式
+   */
   DXGI_FORMAT dxgi_format_from_nvenc_format(NV_ENC_BUFFER_FORMAT format) {
     switch (format) {
       case NV_ENC_BUFFER_FORMAT_YUV420_10BIT:
@@ -31,6 +34,9 @@ namespace nvenc {
   }
 #endif
 
+  /**
+   * @brief 将Sunshine像素格式转换为NVENC编码格式
+   */
   NV_ENC_BUFFER_FORMAT nvenc_format_from_sunshine_format(platf::pix_fmt_e format) {
     switch (format) {
       case platf::pix_fmt_e::nv12:
@@ -50,6 +56,9 @@ namespace nvenc {
     }
   }
 
+  /**
+   * @brief 将Sunshine色彩空间参数转换为NVENC格式
+   */
   nvenc_colorspace_t nvenc_colorspace_from_sunshine_colorspace(const video::sunshine_colorspace_t &sunshine_colorspace) {
     nvenc_colorspace_t colorspace;
 

@@ -1,29 +1,31 @@
 /**
  * @file src/platform/common.h
- * @brief Declarations for common platform specific utilities.
+ * @brief 平台公共工具声明。定义跨平台的显示捕获、音频捕获、输入处理、
+ *        编码设备、网络发送、手柄反馈等平台抽象层接口。
  */
 #pragma once
 
-// standard includes
-#include <bitset>
-#include <filesystem>
-#include <functional>
-#include <mutex>
-#include <string>
+// 标准库头文件
+#include <bitset>       // 位集合
+#include <cstdint>      // 定宽整数类型
+#include <filesystem>   // 文件系统操作
+#include <functional>   // 函数对象和回调
+#include <mutex>        // 互斥锁
+#include <string>       // 字符串
 
-// lib includes
-#include <boost/core/noncopyable.hpp>
+// 第三方库头文件
+#include <boost/core/noncopyable.hpp>  // 不可复制基类
 #ifndef _WIN32
-  #include <boost/asio.hpp>
-  #include <boost/process/v1.hpp>
+  #include <boost/asio.hpp>         // 异步I/O（非Windows平台）
+  #include <boost/process/v1.hpp>   // 进程管理（非Windows平台）
 #endif
 
-// local includes
-#include "src/config.h"
-#include "src/logging.h"
-#include "src/thread_safe.h"
-#include "src/utility.h"
-#include "src/video_colorspace.h"
+// 本地头文件
+#include "src/config.h"  // 配置系统
+#include "src/logging.h"  // 日志系统
+#include "src/thread_safe.h"  // 线程安全队列/邮箱
+#include "src/utility.h"  // 工具函数
+#include "src/video_colorspace.h"  // 视频色彩空间
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
@@ -31,12 +33,13 @@ extern "C" {
 
 using namespace std::literals;
 
-struct sockaddr;
-struct AVFrame;
-struct AVBufferRef;
-struct AVHWFramesContext;
-struct AVCodecContext;
-struct AVDictionary;
+// 前向声明外部类型
+struct sockaddr;        // 网络地址结构
+struct AVFrame;         // FFmpeg视频帧
+struct AVBufferRef;     // FFmpeg缓冲区引用
+struct AVHWFramesContext;  // FFmpeg硬件帧上下文
+struct AVCodecContext;  // FFmpeg编解码器上下文
+struct AVDictionary;    // FFmpeg字典（键值对）
 
 #ifdef _WIN32
 // Forward declarations of boost classes to avoid having to include boost headers
@@ -70,43 +73,50 @@ namespace nvenc {
 }
 
 namespace platf {
-  // Limited by bits in activeGamepadMask
+  // 最多支持的16个手柄，受activeGamepadMask位数限制
   constexpr auto MAX_GAMEPADS = 16;
 
-  constexpr std::uint32_t DPAD_UP = 0x0001;
-  constexpr std::uint32_t DPAD_DOWN = 0x0002;
-  constexpr std::uint32_t DPAD_LEFT = 0x0004;
-  constexpr std::uint32_t DPAD_RIGHT = 0x0008;
-  constexpr std::uint32_t START = 0x0010;
-  constexpr std::uint32_t BACK = 0x0020;
-  constexpr std::uint32_t LEFT_STICK = 0x0040;
-  constexpr std::uint32_t RIGHT_STICK = 0x0080;
-  constexpr std::uint32_t LEFT_BUTTON = 0x0100;
-  constexpr std::uint32_t RIGHT_BUTTON = 0x0200;
-  constexpr std::uint32_t HOME = 0x0400;
-  constexpr std::uint32_t A = 0x1000;
-  constexpr std::uint32_t B = 0x2000;
-  constexpr std::uint32_t X = 0x4000;
-  constexpr std::uint32_t Y = 0x8000;
-  constexpr std::uint32_t PADDLE1 = 0x010000;
-  constexpr std::uint32_t PADDLE2 = 0x020000;
-  constexpr std::uint32_t PADDLE3 = 0x040000;
-  constexpr std::uint32_t PADDLE4 = 0x080000;
-  constexpr std::uint32_t TOUCHPAD_BUTTON = 0x100000;
-  constexpr std::uint32_t MISC_BUTTON = 0x200000;
+  // 手柄按键位掩码定义（每个按键对应一个位）
+  constexpr std::uint32_t DPAD_UP = 0x0001;       ///< 方向键上
+  constexpr std::uint32_t DPAD_DOWN = 0x0002;     ///< 方向键下
+  constexpr std::uint32_t DPAD_LEFT = 0x0004;     ///< 方向键左
+  constexpr std::uint32_t DPAD_RIGHT = 0x0008;    ///< 方向键右
+  constexpr std::uint32_t START = 0x0010;          ///< 开始按键
+  constexpr std::uint32_t BACK = 0x0020;           ///< 返回按键
+  constexpr std::uint32_t LEFT_STICK = 0x0040;     ///< 左摇杆按下
+  constexpr std::uint32_t RIGHT_STICK = 0x0080;    ///< 右摇杆按下
+  constexpr std::uint32_t LEFT_BUTTON = 0x0100;    ///< 左肩按键(LB)
+  constexpr std::uint32_t RIGHT_BUTTON = 0x0200;   ///< 右肩按键(RB)
+  constexpr std::uint32_t HOME = 0x0400;           ///< 主页按键
+  constexpr std::uint32_t A = 0x1000;              ///< A按键
+  constexpr std::uint32_t B = 0x2000;              ///< B按键
+  constexpr std::uint32_t X = 0x4000;              ///< X按键
+  constexpr std::uint32_t Y = 0x8000;              ///< Y按键
+  constexpr std::uint32_t PADDLE1 = 0x010000;      ///< 背部拨片1
+  constexpr std::uint32_t PADDLE2 = 0x020000;      ///< 背部拨片2
+  constexpr std::uint32_t PADDLE3 = 0x040000;      ///< 背部拨片3
+  constexpr std::uint32_t PADDLE4 = 0x080000;      ///< 背部拨片4
+  constexpr std::uint32_t TOUCHPAD_BUTTON = 0x100000;  ///< 触摸板按下
+  constexpr std::uint32_t MISC_BUTTON = 0x200000;  ///< 其他按键
 
+  /**
+   * @brief 支持的手柄信息结构体。
+   */
   struct supported_gamepad_t {
-    std::string name;
-    bool is_enabled;
-    std::string reason_disabled;
+    std::string name;  ///< 手柄名称
+    bool is_enabled;  ///< 是否启用
+    std::string reason_disabled;  ///< 禁用原因
   };
 
+  /**
+   * @brief 手柄反馈类型枚举（从服务端发向客户端）。
+   */
   enum class gamepad_feedback_e {
-    rumble,  ///< Rumble
-    rumble_triggers,  ///< Rumble triggers
-    set_motion_event_state,  ///< Set motion event state
-    set_rgb_led,  ///< Set RGB LED
-    set_adaptive_triggers,  ///< Set adaptive triggers
+    rumble,  ///< 震动反馈
+    rumble_triggers,  ///< 扩展触发器震动
+    set_motion_event_state,  ///< 设置运动事件状态
+    set_rgb_led,  ///< 设置RGB LED灯光
+    set_adaptive_triggers,  ///< 设置自适应扩展触发器（PS5 DualSense）
   };
 
   struct gamepad_feedback_msg_t {
@@ -189,23 +199,28 @@ namespace platf {
 
   using feedback_queue_t = safe::mail_raw_t::queue_t<gamepad_feedback_msg_t>;
 
+  /**
+   * @brief 扬声器通道布局命名空间。定义立体声通道映射。
+   */
   namespace speaker {
     enum speaker_e {
-      FRONT_LEFT,  ///< Front left
-      FRONT_RIGHT,  ///< Front right
-      FRONT_CENTER,  ///< Front center
-      LOW_FREQUENCY,  ///< Low frequency
-      BACK_LEFT,  ///< Back left
-      BACK_RIGHT,  ///< Back right
-      SIDE_LEFT,  ///< Side left
-      SIDE_RIGHT,  ///< Side right
-      MAX_SPEAKERS,  ///< Maximum number of speakers
+      FRONT_LEFT,  ///< 前左
+      FRONT_RIGHT,  ///< 前右
+      FRONT_CENTER,  ///< 前中
+      LOW_FREQUENCY,  ///< 低频/重低音
+      BACK_LEFT,  ///< 后左
+      BACK_RIGHT,  ///< 后右
+      SIDE_LEFT,  ///< 侧左
+      SIDE_RIGHT,  ///< 侧右
+      MAX_SPEAKERS,  ///< 最大扬声器数
     };
 
+    // 立体声通道布局映射——2声道
     constexpr std::uint8_t map_stereo[] {
       FRONT_LEFT,
       FRONT_RIGHT
     };
+    // 立体声通道布局映射——5.1声道
     constexpr std::uint8_t map_surround51[] {
       FRONT_LEFT,
       FRONT_RIGHT,
@@ -214,6 +229,7 @@ namespace platf {
       BACK_LEFT,
       BACK_RIGHT,
     };
+    // 立体声通道布局映射——7.1声道
     constexpr std::uint8_t map_surround71[] {
       FRONT_LEFT,
       FRONT_RIGHT,
@@ -226,24 +242,30 @@ namespace platf {
     };
   }  // namespace speaker
 
+  /**
+   * @brief 内存类型枚举（编码设备使用的内存类型）。
+   */
   enum class mem_type_e {
-    system,  ///< System memory
-    vaapi,  ///< VAAPI
-    dxgi,  ///< DXGI
-    cuda,  ///< CUDA
-    videotoolbox,  ///< VideoToolbox
-    unknown  ///< Unknown
+    system,  ///< 系统内存（软件编码）
+    vaapi,  ///< VA-API（Linux硬件加速）
+    dxgi,  ///< DXGI（Windows Direct3D）
+    cuda,  ///< CUDA（NVIDIA GPU）
+    videotoolbox,  ///< VideoToolbox（macOS硬件加速）
+    unknown  ///< 未知
   };
 
+  /**
+   * @brief 像素格式枚举（编码输入支持的像素格式）。
+   */
   enum class pix_fmt_e {
-    yuv420p,  ///< YUV 4:2:0
-    yuv420p10,  ///< YUV 4:2:0 10-bit
-    nv12,  ///< NV12
-    p010,  ///< P010
-    ayuv,  ///< AYUV
-    yuv444p16,  ///< Planar 10-bit (shifted to 16-bit) YUV 4:4:4
-    y410,  ///< Y410
-    unknown  ///< Unknown
+    yuv420p,  ///< YUV 4:2:0 平面格式
+    yuv420p10,  ///< YUV 4:2:0 10位平面格式
+    nv12,  ///< NV12（半平面YUV 4:2:0）
+    p010,  ///< P010（半平面YUV 4:2:0 10位）
+    ayuv,  ///< AYUV（打包YUV 4:4:4）
+    yuv444p16,  ///< 平面10位（左移到16位）YUV 4:4:4
+    y410,  ///< Y410（打包YUV 4:4:4 10位）
+    unknown  ///< 未知
   };
 
   inline std::string_view from_pix_fmt(pix_fmt_e pix_fmt) {
@@ -266,49 +288,56 @@ namespace platf {
     return "unknown"sv;
   }
 
-  // Dimensions for touchscreen input
+  // 触摸屏输入的尺寸/偏移信息（用于坐标转换）
   struct touch_port_t {
-    int offset_x;
-    int offset_y;
-    int width;
-    int height;
-    int logical_width;
-    int logical_height;
+    int offset_x;  ///< X偏移
+    int offset_y;  ///< Y偏移
+    int width;  ///< 宽度
+    int height;  ///< 高度
+    int logical_width;  ///< 逻辑宽度
+    int logical_height;  ///< 逻辑高度
   };
 
-  // These values must match Limelight-internal.h's SS_FF_* constants!
+  // 平台能力标志（这些值必须与Limelight-internal.h的SS_FF_*常量匹配！）
   namespace platform_caps {
     typedef uint32_t caps_t;
 
-    constexpr caps_t pen_touch = 0x01;  // Pen and touch events
-    constexpr caps_t controller_touch = 0x02;  // Controller touch events
+    constexpr caps_t pen_touch = 0x01;  ///< 支持触笔和触摸事件
+    constexpr caps_t controller_touch = 0x02;  ///< 支持手柄触摸事件
   };  // namespace platform_caps
 
+  /**
+   * @brief 手柄状态结构体（按键、摇杆、扩展触发器）。
+   */
   struct gamepad_state_t {
-    std::uint32_t buttonFlags;
-    std::uint8_t lt;
-    std::uint8_t rt;
-    std::int16_t lsX;
-    std::int16_t lsY;
-    std::int16_t rsX;
-    std::int16_t rsY;
+    std::uint32_t buttonFlags;  ///< 按键位掩码
+    std::uint8_t lt;  ///< 左扩展触发器（0-255）
+    std::uint8_t rt;  ///< 右扩展触发器（0-255）
+    std::int16_t lsX;  ///< 左摇杆X轴
+    std::int16_t lsY;  ///< 左摇杆Y轴
+    std::int16_t rsX;  ///< 右摇杆X轴
+    std::int16_t rsY;  ///< 右摇杆Y轴
   };
 
+  /**
+   * @brief 手柄ID结构体。
+   */
   struct gamepad_id_t {
-    // The global index is used when looking up gamepads in the platform's
-    // gamepad array. It identifies gamepads uniquely among all clients.
+    // 全局索引，用于在平台手柄数组中查找。在所有客户端中唯一标识手柄。
     int globalIndex;
 
-    // The client-relative index is the controller number as reported by the
-    // client. It must be used when communicating back to the client via
-    // the input feedback queue.
+    // 客户端相对索引，客户端报告的控制器编号。
+    // 用于通过输入反馈队列回复客户端时必须使用。
     std::uint8_t clientRelativeIndex;
   };
 
+  /**
+   * @brief 手柄接入信息结构体。
+   */
   struct gamepad_arrival_t {
-    std::uint8_t type;
-    std::uint16_t capabilities;
-    std::uint32_t supportedButtons;
+    std::uint8_t type;  ///< 手柄类型
+    std::uint16_t capabilities;  ///< 手柄能力标志
+    std::uint32_t supportedButtons;  ///< 支持的按键位掩码
   };
 
   struct gamepad_touch_t {
@@ -361,11 +390,17 @@ namespace platf {
     float contactAreaMinor;
   };
 
+  /**
+   * @brief 解初始化/清理的基类（RAII模式）。
+   */
   class deinit_t {
   public:
     virtual ~deinit_t() = default;
   };
 
+  /**
+   * @brief 图像帧结构体（捕获的屏幕图像）。
+   */
   struct img_t: std::enable_shared_from_this<img_t> {
   public:
     img_t() = default;
@@ -375,32 +410,37 @@ namespace platf {
     img_t &operator=(img_t &&) = delete;
     img_t &operator=(const img_t &) = delete;
 
-    std::uint8_t *data {};
-    std::int32_t width {};
-    std::int32_t height {};
-    std::int32_t pixel_pitch {};
-    std::int32_t row_pitch {};
+    std::uint8_t *data {};  ///< 原始像素数据
+    std::int32_t width {};  ///< 图像宽度
+    std::int32_t height {};  ///< 图像高度
+    std::int32_t pixel_pitch {};  ///< 每像素字节数
+    std::int32_t row_pitch {};  ///< 每行字节数
 
-    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< 帧时间戳
 
     virtual ~img_t() = default;
   };
 
+  /**
+   * @brief 音频输出设备（sink）信息结构体。
+   */
   struct sink_t {
-    // Play on host PC
+    // 主机播放设备名称
     std::string host;
 
-    // On macOS and Windows, it is not possible to create a virtual sink
-    // Therefore, it is optional
+    // 虚拟音频设备（在macOS和Windows上无法创建虚拟 sink，因此为可选）
     struct null_t {
-      std::string stereo;
-      std::string surround51;
-      std::string surround71;
+      std::string stereo;  ///< 立体声虚拟设备
+      std::string surround51;  ///< 5.1环绕声虚拟设备
+      std::string surround71;  ///< 7.1环绕声虚拟设备
     };
 
     std::optional<null_t> null;
   };
 
+  /**
+   * @brief 编码设备基类（将捕获的图像转换为编码器需要的格式）。
+   */
   struct encode_device_t {
     virtual ~encode_device_t() = default;
 
@@ -409,6 +449,9 @@ namespace platf {
     video::sunshine_colorspace_t colorspace;
   };
 
+  /**
+   * @brief 基于FFmpeg AVCodec的编码设备（支持硬件加速和软件编码）。
+   */
   struct avcodec_encode_device_t: encode_device_t {
     void *data {};
     AVFrame *frame {};
@@ -450,37 +493,46 @@ namespace platf {
     };
   };
 
+  /**
+   * @brief 基于NVENC的编码设备（使用NVIDIA编码器）。
+   */
   struct nvenc_encode_device_t: encode_device_t {
     virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
 
     nvenc::nvenc_base *nvenc = nullptr;
   };
 
+  /**
+   * @brief 捕获结果枚举。
+   */
   enum class capture_e : int {
-    ok,  ///< Success
-    reinit,  ///< Need to reinitialize
-    timeout,  ///< Timeout
-    interrupted,  ///< Capture was interrupted
-    error  ///< Error
+    ok,  ///< 成功
+    reinit,  ///< 需要重新初始化
+    timeout,  ///< 超时
+    interrupted,  ///< 捕获被中断
+    error  ///< 错误
   };
 
+  /**
+   * @brief 显示捕获抽象基类（屏幕捕获后端）。
+   *        提供帧捕获、图像分配、编码设备创建、HDR支持等接口。
+   */
   class display_t {
   public:
     /**
-     * @brief Callback for when a new image is ready.
-     * When display has a new image ready or a timeout occurs, this callback will be called with the image.
-     * If a frame was captured, frame_captured will be true. If a timeout occurred, it will be false.
-     * @retval true On success
-     * @retval false On break request
+     * @brief 新图像就绪时的回调。
+     * 当显示有新图像就绪或发生超时时，会调用此回调。
+     * 如果捕获了帧，frame_captured为true。如果超时，则为false。
+     * @retval true 成功
+     * @retval false 请求中断
      */
     using push_captured_image_cb_t = std::function<bool(std::shared_ptr<img_t> &&img, bool frame_captured)>;
 
     /**
-     * @brief Get free image from pool.
-     * Calls must be synchronized.
-     * Blocks until there is free image in the pool or capture is interrupted.
-     * @retval true On success, img_out contains free image
-     * @retval false When capture has been interrupted, img_out contains nullptr
+     * @brief 从池中获取空闲图像。
+     * 调用必须同步。阻塞直到池中有空闲图像或捕获被中断。
+     * @retval true 成功，img_out包含空闲图像
+     * @retval false 捕获已被中断，img_out包含nullptr
      */
     using pull_free_image_cb_t = std::function<bool(std::shared_ptr<img_t> &img_out)>;
 
@@ -490,16 +542,14 @@ namespace platf {
     }
 
     /**
-     * @brief Capture a frame.
-     * @param push_captured_image_cb The callback that is called with captured image,
-     * must be called from the same thread as capture()
-     * @param pull_free_image_cb Capture backends call this callback to get empty image from the pool.
-     * If backend uses multiple threads, calls to this callback must be synchronized.
-     * Calls to this callback and push_captured_image_cb must be synchronized as well.
-     * @param cursor A pointer to the flag that indicates whether the cursor should be captured as well.
-     * @retval capture_e::ok When stopping
-     * @retval capture_e::error On error
-     * @retval capture_e::reinit When need of reinitialization
+     * @brief 捕获一帧屏幕图像。
+     * @param push_captured_image_cb 捕获到图像时的回调，必须从capture()的同一线程调用。
+     * @param pull_free_image_cb 后端调用此回调从池中获取空白图像。
+     * 如果后端使用多线程，对此回调的调用必须同步。
+     * @param cursor 指向标志的指针，指示是否应同时捕获鼠标光标。
+     * @retval capture_e::ok 停止时
+     * @retval capture_e::error 出错时
+     * @retval capture_e::reinit 需要重新初始化时
      */
     virtual capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) = 0;
 
@@ -540,41 +590,50 @@ namespace platf {
 
     virtual ~display_t() = default;
 
-    // Offsets for when streaming a specific monitor. By default, they are 0.
-    int offset_x;
-    int offset_y;
-    int env_width;
-    int env_height;
-    int env_logical_width;
-    int env_logical_height;
-    int width;
-    int height;
-    int logical_width;
-    int logical_height;
+    // 流式传输时的显示尺寸和偏移信息
+    int offset_x;  ///< X偏移（用于指定监视器子区域）
+    int offset_y;  ///< Y偏移
+    int env_width;  ///< 环境/桌面宽度
+    int env_height;  ///< 环境/桌面高度
+    int env_logical_width;  ///< 环境逻辑宽度
+    int env_logical_height;  ///< 环境逻辑高度
+    int width;  ///< 捕获宽度
+    int height;  ///< 捕获高度
+    int logical_width;  ///< 逻辑宽度
+    int logical_height;  ///< 逻辑高度
 
   protected:
-    // collect capture timing data (at loglevel debug)
+    // 收集捕获延迟数据（debug日志级别）
     logging::time_delta_periodic_logger sleep_overshoot_logger = {debug, "Frame capture sleep overshoot"};
   };
 
+  /**
+   * @brief 麦克风捕获抽象基类。
+   */
   class mic_t {
   public:
+    /**
+     * @brief 采样一帧音频数据。
+     */
     virtual capture_e sample(std::vector<float> &frame_buffer) = 0;
 
     virtual ~mic_t() = default;
   };
 
+  /**
+   * @brief 音频控制抽象基类（管理音频设备和麦克风）。
+   */
   class audio_control_t {
   public:
     virtual int set_sink(const std::string &sink) = 0;
 
     virtual std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous, [[maybe_unused]] bool host_audio_enabled) = 0;
 
-    /**
-     * @brief Check if the audio sink is available in the system.
-     * @param sink Sink to be checked.
-     * @returns True if available, false otherwise.
-     */
+  /**
+   * @brief 检查指定的音频设备是否在系统中可用。
+   * @param sink 要检查的设备名称。
+   * @returns 可用返回true，否则返回false。
+   */
     virtual bool is_sink_available(const std::string &sink) = 0;
 
     virtual std::optional<sink_t> sink_info() = 0;
@@ -582,61 +641,63 @@ namespace platf {
     virtual ~audio_control_t() = default;
   };
 
-  void freeInput(void *);
+  void freeInput(void *);  ///< 释放输入上下文
 
-  using input_t = util::safe_ptr<void, freeInput>;
+  using input_t = util::safe_ptr<void, freeInput>;  ///< 平台输入上下文智能指针
 
-  std::filesystem::path appdata();
+  std::filesystem::path appdata();  ///< 获取应用程序数据目录路径
 
-  std::string get_mac_address(const std::string_view &address);
+  std::string get_mac_address(const std::string_view &address);  ///< 获取MAC地址
 
-  std::string from_sockaddr(const sockaddr *const);
-  std::pair<std::uint16_t, std::string> from_sockaddr_ex(const sockaddr *const);
+  std::string from_sockaddr(const sockaddr *const);  ///< 将sockaddr转换为字符串
+  std::pair<std::uint16_t, std::string> from_sockaddr_ex(const sockaddr *const);  ///< 将sockaddr转换为端口+地址
 
-  std::unique_ptr<audio_control_t> audio_control();
+  std::unique_ptr<audio_control_t> audio_control();  ///< 创建平台特定的音频控制实例
 
   /**
-   * @brief Get the display_t instance for the given hwdevice_type.
-   * If display_name is empty, use the first monitor that's compatible you can find
-   * If you require to use this parameter in a separate thread, make a copy of it.
-   * @param display_name The name of the monitor that SHOULD be displayed
-   * @param config Stream configuration
-   * @return The display_t instance based on hwdevice_type.
+   * @brief 获取指定硬件设备类型的显示捕获实例。
+   * 如果display_name为空，使用第一个兼容的监视器。
+   * @param display_name 要显示的监视器名称。
+   * @param config 流配置。
+   * @return 基于硬件设备类型的display_t实例。
    */
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
-  // A list of names of displays accepted as display_name with the mem_type_e
+  // 获取指定内存类型支持的显示名称列表
   std::vector<std::string> display_names(mem_type_e hwdevice_type);
 
   /**
-   * @brief Check if GPUs/drivers have changed since the last call to this function.
-   * @return `true` if a change has occurred or if it is unknown whether a change occurred.
+   * @brief 检查GPU/驱动程序自上次调用以来是否发生了变化。
+   * @return 如果发生了变化或无法确定，返回`true`。
    */
   bool needs_encoder_reenumeration();
 
   boost::process::v1::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::v1::environment &env, FILE *file, std::error_code &ec, boost::process::v1::group *group);
 
+  /**
+   * @brief 线程优先级枚举。
+   */
   enum class thread_priority_e : int {
-    low,  ///< Low priority
-    normal,  ///< Normal priority
-    high,  ///< High priority
-    critical  ///< Critical priority
+    low,  ///< 低优先级
+    normal,  ///< 普通优先级
+    high,  ///< 高优先级
+    critical  ///< 关键优先级
   };
-  void adjust_thread_priority(thread_priority_e priority);
+  void adjust_thread_priority(thread_priority_e priority);  ///< 调整当前线程优先级
 
   /**
-   * @brief Name the current thread for use with development tools.
-   * @note On Linux this will be truncated after 15 characters.
+   * @brief 为开发工具命名当前线程。
+   * @note 在Linux上会截断为15个字符。
    */
   void set_thread_name(const std::string &name);
 
-  void enable_mouse_keys();
+  void enable_mouse_keys();  ///< 启用鼠标键功能
 
-  // Allow OS-specific actions to be taken to prepare for streaming
-  void streaming_will_start();
-  void streaming_will_stop();
+  // 允许在流式传输前/后执行操作系统特定的准备/清理操作
+  void streaming_will_start();  ///< 流式传输即将开始
+  void streaming_will_stop();  ///< 流式传输即将停止
 
-  void restart();
+  void restart();  ///< 重启Sunshine服务
 
   /**
    * @brief Set an environment variable.
@@ -728,82 +789,82 @@ namespace platf {
 
   bool send(send_info_t &send_info);
 
+  /**
+   * @brief QoS数据类型枚举（网络服务质量标记）。
+   */
   enum class qos_data_type_e : int {
-    audio,  ///< Audio
-    video  ///< Video
+    audio,  ///< 音频数据
+    video  ///< 视频数据
   };
 
   /**
-   * @brief Enable QoS on the given socket for traffic to the specified destination.
-   * @param native_socket The native socket handle.
-   * @param address The destination address for traffic sent on this socket.
-   * @param port The destination port for traffic sent on this socket.
-   * @param data_type The type of traffic sent on this socket.
-   * @param dscp_tagging Specifies whether to enable DSCP tagging on outgoing traffic.
+   * @brief 在给定套接字上启用QoS服务质量标记。
+   * @param native_socket 原生套接字句柄。
+   * @param address 目标地址。
+   * @param port 目标端口。
+   * @param data_type 流量类型（音频/视频）。
+   * @param dscp_tagging 是否启用DSCP标记。
    */
   std::unique_ptr<deinit_t> enable_socket_qos(uintptr_t native_socket, boost::asio::ip::address &address, uint16_t port, qos_data_type_e data_type, bool dscp_tagging);
 
   /**
-   * @brief Open a url in the default web browser.
-   * @param url The url to open.
+   * @brief 在默认浏览器中打开URL。
+   * @param url 要打开的URL。
    */
   void open_url(const std::string &url);
 
   /**
-   * @brief Attempt to gracefully terminate a process group.
-   * @param native_handle The native handle of the process group.
-   * @return `true` if termination was successfully requested.
+   * @brief 尝试优雅地终止进程组。
+   * @param native_handle 进程组的原生句柄。
+   * @return 如果成功请求终止，返回`true`。
    */
   bool request_process_group_exit(std::uintptr_t native_handle);
 
   /**
-   * @brief Check if a process group still has running children.
-   * @param native_handle The native handle of the process group.
-   * @return `true` if processes are still running.
+   * @brief 检查进程组是否仍有运行中的子进程。
+   * @param native_handle 进程组的原生句柄。
+   * @return 如果仍有进程运行，返回`true`。
    */
   bool process_group_running(std::uintptr_t native_handle);
 
-  input_t input();
+  input_t input();  ///< 创建平台输入上下文
   /**
-   * @brief Get the current mouse position on screen
-   * @param input The input_t instance to use.
-   * @return Screen coordinates of the mouse.
-   * @examples
-   * auto [x, y] = get_mouse_loc(input);
-   * @examples_end
+   * @brief 获取当前鼠标在屏幕上的位置。
+   * @param input 平台输入上下文。
+   * @return 鼠标的屏幕坐标。
    */
-  util::point_t get_mouse_loc(input_t &input);
-  void move_mouse(input_t &input, int deltaX, int deltaY);
-  void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y);
-  void button_mouse(input_t &input, int button, bool release);
-  void scroll(input_t &input, int distance);
-  void hscroll(input_t &input, int distance);
-  void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags);
-  void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state);
-  void unicode(input_t &input, char *utf8, int size);
+  util::point_t get_mouse_loc(input_t &input);  ///< 获取鼠标位置
+  void move_mouse(input_t &input, int deltaX, int deltaY);  ///< 移动鼠标（相对偏移）
+  void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y);  ///< 移动鼠标（绝对位置）
+  void button_mouse(input_t &input, int button, bool release);  ///< 鼠标按键事件
+  void scroll(input_t &input, int distance);  ///< 鼠标滚轮滨动
+  void hscroll(input_t &input, int distance);  ///< 鼠标水平滚动
+  void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags);  ///< 键盘按键事件
+  void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state);  ///< 手柄状态更新
+  void unicode(input_t &input, char *utf8, int size);  ///< Unicode字符输入
 
   typedef deinit_t client_input_t;
 
   /**
-   * @brief Allocate a context to store per-client input data.
-   * @param input The global input context.
-   * @return A unique pointer to a per-client input data context.
+   * @brief 分配每个客户端的输入数据上下文。
+   * @param input 全局输入上下文。
+   * @return 指向客户端输入数据上下文的唯一指针。
    */
   std::unique_ptr<client_input_t> allocate_client_input_context(input_t &input);
 
   /**
-   * @brief Send a touch event to the OS.
-   * @param input The client-specific input context.
-   * @param touch_port The current viewport for translating to screen coordinates.
-   * @param touch The touch event.
+   * @brief 向操作系统发送触摸事件。
+   * @param input 客户端特定输入上下文。
+   * @param touch_port 当前视口（用于坐标转换）。
+   * @param touch 触摸事件数据。
    */
   void touch_update(client_input_t *input, const touch_port_t &touch_port, const touch_input_t &touch);
 
   /**
-   * @brief Send a pen event to the OS.
-   * @param input The client-specific input context.
-   * @param touch_port The current viewport for translating to screen coordinates.
-   * @param pen The pen event.
+   * @brief 向操作系统发送触笔事件。
+   * @param input 客户端特定输入上下文。
+   * @param touch_port 当前视口（用于坐标转换）。
+   * @param pen 触笔事件数据。
    */
   void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen);
 
@@ -829,64 +890,70 @@ namespace platf {
   void gamepad_battery(input_t &input, const gamepad_battery_t &battery);
 
   /**
-   * @brief Create a new virtual gamepad.
-   * @param input The global input context.
-   * @param id The gamepad ID.
-   * @param metadata Controller metadata from client (empty if none provided).
-   * @param feedback_queue The queue for posting messages back to the client.
-   * @return 0 on success.
+   * @brief 创建新的虚拟手柄。
+   * @param input 全局输入上下文。
+   * @param id 手柄ID。
+   * @param metadata 客户端提供的手柄元数据（可能为空）。
+   * @param feedback_queue 用于向客户端发回消息的队列。
+   * @return 成功返回0。
    */
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue);
   void free_gamepad(input_t &input, int nr);
 
   /**
-   * @brief Get the supported platform capabilities to advertise to the client.
-   * @return Capability flags.
+   * @brief 获取平台支持的能力标志（通告客户端）。
+   * @return 能力标志。
    */
   platform_caps::caps_t get_capabilities();
 
-  constexpr auto SERVICE_NAME = "Sunshine";
-  constexpr auto SERVICE_TYPE = "_nvstream._tcp";
-
-  namespace publish {
-    [[nodiscard]] std::unique_ptr<deinit_t> start();
-  }
-
-  [[nodiscard]] std::unique_ptr<deinit_t> init();
+  constexpr auto SERVICE_NAME = "Sunshine";  ///< mDNS服务名称
+  constexpr auto SERVICE_TYPE = "_nvstream._tcp";  ///< mDNS服务类型（NVStream协议）
 
   /**
-   * @brief Returns the current computer name in UTF-8.
-   * @return Computer name or a placeholder upon failure.
+   * @brief mDNS服务发布命名空间。
+   */
+  namespace publish {
+    [[nodiscard]] std::unique_ptr<deinit_t> start();  ///< 启动mDNS服务发布
+  }
+
+  [[nodiscard]] std::unique_ptr<deinit_t> init();  ///< 初始化平台子系统
+
+  /**
+   * @brief 返回当前计算机名称（UTF-8编码）。
+   * @return 计算机名称，失败时返回占位符。
    */
   std::string get_host_name();
 
   /**
-   * @brief Gets the supported gamepads for this platform backend.
-   * @details This may be called prior to `platf::input()`!
-   * @param input Pointer to the platform's `input_t` or `nullptr`.
-   * @return Vector of gamepad options and status.
+   * @brief 获取当前平台后端支持的手柄类型列表。
+   * @details 可能在`platf::input()`之前被调用！
+   * @param input 平台的`input_t`指针或`nullptr`。
+   * @return 手柄选项和状态向量。
    */
   std::vector<supported_gamepad_t> &supported_gamepads(input_t *input);
 
+  /**
+   * @brief 高精度定时器抽象基类（用于精确帧间隔控制）。
+   */
   struct high_precision_timer: private boost::noncopyable {
     virtual ~high_precision_timer() = default;
 
     /**
-     * @brief Sleep for the duration
-     * @param duration Sleep duration
+     * @brief 休眠指定时间。
+     * @param duration 休眠时长。
      */
     virtual void sleep_for(const std::chrono::nanoseconds &duration) = 0;
 
     /**
-     * @brief Check if platform-specific timer backend has been initialized successfully
-     * @return `true` on success, `false` on error
+     * @brief 检查平台特定的定时器后端是否已成功初始化。
+     * @return 成功返回`true`，失败返回`false`
      */
     virtual operator bool() = 0;
   };
 
   /**
-   * @brief Create platform-specific timer capable of high-precision sleep
-   * @return A unique pointer to timer
+   * @brief 创建平台特定的高精度定时器。
+   * @return 定时器的唯一指针。
    */
   std::unique_ptr<high_precision_timer> create_high_precision_timer();
 

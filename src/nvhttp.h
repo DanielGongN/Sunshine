@@ -1,64 +1,65 @@
 /**
  * @file src/nvhttp.h
- * @brief Declarations for the nvhttp (GameStream) server.
+ * @brief NVIDIA GameStream HTTP服务器的声明
+ * 实现与Moonlight客户端完全兼容的GameStream协议
+ * 包含设备配对、应用列表、串流会话管理等功能
  */
-// macros
+// 宏定义
 #pragma once
 
-// standard includes
+// 标准库头文件
 #include <string>
 
-// lib includes
-#include <boost/property_tree/ptree.hpp>
-#include <nlohmann/json.hpp>
-#include <Simple-Web-Server/server_https.hpp>
+// 第三方库头文件
+#include <boost/property_tree/ptree.hpp>       // 属性树（用于XML响应生成）
+#include <nlohmann/json.hpp>                    // JSON处理
+#include <Simple-Web-Server/server_https.hpp>  // HTTPS服务器
 
-// local includes
-#include "crypto.h"
-#include "thread_safe.h"
+// 本地项目头文件
+#include "crypto.h"      // 加密函数（配对加密）
+#include "thread_safe.h" // 线程安全工具
 
 /**
- * @brief Contains all the functions and variables related to the nvhttp (GameStream) server.
+ * @brief NVIDIA GameStream HTTP协议实现命名空间
+ * Sunshine模拟NVIDIA GameStream服务器，让Moonlight客户端认为连接的是官方GameStream
  */
 namespace nvhttp {
 
   /**
-   * @brief The protocol version.
-   * @details The version of the GameStream protocol we are mocking.
-   * @note The negative 4th number indicates to Moonlight that this is Sunshine.
+   * @brief 模拟的GameStream协议版本
+   * 负数第4位告知Moonlight客户端这是Sunshine而非NVIDIA官方
    */
   constexpr auto VERSION = "7.1.431.-1";
 
   /**
-   * @brief The GFE version we are replicating.
+   * @brief 模拟的GeForce Experience版本号
    */
   constexpr auto GFE_VERSION = "3.23.0.74";
 
   /**
-   * @brief The HTTP port, as a difference from the config port.
+   * @brief HTTP端口偏移量（相对于基础端口）
    */
   constexpr auto PORT_HTTP = 0;
 
   /**
-   * @brief The HTTPS port, as a difference from the config port.
+   * @brief HTTPS端口偏移量（基础端口-5）
    */
   constexpr auto PORT_HTTPS = -5;
 
   /**
-   * @brief Start the nvhttp server.
-   * @examples
-   * nvhttp::start();
-   * @examples_end
+   * @brief 启动nvhttp GameStream服务器（在独立线程中运行）
    */
   void start();
 
   /**
-   * @brief Setup the nvhttp server.
-   * @param pkey
-   * @param cert
+   * @brief 配置nvhttp服务器的SSL证书和私钥
    */
   void setup(const std::string &pkey, const std::string &cert);
 
+  /**
+   * @brief 自定义HTTPS连接类
+   * 继承Simple-Web-Server的HTTPS连接，析构时优雅关闭TLS连接
+   */
   class SunshineHTTPS: public SimpleWeb::HTTPS {
   public:
     SunshineHTTPS(boost::asio::io_context &io_context, boost::asio::ssl::context &ctx):
@@ -72,12 +73,16 @@ namespace nvhttp {
     }
   };
 
+  /**
+   * @brief 配对阶段枚举
+   * Moonlight客户端与Sunshine配对时的状态机阶段
+   */
   enum class PAIR_PHASE {
-    NONE,  ///< Sunshine is not in a pairing phase
-    GETSERVERCERT,  ///< Sunshine is in the get server certificate phase
-    CLIENTCHALLENGE,  ///< Sunshine is in the client challenge phase
-    SERVERCHALLENGERESP,  ///< Sunshine is in the server challenge response phase
-    CLIENTPAIRINGSECRET  ///< Sunshine is in the client pairing secret phase
+    NONE,  ///< 未在配对中
+    GETSERVERCERT,  ///< 获取服务器证书阶段
+    CLIENTCHALLENGE,  ///< 客户端挑战阶段
+    SERVERCHALLENGERESP,  ///< 服务器挑战响应阶段
+    CLIENTPAIRINGSECRET  ///< 客户端配对密钥阶段
   };
 
   struct pair_session_t {

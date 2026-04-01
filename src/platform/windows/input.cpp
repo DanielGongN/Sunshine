@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/input.cpp
- * @brief Definitions for input handling on Windows.
+ * @brief Windows输入处理实现。包括鼠标、键盘、手柄、触摸、触笔等输入设备模拟。
  */
 #define WINVER 0x0A00
 
@@ -193,7 +193,11 @@ namespace platf {
 
   class vigem_t {
   public:
+    /**
+     * @brief 初始化ViGEm驱动连接，探测是否可以成功挂载虚拟手柄
+     */
     int init() {
+      // 启动时探测ViGEm驱动是否可用，失败时在Web UI显示错误
       // Probe ViGEm during startup to see if we can successfully attach gamepads. This will allow us to
       // immediately display the error message in the web UI even before the user tries to stream.
       client_t client {vigem_alloc()};
@@ -217,6 +221,9 @@ namespace platf {
      * @param gp_type The type of gamepad.
      * @return 0 on success.
      */
+    /**
+     * @brief 分配虚拟手柄：根据类型创建X360/DS4控制器→连接ViGEm→注册按键回调
+     */
     int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, VIGEM_TARGET_TYPE gp_type) {
       auto &gamepad = gamepads[id.globalIndex];
       assert(!gamepad.gp);
@@ -224,6 +231,7 @@ namespace platf {
       gamepad.client_relative_index = id.clientRelativeIndex;
       gamepad.last_report_ts = std::chrono::steady_clock::now();
 
+      // 建立ViGEm驱动连接（延迟初始化，仅在需要时创建）
       // Establish a connect to the ViGEm driver if we don't have one yet
       if (!client) {
         BOOST_LOG(debug) << "Connecting to ViGEmBus driver"sv;
@@ -238,9 +246,11 @@ namespace platf {
       }
 
       if (gp_type == Xbox360Wired) {
+        // 创建Xbox 360虚拟手柄并初始化报告
         gamepad.gp.reset(vigem_target_x360_alloc());
         XUSB_REPORT_INIT(&gamepad.report.x360);
       } else {
+        // 创建DualShock 4虚拟手柄，初始化运动传感器并请求客户端100Hz报告
         gamepad.gp.reset(vigem_target_ds4_alloc());
 
         // There is no equivalent DS4_REPORT_EX_INIT()
@@ -258,6 +268,7 @@ namespace platf {
         gamepad.available_pointers = 0x3;
       }
 
+      // 将虚拟手柄添加到ViGEm总线
       auto status = vigem_target_add(client.get(), gamepad.gp.get());
       if (!VIGEM_SUCCESS(status)) {
         BOOST_LOG(error) << "Couldn't add Gamepad to ViGEm connection ["sv << util::hex(status).to_string_view() << ']';
@@ -267,6 +278,7 @@ namespace platf {
 
       gamepad.feedback_queue = std::move(feedback_queue);
 
+      // 注册振动回调，ViGEm会在游戏触发振动时回调此函数
       if (gp_type == Xbox360Wired) {
         status = vigem_target_x360_register_notification(client.get(), gamepad.gp.get(), x360_notify, this);
       } else {
@@ -321,6 +333,9 @@ namespace platf {
      * @param target The gamepad.
      * @param largeMotor The large motor.
      * @param smallMotor The small motor.
+     */
+    /**
+     * @brief 将振动数据回传给客户端（将ViGEm回调的震动参数转换为16位值发送）
      */
     void rumble(target_t::pointer target, std::uint8_t largeMotor, std::uint8_t smallMotor) {
       for (int x = 0; x < gamepads.size(); ++x) {
@@ -462,13 +477,13 @@ namespace platf {
   }
 
   /**
-   * @brief Calls SendInput() and switches input desktops if required.
-   * @param i The `INPUT` struct to send.
+   * @brief 调用SendInput()发送输入，失败时自动同步到当前输入桌面并重试
    */
   void send_input(INPUT &i) {
   retry:
     auto send = SendInput(1, &i, sizeof(INPUT));
     if (send != 1) {
+      // 发送失败时尝试同步桌面（处理UAC/锁屏等桌面切换）
       auto hDesk = syncThreadDesktop();
       if (_lastKnownInputDesktop != hDesk) {
         _lastKnownInputDesktop = hDesk;
@@ -510,9 +525,11 @@ namespace platf {
       MOUSEEVENTF_MOVE |
       MOUSEEVENTF_ABSOLUTE |
 
+      // VIRTUALDESK映射到整个虚拟桌面而非主显示器
       // MOUSEEVENTF_VIRTUALDESK maps to the entirety of the desktop rather than the primary desktop
       MOUSEEVENTF_VIRTUALDESK;
 
+    // 将触摸坐标缩放到Windows绝对坐标系（0-65535）
     auto scaled_x = std::lround((x + touch_port.offset_x) * ((float) target_touch_port.width / (float) touch_port.width));
     auto scaled_y = std::lround((y + touch_port.offset_y) * ((float) target_touch_port.height / (float) touch_port.height));
 
@@ -601,6 +618,7 @@ namespace platf {
     i.type = INPUT_KEYBOARD;
     auto &ki = i.ki;
 
+    // 如果客户端已将VK码标准化为美式英语布局，直接查表转换为扫描码
     // If the client did not normalize this VK code to a US English layout, we can't accurately convert it to a scancode.
     // If we're set to always send scancodes, we will use the current keyboard layout to convert to a scancode. This will
     // assume the client and host have the same keyboard layout, but it's probably better than always using US English.
@@ -612,6 +630,7 @@ namespace platf {
       ki.wScan = MapVirtualKey(modcode, MAPVK_VK_TO_VSC);
     }
 
+    // 优先用扫描码发送（游戏兼容性更好），否则用VK码
     // If we can map this to a scancode, send it as a scancode for maximum game compatibility.
     if (ki.wScan) {
       ki.dwFlags = KEYEVENTF_SCANCODE;
@@ -1136,6 +1155,7 @@ namespace platf {
   }
 
   void unicode(input_t &input, char *utf8, int size) {
+    // UTF-8最坏情况每字节对应一个UTF-16字符
     // We can do no worse than one UTF-16 character per byte of UTF-8
     std::vector<WCHAR> wide(size);
 
@@ -1144,6 +1164,7 @@ namespace platf {
       return;
     }
 
+    // 先发送所有键按下事件（用KEYEVENTF_UNICODE直接发送Unicode字符）
     // Send all key down events
     for (int i = 0; i < chars; i++) {
       INPUT input {};
@@ -1170,6 +1191,7 @@ namespace platf {
       return 0;
     }
 
+    // 手柄类型选择逻辑：手动配置 > 客户端报告类型 > 传感器能力 > 默认X360
     VIGEM_TARGET_TYPE selectedGamepadType;
 
     if (config::input.gamepad == "x360"sv) {
@@ -1445,6 +1467,7 @@ namespace platf {
   void ds4_update_ts_and_send(vigem_t *vigem, int nr) {
     auto &gamepad = vigem->gamepads[nr];
 
+    // 取消上一次待定时更新，下面会重新入队
     // Cancel any pending updates. We will requeue one here when we're finished.
     if (gamepad.repeat_task) {
       task_pool.cancel(gamepad.repeat_task);
@@ -1455,6 +1478,7 @@ namespace platf {
       auto now = std::chrono::steady_clock::now();
       auto delta_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - gamepad.last_report_ts);
 
+      // DS4时间戳以5.333微秒为单位，基于上次报告的时间差递增
       // Timestamp is reported in 5.333us units
       gamepad.report.ds4.Report.wTimestamp += (uint16_t) (delta_ns.count() / 5333);
 
@@ -1465,6 +1489,7 @@ namespace platf {
         return;
       }
 
+      // 至少每100ms重复发送，防止16位时间戳溢出
       // Repeat at least every 100ms to keep the 16-bit timestamp field from overflowing
       gamepad.last_report_ts = now;
       gamepad.repeat_task = task_pool.pushDelayed(ds4_update_ts_and_send, 100ms, vigem, nr).task_id;
@@ -1476,6 +1501,9 @@ namespace platf {
    * @param input The input context.
    * @param nr The gamepad index to update.
    * @param gamepad_state The gamepad button/axis state sent from the client.
+   */
+  /**
+   * @brief 更新手柄状态：转换按键映射、摇杆、扳机值并发送给ViGEm
    */
   void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
     auto vigem = ((input_raw_t *) input.get())->vigem;
@@ -1508,6 +1536,12 @@ namespace platf {
    * @brief Sends a gamepad touch event to the OS.
    * @param input The global input context.
    * @param touch The touch event.
+   */
+  /**
+   * @brief 发送手柄触摸板输入（DS4触摸板坐标、按下状态）
+   */
+  /**
+   * @brief 发送手柄触摸板输入：维护触摸点跟踪，转换坐标到DS4触摸板范围
    */
   void gamepad_touch(input_t &input, const gamepad_touch_t &touch) {
     auto vigem = ((input_raw_t *) input.get())->vigem;
@@ -1615,6 +1649,12 @@ namespace platf {
    * @param input The global input context.
    * @param motion The motion event.
    */
+  /**
+   * @brief 发送手柄运动传感器数据（加速度计/陀螺仪）
+   */
+  /**
+   * @brief 发送手柄运动传感器数据（加速度计/陀螺仪转换后发给ViGEm）
+   */
   void gamepad_motion(input_t &input, const gamepad_motion_t &motion) {
     auto vigem = ((input_raw_t *) input.get())->vigem;
 
@@ -1641,6 +1681,12 @@ namespace platf {
    * @brief Sends a gamepad battery event to the OS.
    * @param input The global input context.
    * @param battery The battery event.
+   */
+  /**
+   * @brief 发送手柄电池状态更新（通过ViGEm写入DS4电池值）
+   */
+  /**
+   * @brief 发送手柄电池状态：转换百分比和充电状态到DS4报告格式
    */
   void gamepad_battery(input_t &input, const gamepad_battery_t &battery) {
     auto vigem = ((input_raw_t *) input.get())->vigem;

@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/misc.cpp
- * @brief Miscellaneous definitions for Linux.
+ * @brief Linux平台杂项实现。包括线程优先级、服务控制、网络发送、QoS等。
  */
 
 // Required for in6_pktinfo with glibc headers
@@ -286,6 +286,9 @@ namespace platf {
     return "00:00:00:00:00:00"s;
   }
 
+  /**
+   * @brief 运行外部命令：支持I/O重定向、进程组和环境变量
+   */
   bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
     // clang-format off
     if (!group) {
@@ -327,6 +330,9 @@ namespace platf {
     }
   }
 
+  /**
+   * @brief 调整线程优先级（通过RTKit D-Bus或setpriority）
+   */
   void adjust_thread_priority(thread_priority_e priority) {
 #if defined(__FreeBSD__)
     pid_t tid = syscall(SYS_thr_self);
@@ -483,6 +489,9 @@ namespace platf {
     return saddr_v6;
   }
 
+  /**
+   * @brief 使用GSO/sendmsg批量发送UDP数据包（支持IPv4/IPv6双栈）
+   */
   bool send_batch(batched_send_info_t &send_info) {
     auto sockfd = (int) send_info.native_socket;
     struct msghdr msg = {};
@@ -862,6 +871,9 @@ namespace platf {
    * @param port The destination port for traffic sent on this socket.
    * @param data_type The type of traffic sent on this socket.
    * @param dscp_tagging Specifies whether to enable DSCP tagging on outgoing traffic.
+   */
+  /**
+   * @brief 配置套接字QoS/DSCP标记（为视频/音频流设置服务质量优先级）
    */
   std::unique_ptr<deinit_t> enable_socket_qos(uintptr_t native_socket, boost::asio::ip::address &address, uint16_t port, qos_data_type_e data_type, bool dscp_tagging) {
     int sockfd = (int) native_socket;

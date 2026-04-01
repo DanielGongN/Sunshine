@@ -1,11 +1,12 @@
 /**
  * @file src/video_colorspace.h
- * @brief Declarations for colorspace functions.
+ * @brief 视频色彩空间函数的声明
+ * 处理BT.601/BT.709/BT.2020等色彩空间转换和HDR元数据
  */
 #pragma once
 
 extern "C" {
-#include <libavutil/pixfmt.h>
+#include <libavutil/pixfmt.h> // FFmpeg像素格式定义
 }
 
 namespace video {

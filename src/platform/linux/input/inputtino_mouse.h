@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_mouse.h
- * @brief Declarations for inputtino mouse input handling.
+ * @brief inputtino鼠标输入处理声明。定义虚拟鼠标设备接口。
  */
 #pragma once
 // lib includes

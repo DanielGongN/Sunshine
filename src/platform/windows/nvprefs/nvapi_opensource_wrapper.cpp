@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/nvapi_opensource_wrapper.cpp
- * @brief Definitions for the NVAPI wrapper.
+ * @brief NVAPI开源包装器实现。提供对NVIDIA驱动API的封装调用。
  */
 // standard includes
 #include <map>

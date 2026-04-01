@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/x11grab.h
- * @brief Declarations for x11 capture.
+ * @brief X11显示捕获声明。提供X11窗口系统下的屏幕捕获支持。
  */
 #pragma once
 

@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/undo_data.h
- * @brief Declarations for undoing changes to nvidia preferences.
+ * @brief NVIDIA偏好设置撤销数据声明。存储修改前的配置以便恢复。
  */
 #pragma once
 

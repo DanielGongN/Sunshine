@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/misc.h
- * @brief Miscellaneous declarations for Windows.
+ * @brief Windows平台杂项声明。包括服务管理、文件系统、安全、网络等工具函数。
  */
 #pragma once
 

@@ -1,10 +1,11 @@
 /**
  * @file src/config.h
- * @brief Declarations for the configuration of Sunshine.
+ * @brief Sunshine配置系统的声明
+ * 定义所有配置结构体和解析函数，包括视频/音频/网络/输入等配置项
  */
 #pragma once
 
-// standard includes
+// 标准库头文件
 #include <bitset>
 #include <chrono>
 #include <optional>

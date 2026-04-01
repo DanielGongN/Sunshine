@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/display_ram.cpp
- * @brief Definitions for handling ram.
+ * @brief 系统内存（RAM）显示捕获实现。将DXGI捕获的图像从显存复制到系统内存。
  */
 // local includes
 #include "display.h"
@@ -152,6 +152,9 @@ namespace platf::dxgi {
     }
   }
 
+  /**
+   * @brief 根据游标类型选择混合方式（彩色/单色/掩码）将游标绘制到图像上
+   */
   void blend_cursor(const cursor_t &cursor, img_t &img) {
     switch (cursor.shape_info.Type) {
       case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
@@ -168,6 +171,9 @@ namespace platf::dxgi {
     }
   }
 
+  /**
+   * @brief RAM捕获截图：获取桌面帧→复制到暂存纹理→映射到CPU内存→游标合成
+   */
   capture_e display_ddup_ram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     HRESULT status;
     DXGI_OUTDUPL_FRAME_INFO frame_info;
@@ -216,6 +222,7 @@ namespace platf::dxgi {
 
     if (frame_update_flag) {
       {
+        // 从DXGI资源获取D3D11纹理
         texture2d_t src {};
         status = res->QueryInterface(IID_ID3D11Texture2D, (void **) &src);
 
@@ -227,6 +234,7 @@ namespace platf::dxgi {
         D3D11_TEXTURE2D_DESC desc;
         src->GetDesc(&desc);
 
+        // 首次捕获时确定格式并创建CPU可读的暂存纹理（STAGING）
         // If we don't know the capture format yet, grab it from this texture and create the staging texture
         if (capture_format == DXGI_FORMAT_UNKNOWN) {
           capture_format = desc.Format;
@@ -264,6 +272,7 @@ namespace platf::dxgi {
           return capture_e::reinit;
         }
 
+        // 将帧从GPU显存复制到CPU可读的暂存纹理
         // Copy from GPU to CPU
         device_ctx->CopyResource(texture.get(), src.get());
       }
@@ -282,6 +291,7 @@ namespace platf::dxgi {
         return capture_e::error;
       }
     } else {
+      // 映射暂存纹理供CPU读取（让GPU无法访问）
       // Map the staging texture for CPU access (making it inaccessible for the GPU)
       status = device_ctx->Map(texture.get(), 0, D3D11_MAP_READ, 0, &img_info);
       if (FAILED(status)) {
@@ -319,6 +329,9 @@ namespace platf::dxgi {
     return dup.release_frame();
   }
 
+  /**
+   * @brief 分配RAM图像缓冲区（根据分辨率初始化宽高）
+   */
   std::shared_ptr<platf::img_t> display_ram_t::alloc_img() {
     auto img = std::make_shared<img_t>();
 

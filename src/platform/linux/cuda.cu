@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/cuda.cu
- * @brief CUDA implementation for Linux.
+ * @brief Linux CUDA内核实现。包含GPU上执行的色彩空间转换和图像处理内核。
  */
 // standard includes
 #include <chrono>

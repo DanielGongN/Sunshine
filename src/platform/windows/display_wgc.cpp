@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/display_wgc.cpp
- * @brief Definitions for WinRT Windows.Graphics.Capture API
+ * @brief Windows.Graphics.Capture API (WGC)显示捕获实现。使用WinRT的屏幕捕获API。
  */
 // platform includes
 #include <dxgi1_2.h>
@@ -81,11 +81,15 @@ namespace platf::dxgi {
    * @brief Initialize the Windows.Graphics.Capture backend.
    * @return 0 on success, -1 on failure.
    */
+  /**
+   * @brief 初始化Windows.Graphics.Capture后端：创建WinRT D3D设备→创建捕获项→启动捕获会话
+   */
   int wgc_capture_t::init(display_base_t *display, const ::video::config_t &config) {
     HRESULT status;
     dxgi::dxgi_t dxgi;
     winrt::com_ptr<::IInspectable> d3d_comhandle;
     try {
+      // 检查当前系统是否支持屏幕捕获
       if (!winrt::GraphicsCaptureSession::IsSupported()) {
         BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows!"sv;
         return -1;
@@ -104,9 +108,11 @@ namespace platf::dxgi {
     }
 
     DXGI_OUTPUT_DESC output_desc;
+    // 将D3D11设备包装为WinRT IDirect3DDevice
     uwp_device = d3d_comhandle.as<winrt::IDirect3DDevice>();
     display->output->GetDesc(&output_desc);
 
+    // 通过显示器句柄创建捕获项
     auto monitor_factory = winrt::get_activation_factory<winrt::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
     if (monitor_factory == nullptr ||
         FAILED(status = monitor_factory->CreateForMonitor(output_desc.Monitor, winrt::guid_of<winrt::IGraphicsCaptureItem>(), winrt::put_abi(item)))) {
@@ -114,6 +120,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // 根据是否HDR选择捕获格式（FP16或BGRA8）
     if (config.dynamicRange) {
       display->capture_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     } else {
@@ -121,6 +128,7 @@ namespace platf::dxgi {
     }
 
     try {
+      // 创建帧池（双缓冲、自由线程模式）和捕获会话
       frame_pool = winrt::Direct3D11CaptureFramePool::CreateFreeThreaded(uwp_device, static_cast<winrt::Windows::Graphics::DirectX::DirectXPixelFormat>(display->capture_format), 2, item.Size());
       capture_session = frame_pool.CreateCaptureSession(item);
       frame_pool.FrameArrived({this, &wgc_capture_t::on_frame_arrived});
@@ -156,9 +164,7 @@ namespace platf::dxgi {
   }
 
   /**
-   * This function runs in a separate thread spawned by the frame pool and is a producer of frames.
-   * To maintain parity with the original display interface, this frame will be consumed by the capture thread.
-   * Acquire a read-write lock, make the produced frame available to the capture thread, then wake the capture thread.
+   * @brief 生产者回调：帧池有新帧时在单独线程中调用，将新帧存储并唤醒消费者
    */
   void wgc_capture_t::on_frame_arrived(winrt::Direct3D11CaptureFramePool const &sender, winrt::IInspectable const &) {
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame frame {nullptr};
@@ -187,7 +193,11 @@ namespace platf::dxgi {
    * @param out a texture containing the frame just captured
    * @param out_time the timestamp of the frame just captured
    */
+  /**
+   * @brief 消费者：捕获线程等待帧到达（或超时），然后从WinRT Surface提取D3D11纹理
+   */
   capture_e wgc_capture_t::next_frame(std::chrono::milliseconds timeout, ID3D11Texture2D **out, uint64_t &out_time) {
+    // 消费者在捕获线程中运行
     // this CONSUMER runs in the capture thread
     release_frame();
 
@@ -237,6 +247,9 @@ namespace platf::dxgi {
     }
   }
 
+  /**
+   * @brief 初始化WGC RAM捕获模式：基础显示初始化+WGC后端初始化
+   */
   int display_wgc_ram_t::init(const ::video::config_t &config, const std::string &display_name) {
     if (display_base_t::init(config, display_name) || dup.init(this, config)) {
       return -1;

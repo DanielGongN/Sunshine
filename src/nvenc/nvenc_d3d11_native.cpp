@@ -1,13 +1,14 @@
 /**
  * @file src/nvenc/nvenc_d3d11_native.cpp
- * @brief Definitions for native Direct3D11 NVENC encoder.
+ * @brief 原生Direct3D11 NVENC编码器实现。
+ *        包括构造/析构、输入纹理创建和NVENC资源注册。
  */
 #ifdef _WIN32
-  // this include
+  // 本模块头文件
   #include "nvenc_d3d11_native.h"
 
-  // local includes
-  #include "nvenc_utils.h"
+  // 本地头文件
+  #include "nvenc_utils.h"  // 像素格式转换工具
 
 namespace nvenc {
 
@@ -28,6 +29,9 @@ namespace nvenc {
     return d3d_input_texture.GetInterfacePtr();
   }
 
+  /**
+   * @brief 创建并注册D3D11原生输入纹理缓冲区（不支持10bit 4:4:4，需用CUDA互操作）
+   */
   bool nvenc_d3d11_native::create_and_register_input_buffer() {
     if (encoder_params.buffer_format == NV_ENC_BUFFER_FORMAT_YUV444_10BIT) {
       BOOST_LOG(error) << "NvEnc: 10-bit 4:4:4 encoding is incompatible with D3D11 surface formats, use CUDA interop";

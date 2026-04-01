@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/display.mm
- * @brief Definitions for display capture on macOS.
+ * @brief macOS显示捕获实现。使用CoreGraphics/AVFoundation进行屏幕捕获。
  */
 // local includes
 #include "src/config.h"

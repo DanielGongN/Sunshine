@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/publish.cpp
- * @brief Definitions for Windows mDNS service registration.
+ * @brief Windows mDNS服务注册实现。使用Windows DNS-SD API发布Sunshine服务。
  */
 // platform includes
 // WinSock2.h must be included before Windows.h
@@ -93,6 +93,9 @@ extern "C" {
 } /* extern "C" */
 
 namespace platf::publish {
+  /**
+   * @brief mDNS注册/注销完成回调，通过alarm通知等待线程
+   */
   VOID WINAPI register_cb(DWORD status, PVOID pQueryContext, PDNS_SERVICE_INSTANCE pInstance) {
     auto alarm = (safe::alarm_t<PDNS_SERVICE_INSTANCE>::element_type *) pQueryContext;
 
@@ -103,13 +106,20 @@ namespace platf::publish {
     alarm->ring(pInstance);
   }
 
+  /**
+   * @brief 注册或注销mDNS服务：构建服务实例→调用DnsServiceRegister/DeRegister→等待回调完成
+   */
   static int service(bool enable, PDNS_SERVICE_INSTANCE &existing_instance) {
+    // 创建信号量，用于等待异步注册/注销回调完成
     auto alarm = safe::make_alarm<PDNS_SERVICE_INSTANCE>();
 
+    // 构建mDNS服务域名："_nvstream._tcp.local"
     std::wstring domain = utf_utils::from_utf8(SERVICE_TYPE_DOMAIN);
 
+    // 构建完整服务实例名："<主机名>._nvstream._tcp.local"
     auto hostname = platf::get_host_name();
     auto name = utf_utils::from_utf8(net::mdns_instance_name(hostname) + '.') + domain;
+    // 构建主机名："<主机名>.local" 用于SRV记录
     auto host = utf_utils::from_utf8(hostname + ".local");
 
     DNS_SERVICE_INSTANCE instance {};
@@ -117,29 +127,26 @@ namespace platf::publish {
     instance.wPort = net::map_port(nvhttp::PORT_HTTP);
     instance.pszHostName = host.data();
 
-    // Setting these values ensures Windows mDNS answers comply with RFC 1035.
-    // If these are unset, Windows will send a TXT record that has zero strings,
-    // which is illegal. Setting them to a single empty value causes Windows to
-    // send a single empty string for the TXT record, which is the correct thing
-    // to do when advertising a service without any TXT strings.
-    //
-    // Most clients aren't strictly checking TXT record compliance with RFC 1035,
-    // but Apple's mDNS resolver does and rejects the entire answer if an invalid
-    // TXT record is present.
+    // 设置空TXT记录以符合RFC 1035规范。
+    // 若不设置，Windows会发送零字符串的TXT记录（违规）；
+    // 设置单个空值后，Windows会发送单个空字符串（合规）。
+    // Apple的mDNS解析器会严格校验，非法TXT记录会导致整个应答被拒绝。
     PWCHAR keys[] = {nullptr};
     PWCHAR values[] = {nullptr};
     instance.dwPropertyCount = 1;
     instance.keys = keys;
     instance.values = values;
 
+    // 构建DNS-SD注册/注销请求结构
     DNS_SERVICE_REGISTER_REQUEST req {};
     req.Version = DNS_QUERY_REQUEST_VERSION1;
-    req.pQueryContext = alarm.get();
-    req.pServiceInstance = enable ? &instance : existing_instance;
+    req.pQueryContext = alarm.get();  // 回调上下文指向alarm，用于通知完成
+    req.pServiceInstance = enable ? &instance : existing_instance;  // 注册用新实例，注销用已有实例
     req.pRegisterCompletionCallback = register_cb;
 
     DNS_STATUS status {};
 
+    // 异步调用注册或注销API，成功时返回DNS_REQUEST_PENDING
     if (enable) {
       status = _DnsServiceRegister(&req, nullptr);
       if (status != DNS_REQUEST_PENDING) {
@@ -154,14 +161,15 @@ namespace platf::publish {
       }
     }
 
+    // 阻塞等待回调函数ring信号量
     alarm->wait();
 
     auto registered_instance = alarm->status();
     if (enable) {
-      // Store this instance for later deregistration
+      // 保存返回的实例指针，后续注销时使用
       existing_instance = registered_instance;
     } else if (registered_instance) {
-      // Deregistration was successful
+      // 注销成功，释放实例内存并清空指针
       _DnsServiceFreeInstance(registered_instance);
       existing_instance = nullptr;
     }
@@ -196,11 +204,16 @@ namespace platf::publish {
     PDNS_SERVICE_INSTANCE existing_instance;
   };
 
+  /**
+   * @brief 从dnsapi.dll动态加载mDNS函数指针（DnsServiceRegister/DeRegister/FreeInstance）
+   */
   int load_funcs(HMODULE handle) {
+    // 失败守卫：若任一函数加载失败则自动释放DLL句柄
     auto fg = util::fail_guard([handle]() {
       FreeLibrary(handle);
     });
 
+    // 从dnsapi.dll动态获取三个DNS-SD函数的地址
     _DnsServiceFreeInstance = (_DnsServiceFreeInstance_fn) GetProcAddress(handle, "DnsServiceFreeInstance");
     _DnsServiceDeRegister = (_DnsServiceDeRegister_fn) GetProcAddress(handle, "DnsServiceDeRegister");
     _DnsServiceRegister = (_DnsServiceRegister_fn) GetProcAddress(handle, "DnsServiceRegister");

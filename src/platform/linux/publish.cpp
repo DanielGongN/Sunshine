@@ -1,7 +1,7 @@
 /**
  * @file src/platform/linux/publish.cpp
- * @brief Definitions for publishing services on Linux.
- * @note Adapted from https://www.avahi.org/doxygen/html/client-publish-service_8c-example.html
+ * @brief Linux mDNS服务发布实现。使用Avahi客户端发布Sunshine服务。
+ * @note 改编自 https://www.avahi.org/doxygen/html/client-publish-service_8c-example.html
  */
 // standard includes
 #include <thread>

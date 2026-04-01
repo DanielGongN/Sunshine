@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/misc.h
- * @brief Miscellaneous declarations for macOS platform.
+ * @brief macOS平台杂项声明。包括网络、进程管理、线程等工具函数。
  */
 #pragma once
 

@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_keyboard.h
- * @brief Declarations for inputtino keyboard input handling.
+ * @brief inputtino键盘输入处理声明。定义虚拟键盘设备接口。
  */
 #pragma once
 

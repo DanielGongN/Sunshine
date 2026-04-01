@@ -1,112 +1,100 @@
 /**
  * @file src/network.h
- * @brief Declarations for networking related functions.
+ * @brief 网络相关函数的声明
+ * 提供端口映射、地址解析、ENet网络库封装等网络工具函数
  */
 #pragma once
 
-// standard includes
+// 标准库头文件
 #include <tuple>
 #include <utility>
 
-// lib includes
-#include <boost/asio.hpp>
-#include <enet/enet.h>
+// 第三方库头文件
+#include <boost/asio.hpp> // Boost.Asio异步I/O库
+#include <enet/enet.h>     // ENet可靠UDP网络库（游戏串流传输用）
 
-// local includes
+// 本地项目头文件
 #include "utility.h"
 
 namespace net {
-  void free_host(ENetHost *host);
+  void free_host(ENetHost *host); // ENet主机对象的自定义释放函数
 
   /**
-   * @brief Map a specified port based on the base port.
-   * @param port The port to map as a difference from the base port.
-   * @return The mapped port number.
-   * @examples
-   * std::uint16_t mapped_port = net::map_port(1);
-   * @examples_end
-   * @todo Ensure port is not already in use by another application.
+   * @brief 根据基础端口计算映射端口
+   * Sunshine使用基础端口+偏移的方式管理多个服务端口
+   * @param port 相对于基础端口的偏移值
+   * @return 计算后的实际端口号
    */
   std::uint16_t map_port(int port);
 
-  using host_t = util::safe_ptr<ENetHost, free_host>;
-  using peer_t = ENetPeer *;
-  using packet_t = util::safe_ptr<ENetPacket, enet_packet_destroy>;
-
-  enum net_e : int {
-    PC,  ///< PC
-    LAN,  ///< LAN
-    WAN  ///< WAN
-  };
-
-  enum af_e : int {
-    IPV4,  ///< IPv4 only
-    BOTH  ///< IPv4 and IPv6
-  };
-
-  net_e from_enum_string(const std::string_view &view);
-  std::string_view to_enum_string(net_e net);
-
-  net_e from_address(const std::string_view &view);
-
-  host_t host_create(af_e af, ENetAddress &addr, std::uint16_t port);
+  // ENet网络对象的智能指针类型
+  using host_t = util::safe_ptr<ENetHost, free_host>;     // ENet主机（自动释放）
+  using peer_t = ENetPeer *;                                // ENet对等体（连接的客户端）
+  using packet_t = util::safe_ptr<ENetPacket, enet_packet_destroy>; // ENet数据包
 
   /**
-   * @brief Get the address family enum value from a string.
-   * @param view The config option value.
-   * @return The address family enum value.
+   * @brief 网络类型枚举（用于确定加密级别和访问控制）
+   */
+  enum net_e : int {
+    PC,  ///< 本机访问
+    LAN,  ///< 局域网访问
+    WAN  ///< 广域网访问（互联网）
+  };
+
+  /**
+   * @brief 地址族枚举（IPv4/双栈）
+   */
+  enum af_e : int {
+    IPV4,  ///< 仅IPv4
+    BOTH  ///< IPv4和IPv6双栈
+  };
+
+  net_e from_enum_string(const std::string_view &view);  // 从字符串解析网络类型
+  std::string_view to_enum_string(net_e net);              // 网络类型转字符串
+
+  net_e from_address(const std::string_view &view);        // 根据地址判断网络类型（LAN/WAN）
+
+  host_t host_create(af_e af, ENetAddress &addr, std::uint16_t port); // 创建ENet主机（指定地址族、绑定地址和端口）
+
+  /**
+   * @brief 从配置字符串解析地址族枚举值
    */
   af_e af_from_enum_string(const std::string_view &view);
 
   /**
-   * @brief Get the wildcard binding address for a given address family.
-   * @param af Address family.
-   * @return Normalized address.
+   * @brief 获取指定地址族的通配符绑定地址（如 "0.0.0.0" 或 "::" ）
    */
   std::string_view af_to_any_address_string(af_e af);
 
   /**
-   * @brief Get the binding address to use based on config.
-   * @param af Address family.
-   * @return The configured bind address or wildcard if not configured.
+   * @brief 根据配置获取实际绑定地址（未配置则返回通配符地址）
    */
   std::string get_bind_address(af_e af);
 
   /**
-   * @brief Convert an address to a normalized form.
-   * @details Normalization converts IPv4-mapped IPv6 addresses into IPv4 addresses.
-   * @param address The address to normalize.
-   * @return Normalized address.
+   * @brief 地址规范化：将IPv4映射的IPv6地址转换为纯IPv4地址
    */
   boost::asio::ip::address normalize_address(boost::asio::ip::address address);
 
   /**
-   * @brief Get the given address in normalized string form.
-   * @details Normalization converts IPv4-mapped IPv6 addresses into IPv4 addresses.
-   * @param address The address to normalize.
-   * @return Normalized address in string form.
+   * @brief 将地址规范化后转为字符串
    */
   std::string addr_to_normalized_string(boost::asio::ip::address address);
 
   /**
-   * @brief Get the given address in a normalized form for the host portion of a URL.
-   * @details Normalization converts IPv4-mapped IPv6 addresses into IPv4 addresses.
-   * @param address The address to normalize and escape.
-   * @return Normalized address in URL-escaped string.
+   * @brief 将地址规范化后转为URL安全的字符串（IPv6地址加方括号）
    */
   std::string addr_to_url_escaped_string(boost::asio::ip::address address);
 
   /**
-   * @brief Get the encryption mode for the given remote endpoint address.
-   * @param address The address used to look up the desired encryption mode.
-   * @return The WAN or LAN encryption mode, based on the provided address.
+   * @brief 根据远程地址获取加密模式（WAN和LAN可能使用不同的加密级别）
    */
   int encryption_mode_for_address(boost::asio::ip::address address);
 
   /**
-   * @brief Returns a string for use as the instance name for mDNS.
-   * @param hostname The hostname to use for instance name generation.
-   * @return Hostname-based instance name or "Sunshine" if hostname is invalid.
+   * @brief 生成mDNS服务发现的实例名称
+   * @param hostname 主机名
+   * @return 基于主机名的实例名，无效主机名返回"Sunshine"
    */
   std::string mdns_instance_name(const std::string_view &hostname);
 }  // namespace net

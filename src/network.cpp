@@ -1,31 +1,34 @@
 /**
  * @file src/network.cpp
- * @brief Definitions for networking related functions.
+ * @brief 网络工具函数的实现
+ * 包含端口映射、IP地址分类（PC/LAN/WAN）、地址规范化等
  */
-// standard includes
+// 标准库头文件
 #include <algorithm>
 #include <sstream>
 
-// local includes
-#include "config.h"
-#include "logging.h"
-#include "network.h"
-#include "utility.h"
+// 本地项目头文件
+#include "config.h"  // 配置管理
+#include "logging.h" // 日志系统
+#include "network.h" // 本文件头文件
+#include "utility.h" // 工具函数
 
 using namespace std::literals;
 
 namespace ip = boost::asio::ip;
 
 namespace net {
+  // 本机回环地址范围（127.0.0.0/8）
   std::vector<ip::network_v4> pc_ips_v4 {
     ip::make_network_v4("127.0.0.0/8"sv),
   };
+  // 局域网私有地址范围（RFC 1918 + CGNAT + 链路本地）
   std::vector<ip::network_v4> lan_ips_v4 {
-    ip::make_network_v4("192.168.0.0/16"sv),
-    ip::make_network_v4("172.16.0.0/12"sv),
-    ip::make_network_v4("10.0.0.0/8"sv),
-    ip::make_network_v4("100.64.0.0/10"sv),
-    ip::make_network_v4("169.254.0.0/16"sv),
+    ip::make_network_v4("192.168.0.0/16"sv),  // C类私有地址
+    ip::make_network_v4("172.16.0.0/12"sv),   // B类私有地址
+    ip::make_network_v4("10.0.0.0/8"sv),      // A类私有地址
+    ip::make_network_v4("100.64.0.0/10"sv),   // CGNAT地址（运营商级NAT）
+    ip::make_network_v4("169.254.0.0/16"sv),  // 链路本地地址（无DHCP时自动分配）
   };
 
   std::vector<ip::network_v6> pc_ips_v6 {
@@ -36,6 +39,9 @@ namespace net {
     ip::make_network_v6("fe80::/64"sv),
   };
 
+  /**
+   * @brief 从字符串转换为网络类型枚举（wan/lan/pc）
+   */
   net_e from_enum_string(const std::string_view &view) {
     if (view == "wan") {
       return WAN;
@@ -47,6 +53,9 @@ namespace net {
     return PC;
   }
 
+  /**
+   * @brief 从IP地址判断网络类型（本机/局域网/广域网）
+   */
   net_e from_address(const std::string_view &view) {
     auto addr = normalize_address(ip::make_address(view));
 
@@ -79,6 +88,9 @@ namespace net {
     return WAN;
   }
 
+  /**
+   * @brief 将网络类型枚举转换为字符串表示
+   */
   std::string_view to_enum_string(net_e net) {
     switch (net) {
       case PC:
@@ -93,6 +105,9 @@ namespace net {
     return "wan"sv;
   }
 
+  /**
+   * @brief 从字符串解析地址族枚举（ipv4/both）
+   */
   af_e af_from_enum_string(const std::string_view &view) {
     if (view == "ipv4") {
       return IPV4;
@@ -105,6 +120,9 @@ namespace net {
     return BOTH;
   }
 
+  /**
+   * @brief 根据地址族返回通配监听地址字符串
+   */
   std::string_view af_to_any_address_string(const af_e af) {
     switch (af) {
       case IPV4:
@@ -117,6 +135,9 @@ namespace net {
     return "::"sv;
   }
 
+  /**
+   * @brief 获取绑定地址，优先使用配置文件中的bind_address
+   */
   std::string get_bind_address(const af_e af) {
     // If bind_address is configured, use it
     if (!config::sunshine.bind_address.empty()) {
@@ -127,6 +148,9 @@ namespace net {
     return std::string(af_to_any_address_string(af));
   }
 
+  /**
+   * @brief 将IPv6映射的IPv4地址转换为普通IPv4地址
+   */
   boost::asio::ip::address normalize_address(boost::asio::ip::address address) {
     // Convert IPv6-mapped IPv4 addresses into regular IPv4 addresses
     if (address.is_v6()) {
@@ -139,10 +163,16 @@ namespace net {
     return address;
   }
 
+  /**
+   * @brief 将IP地址规范化后转为字符串
+   */
   std::string addr_to_normalized_string(boost::asio::ip::address address) {
     return normalize_address(address).to_string();
   }
 
+  /**
+   * @brief 将IP地址转换为URL安全的字符串（IPv6加方括号）
+   */
   std::string addr_to_url_escaped_string(boost::asio::ip::address address) {
     address = normalize_address(address);
     if (address.is_v6()) {
@@ -154,6 +184,9 @@ namespace net {
     }
   }
 
+  /**
+   * @brief 根据IP地址类型（局域网/广域网）返回对应的加密模式
+   */
   int encryption_mode_for_address(boost::asio::ip::address address) {
     auto nettype = net::from_address(address.to_string());
     if (nettype == net::net_e::PC || nettype == net::net_e::LAN) {
@@ -163,6 +196,9 @@ namespace net {
     }
   }
 
+  /**
+   * @brief 创建ENet网络主机实例，绑定端口并启用QoS标记
+   */
   host_t host_create(af_e af, ENetAddress &addr, std::uint16_t port) {
     static std::once_flag enet_init_flag;
     std::call_once(enet_init_flag, []() {
@@ -182,6 +218,9 @@ namespace net {
     return host;
   }
 
+  /**
+   * @brief 释放ENet主机：断开所有连接的对等点后销毁主机
+   */
   void free_host(ENetHost *host) {
     std::for_each(host->peers, host->peers + host->peerCount, [](ENetPeer &peer_ref) {
       ENetPeer *peer = &peer_ref;
@@ -194,6 +233,9 @@ namespace net {
     enet_host_destroy(host);
   }
 
+  /**
+   * @brief 根据配置基础端口计算端口映射，确保端口在有效范围内
+   */
   std::uint16_t map_port(int port) {
     // calculate the port from the config port
     auto mapped_port = (std::uint16_t) ((int) config::sunshine.port + port);

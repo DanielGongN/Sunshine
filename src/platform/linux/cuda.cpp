@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/cuda.cpp
- * @brief Definitions for CUDA encoding.
+ * @brief Linux CUDA编码实现。CUDA上下文管理、显示捕获集成、色彩空间转换等。
  */
 // standard includes
 #include <bitset>
@@ -86,6 +86,9 @@ namespace cuda {
     tex_t tex;
   };
 
+  /**
+   * @brief 加载CUDA驱动库并初始化函数指针
+   */
   int init() {
     auto status = cuda_load_functions(&cdf, nullptr);
     if (status) {
@@ -283,6 +286,9 @@ namespace cuda {
      * @param offset_x Offset of content in captured frame.
      * @param offset_y Offset of content in captured frame.
      * @return 0 on success or -1 on failure.
+     */
+    /**
+     * @brief 初始化GL→CUDA编码设备：打开DRM设备→创建GBM/EGL上下文→配置着色器
      */
     int init(int in_width, int in_height, int offset_x, int offset_y) {
       // This must be non-zero to tell the video core that it's a hardware encoding device.
@@ -513,6 +519,9 @@ namespace cuda {
 
     static void *handle {nullptr};
 
+    /**
+     * @brief 加载NvFBC库（NVIDIA帧缓冲捕获）并获取函数指针
+     */
     int init() {
       static bool funcs_loaded = false;
 
@@ -703,6 +712,9 @@ namespace cuda {
 
     class display_t: public platf::display_t {
     public:
+      /**
+       * @brief 初始化NvFBC捕获会话：创建句柄→配置CUDA输出→设置捕获参数
+       */
       int init(const std::string_view &display_name, const ::video::config_t &config) {
         auto handle = handle_t::make();
         if (!handle) {
@@ -764,6 +776,9 @@ namespace cuda {
         return 0;
       }
 
+      /**
+       * @brief NvFBC主捕获循环：帧节奏控制→截图→图像分发
+       */
       platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
         auto next_frame = std::chrono::steady_clock::now();
 
@@ -892,6 +907,9 @@ namespace cuda {
         return platf::capture_e::ok;
       }
 
+      /**
+       * @brief 从NvFBC抓取单帧（支持游标显示切换）
+       */
       platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor) {
         if (cursor != cursor_visible) {
           auto status = reinit(cursor);

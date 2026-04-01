@@ -1,54 +1,42 @@
 /**
  * @file file_handler.h
- * @brief Declarations for file handling functions.
+ * @brief 文件操作工具函数的声明
+ * 提供目录创建、文件读写等基础文件系统操作
  */
 #pragma once
 
-// standard includes
 #include <string>
 
 /**
- * @brief Responsible for file handling functions.
+ * @brief 文件操作工具命名空间
  */
 namespace file_handler {
   /**
-   * @brief Get the parent directory of a file or directory.
-   * @param path The path of the file or directory.
-   * @return The parent directory.
-   * @examples
-   * std::string parent_dir = get_parent_directory("path/to/file");
-   * @examples_end
+   * @brief 获取文件或目录的父目录路径
+   * @param path 文件或目录路径
+   * @return 父目录路径字符串
    */
   std::string get_parent_directory(const std::string &path);
 
   /**
-   * @brief Make a directory.
-   * @param path The path of the directory.
-   * @return `true` on success, `false` on failure.
-   * @examples
-   * bool dir_created = make_directory("path/to/directory");
-   * @examples_end
+   * @brief 创建目录（支持递归创建多级目录）
+   * @param path 目录路径
+   * @return true=成功, false=失败
    */
   bool make_directory(const std::string &path);
 
   /**
-   * @brief Read a file to string.
-   * @param path The path of the file.
-   * @return The contents of the file.
-   * @examples
-   * std::string contents = read_file("path/to/file");
-   * @examples_end
+   * @brief 读取整个文件内容到字符串
+   * @param path 文件路径
+   * @return 文件内容字符串（文件不存在返回空字符串）
    */
   std::string read_file(const char *path);
 
   /**
-   * @brief Writes a file.
-   * @param path The path of the file.
-   * @param contents The contents to write.
-   * @return ``0`` on success, ``-1`` on failure.
-   * @examples
-   * int write_status = write_file("path/to/file", "file contents");
-   * @examples_end
+   * @brief 将字符串内容写入文件
+   * @param path 文件路径
+   * @param contents 要写入的内容
+   * @return 0=成功, -1=失败
    */
   int write_file(const char *path, const std::string_view &contents);
 }  // namespace file_handler

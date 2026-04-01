@@ -1,13 +1,13 @@
 /**
  * @file src/video_colorspace.cpp
- * @brief Definitions for colorspace functions.
+ * @brief 视频色彩空间函数的实现
+ * 根据串流参数配置FFmpeg的色彩空间、色彩范围和HDR元数据
  */
-// this include
 #include "video_colorspace.h"
 
-// local includes
-#include "logging.h"
-#include "video.h"
+// 本地项目头文件
+#include "logging.h" // 日志系统
+#include "video.h"   // 视频配置
 
 extern "C" {
 #include <libswscale/swscale.h>
@@ -15,10 +15,16 @@ extern "C" {
 
 namespace video {
 
+  /**
+   * @brief 判断色彩空间是否为HDR（BT.2020 + ST.2084）
+   */
   bool colorspace_is_hdr(const sunshine_colorspace_t &colorspace) {
     return colorspace.colorspace == colorspace_e::bt2020;
   }
 
+  /**
+   * @brief 从客户端配置生成色彩空间设置（Rec.601/709/2020、位深、Range）
+   */
   sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_display) {
     sunshine_colorspace_t colorspace;
 
@@ -76,6 +82,9 @@ namespace video {
     return colorspace;
   }
 
+  /**
+   * @brief 将Sunshine色彩空间转换为FFmpeg色彩空间参数（Range/Primaries/TRC/Matrix）
+   */
   avcodec_colorspace_t avcodec_colorspace_from_sunshine_colorspace(const sunshine_colorspace_t &sunshine_colorspace) {
     avcodec_colorspace_t avcodec_colorspace;
 
@@ -120,6 +129,10 @@ namespace video {
     return avcodec_colorspace;
   }
 
+  /**
+   * @brief 根据色彩空间和输出格式生成RGB→YUV色彩转换矩阵
+   * 基于ITU-T H.273标准的矩阵系数计算Y/U/V转换向量
+   */
   const color_t *color_vectors_from_colorspace(const sunshine_colorspace_t &colorspace, bool unorm_output) {
     constexpr auto generate_color_vectors = [](const sunshine_colorspace_t &colorspace, bool unorm_output) -> color_t {
       // "Table 4 – Interpretation of matrix coefficients (MatrixCoefficients) value" section of ITU-T H.273

@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/input.cpp
- * @brief Definitions for macOS input handling.
+ * @brief macOS输入处理实现。使用CoreGraphics模拟鼠标、键盘、手柄等输入事件。
  */
 // standard includes
 #include <chrono>
@@ -228,6 +228,13 @@ const KeyCodeMap kKeyCodesMap[] = {
 };
   // clang-format on
 
+  /**
+   * @brief 将Win键码转换为Mac键码。
+   *
+   * 查找并返回对应的Mac键码，找不到则返回-1。
+   * @param keycode Win平台键码。
+   * @return Mac平台键码或-1。
+   */
   int keysym(int keycode) {
     KeyCodeMap key_map {};
 
@@ -246,6 +253,15 @@ const KeyCodeMap kKeyCodesMap[] = {
     return temp_map->mac_keycode;
   }
 
+  /**
+   * @brief 更新键盘事件。
+   *
+   * 根据修饰键和释放状态，设置CGEvent并发送到系统。
+   * @param input 输入上下文。
+   * @param modcode 修饰键码。
+   * @param release 是否释放。
+   * @param flags 额外标志。
+   */
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
     auto key = keysym(modcode);
 
@@ -294,24 +310,64 @@ const KeyCodeMap kKeyCodesMap[] = {
     CGEventPost(kCGHIDEventTap, event);
   }
 
+  /**
+   * @brief 处理Unicode输入（未实现）。
+   *
+   * 目前MacOS未实现Unicode输入，仅记录日志。
+   * @param input 输入上下文。
+   * @param utf8 UTF-8字符串。
+   * @param size 字符串长度。
+   */
   void unicode(input_t &input, char *utf8, int size) {
     BOOST_LOG(info) << "unicode: Unicode input not yet implemented for MacOS."sv;
   }
 
+  /**
+   * @brief 分配手柄（未实现）。
+   *
+   * MacOS暂未实现手柄分配，直接返回-1。
+   * @param input 输入上下文。
+   * @param id 手柄ID。
+   * @param metadata 手柄元数据。
+   * @param feedback_queue 反馈队列。
+   * @return -1。
+   */
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
     BOOST_LOG(info) << "alloc_gamepad: Gamepad not yet implemented for MacOS."sv;
     return -1;
   }
 
+  /**
+   * @brief 释放手柄（未实现）。
+   *
+   * MacOS暂未实现手柄释放，仅记录日志。
+   * @param input 输入上下文。
+   * @param nr 手柄编号。
+   */
   void free_gamepad(input_t &input, int nr) {
     BOOST_LOG(info) << "free_gamepad: Gamepad not yet implemented for MacOS."sv;
   }
 
+  /**
+   * @brief 更新手柄状态（未实现）。
+   *
+   * MacOS暂未实现手柄状态更新，仅记录日志。
+   * @param input 输入上下文。
+   * @param nr 手柄编号。
+   * @param gamepad_state 手柄状态。
+   */
   void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
     BOOST_LOG(info) << "gamepad: Gamepad not yet implemented for MacOS."sv;
   }
 
   // returns current mouse location:
+  /**
+   * @brief 获取当前鼠标位置。
+   *
+   * 通过CGEvent获取当前鼠标在主显示器上的坐标。
+   * @param input 输入上下文。
+   * @return 鼠标坐标点。
+   */
   util::point_t get_mouse_loc(input_t &input) {
     // Creating a new event every time to avoid any reuse risk
     const auto macos_input = static_cast<macos_input_t *>(input.get());
@@ -364,6 +420,13 @@ const KeyCodeMap kKeyCodesMap[] = {
     CGWarpMouseCursorPosition(location);
   }
 
+  /**
+   * @brief 判断当前鼠标事件类型。
+   *
+   * 根据鼠标按键状态返回拖拽或移动事件类型。
+   * @param input 输入上下文。
+   * @return 鼠标事件类型。
+   */
   inline CGEventType event_type_mouse(input_t &input) {
     const auto macos_input = static_cast<macos_input_t *>(input.get());
 
@@ -409,6 +472,14 @@ const KeyCodeMap kKeyCodesMap[] = {
     post_mouse(input, kCGMouseButtonLeft, event_type_mouse(input), location, get_mouse_loc(input), 0);
   }
 
+  /**
+   * @brief 处理鼠标按键事件。
+   *
+   * 根据按键和释放状态发送鼠标事件，支持多击检测。
+   * @param input 输入上下文。
+   * @param button 按键编号。
+   * @param release 是否释放。
+   */
   void button_mouse(input_t &input, const int button, const bool release) {
     CGMouseButton mac_button;
     CGEventType event;
@@ -448,6 +519,13 @@ const KeyCodeMap kKeyCodesMap[] = {
     macos_input->last_mouse_event[mac_button][release] = now;
   }
 
+  /**
+   * @brief 处理垂直滚轮事件。
+   *
+   * 发送垂直方向的滚轮事件到系统。
+   * @param input 输入上下文。
+   * @param high_res_distance 滚动距离。
+   */
   void scroll(input_t &input, const int high_res_distance) {
     int wheelY = high_res_distance / 120;
     int wheelX = 0;
@@ -456,6 +534,13 @@ const KeyCodeMap kKeyCodesMap[] = {
     CFRelease(upEvent);
   }
 
+  /**
+   * @brief 处理水平滚轮事件。
+   *
+   * 发送水平方向的滚轮事件到系统。
+   * @param input 输入上下文。
+   * @param high_res_distance 滚动距离。
+   */
   void hscroll(input_t &input, int high_res_distance) {
     int wheelY = 0;
     int wheelX = high_res_distance / 120;
@@ -521,6 +606,12 @@ const KeyCodeMap kKeyCodesMap[] = {
     // Unimplemented
   }
 
+  /**
+   * @brief 初始化输入上下文。
+   *
+   * 创建并初始化macOS输入相关资源，设置主显示器和事件源。
+   * @return 初始化后的输入上下文。
+   */
   input_t input() {
     input_t result {new macos_input_t()};
 
@@ -568,6 +659,12 @@ const KeyCodeMap kKeyCodesMap[] = {
     return result;
   }
 
+  /**
+   * @brief 释放输入上下文资源。
+   *
+   * 释放macOS输入相关的事件源和事件对象。
+   * @param p 输入上下文指针。
+   */
   void freeInput(void *p) {
     const auto *input = static_cast<macos_input_t *>(p);
 
@@ -589,6 +686,12 @@ const KeyCodeMap kKeyCodesMap[] = {
   /**
    * @brief Returns the supported platform capabilities to advertise to the client.
    * @return Capability flags.
+   */
+  /**
+   * @brief 获取平台能力标志。
+   *
+   * 返回当前平台支持的能力标志。
+   * @return 能力标志。
    */
   platform_caps::caps_t get_capabilities() {
     return 0;

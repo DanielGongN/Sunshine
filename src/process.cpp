@@ -1,18 +1,19 @@
 /**
  * @file src/process.cpp
- * @brief Definitions for the startup and shutdown of the apps started by a streaming Session.
+ * @brief 串流会话启动的应用程序进程管理的实现
+ * 包括预备命令执行、应用启动/停止、进程生命周期跟踪等
  */
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
-// standard includes
+// 标准库头文件
 #include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
 
-// lib includes
-#include <boost/algorithm/string.hpp>
-#include <boost/crc.hpp>
+// 第三方库头文件
+#include <boost/algorithm/string.hpp> // 字符串算法
+#include <boost/crc.hpp>              // CRC校验
 #include <boost/filesystem.hpp>
 #include <boost/program_options/parsers.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -56,6 +57,9 @@ namespace proc {
     return std::make_unique<deinit_t>();
   }
 
+  /**
+   * @brief 终止进程组：先尝试优雅退出，超时后强制终止
+   */
   void terminate_process_group(boost::process::v1::child &proc, boost::process::v1::group &group, std::chrono::seconds exit_timeout) {
     if (group.valid() && platf::process_group_running((std::uintptr_t) group.native_handle())) {
       if (exit_timeout.count() > 0) {
@@ -94,6 +98,9 @@ namespace proc {
     }
   }
 
+  /**
+   * @brief 查找命令的工作目录：解析命令字符串获取可执行文件路径的父目录
+   */
   boost::filesystem::path find_working_directory(const std::string &cmd, boost::process::v1::environment &env) {
     // Parse the raw command string into parts to get the actual command portion
     std::vector<std::string> parts;
@@ -135,6 +142,9 @@ namespace proc {
     return cmd_path.parent_path();
   }
 
+  /**
+   * @brief 启动应用程序：执行预备命令→设置环境变量→启动主进程
+   */
   int proc_t::execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     // Ensure starting from a clean slate
     terminate();
@@ -269,6 +279,9 @@ namespace proc {
     return 0;
   }
 
+  /**
+   * @brief 检查应用程序是否仍在运行（平台进程检查 + 子进程收割）
+   */
   int proc_t::running() {
 #ifndef _WIN32
     // On POSIX OSes, we must periodically wait for our children to avoid
@@ -305,6 +318,9 @@ namespace proc {
     return 0;
   }
 
+  /**
+   * @brief 停止运行的应用：终止主进程→执行撤销命令→通知流关闭
+   */
   void proc_t::terminate() {
     std::error_code ec;
     placebo = false;
@@ -366,6 +382,9 @@ namespace proc {
   // Returns image from assets directory if found there.
   // Returns default image if image configuration is not set.
   // Returns http content-type header compatible image type.
+  /**
+   * @brief 获取应用图像路径，如枚环境中找不到则返回默认图像
+   */
   std::string proc_t::get_app_image(int app_id) {
     auto iter = std::find_if(_apps.begin(), _apps.end(), [&app_id](const auto app) {
       return app.id == std::to_string(app_id);
@@ -409,6 +428,9 @@ namespace proc {
     return begin;
   }
 
+  /**
+   * @brief 解析环境变量引用：将$(变量名)格式替换为实际的环境变量值
+   */
   std::string parse_env_val(boost::process::v1::native_environment &env, const std::string_view &val_raw) {
     auto pos = std::begin(val_raw);
     auto dollar = std::find(pos, std::end(val_raw), '$');
@@ -498,6 +520,9 @@ namespace proc {
     return header == PNG_SIGNATURE;
   }
 
+  /**
+   * @brief 验证应用图像路径：检查PNG格式有效性和文件存在性
+   */
   std::string validate_app_image_path(std::string app_image_path) {
     if (app_image_path.empty()) {
       return DEFAULT_APP_IMAGE_PATH;
@@ -545,6 +570,9 @@ namespace proc {
     return app_image_path;
   }
 
+  /**
+   * @brief 计算文件的SHA-256哈希值
+   */
   std::optional<std::string> calculate_sha256(const std::string &filename) {
     crypto::md_ctx_t ctx {EVP_MD_CTX_create()};
     if (!ctx) {
@@ -580,12 +608,18 @@ namespace proc {
     return ss.str();
   }
 
+  /**
+   * @brief 计算字符串的CRC-32校验值
+   */
   uint32_t calculate_crc32(const std::string &input) {
     boost::crc_32_type result;
     result.process_bytes(input.data(), input.length());
     return result.checksum();
   }
 
+  /**
+   * @brief 根据应用名称和图像哈希生成唯一应用ID（CRC-32截断为32位有符号整数）
+   */
   std::tuple<std::string, std::string> calculate_app_id(const std::string &app_name, std::string app_image_path, int index) {
     // Generate id by hashing name with image data if present
     std::vector<std::string> to_hash;
@@ -617,6 +651,9 @@ namespace proc {
     return std::make_tuple(id_no_index, id_with_index);
   }
 
+  /**
+   * @brief 从JSON文件解析应用程序列表和环境变量配置
+   */
   std::optional<proc::proc_t> parse(const std::string &file_name) {
     pt::ptree tree;
 
@@ -748,6 +785,9 @@ namespace proc {
     return std::nullopt;
   }
 
+  /**
+   * @brief 刷新应用程序列表：重新解析配置文件并更新全局进程管理器
+   */
   void refresh(const std::string &file_name) {
     auto proc_opt = proc::parse(file_name);
 

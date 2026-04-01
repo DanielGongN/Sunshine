@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/graphics.cpp
- * @brief Definitions for graphics related functions.
+ * @brief Linux图形相关函数实现。EGL初始化、着色器编译、DMA-BUF导入、色彩空间转换等。
  */
 // standard includes
 #include <fcntl.h>
@@ -781,6 +781,9 @@ namespace egl {
     program[1].bind(color_matrix);
   }
 
+  /**
+   * @brief 创建OpenGL色彩空间转换器：编译着色器、配置偏移/缩放、初始化帧缓冲
+   */
   std::optional<sws_t> sws_t::make(int in_width, int in_height, int out_width, int out_height, gl::tex_t &&tex) {
     sws_t sws;
 
@@ -957,6 +960,9 @@ namespace egl {
     return make(in_width, in_height, out_width, out_height, std::move(tex));
   }
 
+  /**
+   * @brief 将RAM图像数据上传到OpenGL纹理进行色彩转换
+   */
   void sws_t::load_ram(platf::img_t &img) {
     loaded_texture = tex[0];
 
@@ -964,6 +970,9 @@ namespace egl {
     gl::ctx.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, img.width, img.height, GL_BGRA, GL_UNSIGNED_BYTE, img.data);
   }
 
+  /**
+   * @brief 准备VRAM纹理并进行游标混合（支持子区域输出和游标叠加）
+   */
   void sws_t::load_vram(img_descriptor_t &img, int offset_x, int offset_y, int texture) {
     // When only a sub-part of the image must be encoded...
     const bool copy = offset_x || offset_y || img.sd.width != in_width || img.sd.height != in_height;
@@ -1023,6 +1032,9 @@ namespace egl {
     }
   }
 
+  /**
+   * @brief 执行RGB→YUV色彩转换（先渲染Y平面，再渲染UV平面）
+   */
   int sws_t::convert(gl::frame_buf_t &fb) {
     gl::ctx.BindTexture(GL_TEXTURE_2D, loaded_texture);
 

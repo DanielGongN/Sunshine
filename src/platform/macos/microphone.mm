@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/microphone.mm
- * @brief Definitions for microphone capture on macOS.
+ * @brief macOS麦克风捕获实现。使用AVFoundation进行音频输入采集。
  */
 // local includes
 #include "src/config.h"

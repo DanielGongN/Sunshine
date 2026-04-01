@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_common.h
- * @brief Declarations for inputtino common input handling.
+ * @brief inputtino公共输入处理声明。定义共享的输入上下文和工具函数。
  */
 #pragma once
 

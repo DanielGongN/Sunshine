@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_keyboard.cpp
- * @brief Definitions for inputtino keyboard input handling.
+ * @brief inputtino键盘输入处理实现。包括键盘按键模拟和Unicode字符输入。
  */
 // lib includes
 #include <boost/locale.hpp>

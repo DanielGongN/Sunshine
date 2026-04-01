@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_touch.h
- * @brief Declarations for inputtino touch input handling.
+ * @brief inputtino触摸输入处理声明。定义虚拟触摸屏设备接口。
  */
 #pragma once
 

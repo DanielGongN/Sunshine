@@ -1,63 +1,56 @@
 /**
  * @file src/system_tray.h
- * @brief Declarations for the system tray icon and notification system.
+ * @brief 系统托盘图标和通知系统的声明
+ * 在任务栏显示托盘图标，提供快速访问Sunshine的菜单操作
  */
 #pragma once
 
 /**
- * @brief Handles the system tray icon and notification system.
+ * @brief 系统托盘功能命名空间
  */
 namespace system_tray {
   /**
-   * @brief Callback for opening the UI from the system tray.
-   * @param item The tray menu item.
+   * @brief 托盘菜单回调：打开Web管理界面
    */
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
-   * @brief Callback for opening GitHub Sponsors from the system tray.
-   * @param item The tray menu item.
+   * @brief 托盘菜单回调：打开GitHub Sponsors赞助页面
    */
   void tray_donate_github_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
-   * @brief Callback for opening Patreon from the system tray.
-   * @param item The tray menu item.
+   * @brief 托盘菜单回调：打开Patreon赞助页面
    */
   void tray_donate_patreon_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
-   * @brief Callback for opening PayPal donation from the system tray.
-   * @param item The tray menu item.
+   * @brief 托盘菜单回调：打开PayPal捐赠页面
    */
   void tray_donate_paypal_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
-   * @brief Callback for resetting display device configuration.
-   * @param item The tray menu item.
+   * @brief 托盘菜单回调：重置显示设备配置
    */
   void tray_reset_display_device_config_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
-   * @brief Callback for restarting Sunshine from the system tray.
-   * @param item The tray menu item.
+   * @brief 托盘菜单回调：重启 Sunshine
    */
   void tray_restart_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
-   * @brief Callback for exiting Sunshine from the system tray.
-   * @param item The tray menu item.
+   * @brief 托盘菜单回调：退出 Sunshine
    */
   void tray_quit_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
-   * @brief Initializes the system tray without starting a loop.
-   * @return 0 if initialization was successful, non-zero otherwise.
+   * @brief 初始化系统托盘（不启动事件循环）
    */
   int init_tray();
 
   /**
-   * @brief Processes a single tray event iteration.
+   * @brief 处理单次托盘事件迭代
    * @return 0 if processing was successful, non-zero otherwise.
    */
   int process_tray_events();

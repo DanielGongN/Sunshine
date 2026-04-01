@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/nvprefs_interface.cpp
- * @brief Definitions for nvidia preferences interface.
+ * @brief NVIDIA偏好设置接口实现。处理驱动配置文件的读取、修改和恢复。
  */
 // standard includes
 #include <cassert>

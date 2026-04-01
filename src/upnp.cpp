@@ -1,13 +1,14 @@
 /**
  * @file src/upnp.cpp
- * @brief Definitions for UPnP port mapping.
+ * @brief UPnP端口映射的实现
+ * 自动发现路由器IGD并配置TCP/UDP端口转发规则
  */
-// standard includes
-#include <stddef.h>  // workaround for type_t error in miniupnpc 2.3.3, see https://github.com/miniupnp/miniupnp/commit/e263ab6f56c382e10fed31347ec68095d691a0e8
+// 标准库头文件
+#include <stddef.h>  // miniupnpc 2.3.3的type_t错误修复
 
-// lib includes
-#include <miniupnpc/miniupnpc.h>
-#include <miniupnpc/upnpcommands.h>
+// 第三方库头文件
+#include <miniupnpc/miniupnpc.h>      // miniUPnP客户端
+#include <miniupnpc/upnpcommands.h>   // UPnP命令接口
 
 // local includes
 #include "config.h"
@@ -35,6 +36,9 @@ namespace upnp {
     std::string description;
   };
 
+  /**
+   * @brief 将UPnP状态码转换为可读字符串
+   */
   static std::string_view status_string(int status) {
     switch (status) {
       case 0:
@@ -53,6 +57,9 @@ namespace upnp {
   /**
    * This function is a wrapper around UPNP_GetValidIGD() that returns the status code. There is a pre-processor
    * check to determine which version of the function to call based on the version of the MiniUPnPc library.
+   */
+  /**
+   * @brief 获取有效的IGD设备（兼容miniUPnPc API v18+和旧版本）
    */
   int UPNP_GetValidIGDStatus(device_t &device, urls_t *urls, IGDdatas *data, std::array<char, INET6_ADDRESS_STRLEN> &lan_addr) {
 #if (MINIUPNPC_API_VERSION >= 18)
@@ -297,7 +304,7 @@ namespace upnp {
     }
 
     /**
-     * @brief Maintains UPnP port forwarding rules
+     * @brief UPnP端口映射主线程：定期发现IGD、配置端口转发、刷新映射
      */
     void upnp_thread_proc() {
       platf::set_thread_name("upnp");
@@ -367,6 +374,10 @@ namespace upnp {
     std::thread upnp_thread;
   };
 
+  /**
+   * @brief UPnP端口映射启动入口
+   * 仅在配置启用UPnP时创建deinit_t实例并返回
+   */
   std::unique_ptr<platf::deinit_t> start() {
     if (!config::sunshine.flags[config::flag::UPNP]) {
       return nullptr;

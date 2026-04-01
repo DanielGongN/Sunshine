@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_touch.cpp
- * @brief Definitions for inputtino touch input handling.
+ * @brief inputtino触摸输入处理实现。包括多点触摸事件模拟。
  */
 // lib includes
 #include <boost/locale.hpp>

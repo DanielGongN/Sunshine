@@ -1,9 +1,9 @@
 /**
  * @file src/platform/macos/av_audio.mm
- * @brief Implementation of macOS audio capture with dual input paths.
+ * @brief macOS音频捕获实现（双输入路径）。
  *
- * This file implements the AVAudio class which provides two distinct audio capture methods:
- * 1. **Microphone capture** - Uses AVFoundation framework to capture from specific microphone devices
+ * 本文件实现AVAudio类，提供两种不同的音频捕获方式：
+ * 1. **麦克风捕获** - 使用AVFoundation框架从特定麦克风设备捕获
  * 2. **System-wide audio tap** - Uses Core Audio taps to capture all system audio output (macOS 14.0+)
  *
  * The implementation handles format conversion, real-time audio processing, and provides

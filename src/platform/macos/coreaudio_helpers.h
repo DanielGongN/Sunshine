@@ -1,13 +1,17 @@
+/**
+ * @file src/platform/macos/coreaudio_helpers.h
+ * @brief macOS Core Audio辅助工具声明。提供FourCC错误码显示和音频设备工具函数。
+ */
 #pragma once
 
-#include <CoreFoundation/CoreFoundation.h>
-#include <cstdint>
-#include <ostream>
-#include <string>
+#include <CoreFoundation/CoreFoundation.h>  // Core Foundation基础类型
+#include <cstdint>   // 定宽整数类型
+#include <ostream>   // 输出流
+#include <string>    // 字符串
 
 namespace ca {
 
-  // Display FourCC error codes, with fallback to integer.
+  // 显示FourCC错误码（带整数回退）
   // Usage: BOOST_LOG(error) << ca::Status(err);
 
   // Some CoreAudio error examples:

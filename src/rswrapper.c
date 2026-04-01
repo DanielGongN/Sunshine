@@ -1,10 +1,10 @@
 /**
  * @file src/rswrapper.c
- * @brief Wrappers for nanors vectorization with different ISA options
+ * @brief Reed-Solomon向量化纠错编码的包装实现
+ * 根据不同CPU指令集（SSSE3/AVX2/NEON）编译不同的优化版本
  */
 
-// _FORTIY_SOURCE can cause some versions of GCC to try to inline
-// memset() with incompatible target options when compiling rs.c
+// _FORTIFY_SOURCE会导致某些GCC版本在编译rs.c时尝试以不兼容的目标选项内联memset()
 #ifdef _FORTIFY_SOURCE
   #undef _FORTIFY_SOURCE
 #endif

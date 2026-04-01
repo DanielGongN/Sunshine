@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/av_video.m
- * @brief Definitions for video capture on macOS.
+ * @brief macOS视频捕获实现。屏幕录制、帧回调、CoreVideo像素缓冲区处理等。
  */
 // local includes
 #import "av_video.h"

@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/nvprefs/nvprefs_interface.h
- * @brief Declarations for nvidia preferences interface.
+ * @brief NVIDIA偏好设置接口声明。提供从 Sunshine 调用NVIDIA驱动配置的统一接口。
  */
 #pragma once
 

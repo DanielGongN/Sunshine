@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/kmsgrab.cpp
- * @brief Definitions for KMS screen capture.
+ * @brief KMS屏幕捕获实现。通过DRM/KMS直接从显卡帧缓冲区捕获屏幕图像。
  */
 // standard includes
 #include <errno.h>
@@ -317,6 +317,9 @@ namespace platf {
     public:
       using connector_interal_t = util::safe_ptr<drmModeConnector, drmModeFreeConnector>;
 
+      /**
+       * @brief 打开DRM设备并启用原子模式设置
+       */
       int init(const char *path) {
         cap_sys_admin admin;
         fd.el = open(path, O_RDWR);
@@ -607,6 +610,9 @@ namespace platf {
           mem_type {mem_type} {
       }
 
+      /**
+       * @brief 初始化KMS显示捕获：扫描DRM设备→查找目标显示器→配置CRTC/平面
+       */
       int init(const std::string &display_name, const ::video::config_t &config) {
         delay = std::chrono::nanoseconds {1s} / config.framerate;
 

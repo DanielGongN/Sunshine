@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/misc.h
- * @brief Miscellaneous declarations for Linux.
+ * @brief Linux平台杂项声明。包括文件描述符工具、网络、进程管理等工具函数。
  */
 #pragma once
 

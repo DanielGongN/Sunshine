@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_mouse.cpp
- * @brief Definitions for inputtino mouse input handling.
+ * @brief inputtino鼠标输入处理实现。包括鼠标移动、按键、滚轮模拟。
  */
 // lib includes
 #include <boost/locale.hpp>
