@@ -4,11 +4,11 @@
  */
 extern "C" {
 // lib includes
-#include <libavcodec/avcodec.h>
-#include <libavcodec/cbs_h264.h>
-#include <libavcodec/cbs_h265.h>
-#include <libavcodec/h264_levels.h>
-#include <libavutil/pixdesc.h>
+#include <libavcodec/avcodec.h>  // FFmpeg编解码器
+#include <libavcodec/cbs_h264.h>  // H.264编码比特流解析
+#include <libavcodec/cbs_h265.h>  // H.265(HEVC)编码比特流解析
+#include <libavcodec/h264_levels.h>  // H.264级别定义
+#include <libavutil/pixdesc.h>  // 色彩空间描述
 }
 
 // local includes
@@ -19,12 +19,19 @@ extern "C" {
 using namespace std::literals;
 
 namespace cbs {
+  /**
+   * @brief 释放编码比特流上下文资源
+   */
   void close(CodedBitstreamContext *c) {
     ff_cbs_close(&c);
   }
 
   using ctx_t = util::safe_ptr<CodedBitstreamContext, close>;
 
+  /**
+   * @brief 编码比特流片段的RAII封装类
+   * 管理CodedBitstreamFragment的生命周期，支持移动语义
+   */
   class frag_t: public CodedBitstreamFragment {
   public:
     frag_t(frag_t &&o) {
@@ -54,6 +61,10 @@ namespace cbs {
     }
   };
 
+  /**
+   * @brief 将NAL单元序列化为二进制数据
+   * 将给定的NAL单元内容插入片段并写入编码后的二进制缓冲区
+   */
   util::buffer_t<std::uint8_t> write(cbs::ctx_t &cbs_ctx, std::uint8_t nal, void *uh, AVCodecID codec_id) {
     cbs::frag_t frag;
     auto err = ff_cbs_insert_unit_content(&frag, -1, nal, uh, nullptr);
@@ -79,6 +90,9 @@ namespace cbs {
     return data;
   }
 
+  /**
+   * @brief write()的便捷重载，自动创建cbs上下文
+   */
   util::buffer_t<std::uint8_t> write(std::uint8_t nal, void *uh, AVCodecID codec_id) {
     cbs::ctx_t cbs_ctx;
     ff_cbs_init(&cbs_ctx, codec_id, nullptr);
@@ -86,6 +100,9 @@ namespace cbs {
     return write(cbs_ctx, nal, uh, codec_id);
   }
 
+  /**
+   * @brief 从H.264数据包提取并修正SPS参数（色彩空间VUI信息）
+   */
   h264_t make_sps_h264(const AVCodecContext *avctx, const AVPacket *packet) {
     cbs::ctx_t ctx;
     if (ff_cbs_init(&ctx, AV_CODEC_ID_H264, nullptr)) {
@@ -142,6 +159,9 @@ namespace cbs {
     };
   }
 
+  /**
+   * @brief 从HEVC数据包提取并修正VPS和SPS参数（色彩空间VUI信息）
+   */
   hevc_t make_sps_hevc(const AVCodecContext *avctx, const AVPacket *packet) {
     cbs::ctx_t ctx;
     if (ff_cbs_init(&ctx, AV_CODEC_ID_H265, nullptr)) {
@@ -215,9 +235,10 @@ namespace cbs {
   }
 
   /**
-   * This function initializes a Coded Bitstream Context and reads the packet into a Coded Bitstream Fragment.
-   * It then checks if the SPS->VUI (Video Usability Information) is present in the active SPS of the packet.
-   * This is done for both H264 and H265 codecs.
+   * @brief 验证给定数据包的序列参数集（SPS）。
+   * @param packet 要验证的数据包。
+   * @param codec_id 使用的编解码器ID（AV_CODEC_ID_H264或AV_CODEC_ID_H265）。
+   * @return 如果SPS->VUI存在于数据包的活动SPS中，则返回true，否则返回false。
    */
   bool validate_sps(const AVPacket *packet, int codec_id) {
     cbs::ctx_t ctx;
