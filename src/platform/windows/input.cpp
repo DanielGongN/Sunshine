@@ -21,6 +21,7 @@
 #include "misc.h"
 #include "src/config.h"
 #include "src/globals.h"
+#include "src/input.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 
@@ -192,8 +193,6 @@ namespace platf {
     }
   }
 
-  static std::bitset<MAX_GAMEPADS> gamepadMask;
-
   class vigem_t {
   public:
     int init() {
@@ -270,7 +269,7 @@ namespace platf {
                                << " failed: 0x"sv << util::hex(status).to_string_view();
           }
 
-          gamepadMask[slot] = true;
+          input::gamepadMask[slot] = true;
           BOOST_LOG(info) << "Preinit gamepad slot="sv << slot << " ready"sv;
         }
 
@@ -284,7 +283,7 @@ namespace platf {
             vigem_target_remove(client.get(), gamepads[j].gp.get());
           }
           gamepads[j].gp.reset();  // safe_ptr calls vigem_target_free
-          gamepadMask[j] = false;
+          input::gamepadMask[j] = false;
         }
         vigem_disconnect(client.get());
         client.reset();  // safe_ptr calls vigem_free

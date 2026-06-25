@@ -113,7 +113,7 @@ namespace input {
   static std::array<std::uint8_t, 5> mouse_press {};
 
   static platf::input_t platf_input;
-  static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
+  std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
 
   void free_gamepad(platf::input_t &platf_input, int id) {
     platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
