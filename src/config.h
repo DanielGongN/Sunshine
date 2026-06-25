@@ -286,10 +286,10 @@ namespace config {
     std::vector<std::string> csrf_allowed_origins;
 
     struct middleware_t {
-      bool enabled;              // default: false
-      std::string address;       // default: "0.0.0.0"
-      int port;                  // default: 40002
-      bool gamepad_preinit;      // default: false
+      bool enabled = false;
+      std::string address = "0.0.0.0";
+      int port = 40002;
+      bool gamepad_preinit = false;
     } middleware;
   };
 
