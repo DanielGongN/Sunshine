@@ -1190,6 +1190,10 @@ namespace config {
       }
     }
     bool_f(vars, "dd_config_revert_on_disconnect", video.dd.config_revert_on_disconnect);
+    bool_f(vars, "middleware_enabled", sunshine.middleware.enabled);
+    string_f(vars, "middleware_address", sunshine.middleware.address);
+    int_f(vars, "middleware_port", sunshine.middleware.port);
+    bool_f(vars, "middleware_gamepad_preinit", sunshine.middleware.gamepad_preinit);
     generic_f(vars, "dd_mode_remapping", video.dd.mode_remapping, dd::mode_remapping_from_view);
     {
       int value = 0;
