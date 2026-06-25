@@ -108,7 +108,7 @@ namespace middleware {
       std::string event_type = msg["event"].get<std::string>();
       std::string msg_id = msg.value("message_id", "");
 
-      BOOST_LOG(info) << "Middleware event received: "sv << event_type;
+      BOOST_LOG(info) << "Middleware event received: "sv << event_type << " (msg_id="sv << msg_id << ')';
 
       if (event_type == "force_disconnected_time") {
         // Store AFK timeout (seconds) for use by stream logic
@@ -185,14 +185,14 @@ namespace middleware {
         if (ec) {
           BOOST_LOG(warning) << "Middleware resolve failed: "sv << ec.message();
           schedule_reconnect();
-          continue;
+          return;
         }
 
         net::connect(beast::get_lowest_layer(ws), results, ec);
         if (ec) {
           BOOST_LOG(warning) << "Middleware connect failed: "sv << ec.message();
           schedule_reconnect();
-          continue;
+          return;
         }
 
         // WebSocket handshake
@@ -200,7 +200,7 @@ namespace middleware {
         if (ec) {
           BOOST_LOG(warning) << "Middleware handshake failed: "sv << ec.message();
           schedule_reconnect();
-          continue;
+          return;
         }
 
         BOOST_LOG(info) << "Middleware connected to "sv << cfg.address << ':' << cfg.port;
