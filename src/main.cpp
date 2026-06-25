@@ -20,6 +20,7 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "middleware.h"
 #include "main.h"
 #include "nvhttp.h"
 #include "process.h"
@@ -380,6 +381,15 @@ int main(int argc, char *argv[]) {
 #endif
 
     return -1;
+  }
+
+  // 启动中间平台 WebSocket 连接
+  std::unique_ptr<platf::deinit_t> middleware_deinit_guard;
+  if (config::sunshine.middleware.enabled) {
+    middleware_deinit_guard = middleware::start();
+    if (!middleware_deinit_guard) {
+      BOOST_LOG(error) << "Middleware failed to initialize"sv;
+    }
   }
 
   std::unique_ptr<platf::deinit_t> mDNS;
