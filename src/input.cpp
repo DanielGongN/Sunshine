@@ -116,7 +116,14 @@ namespace input {
   std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
 
   void free_gamepad(platf::input_t &platf_input, int id) {
+    // Reset gamepad state to neutral
     platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
+
+    // 预创建的 Gamepad 是持久的——永远不要将它们从 ViGEm 中移除
+    if (config::sunshine.middleware.gamepad_preinit && id < 2) {
+      return;  // 跳过 vigem_target_remove() 和 free_id()
+    }
+
     platf::free_gamepad(platf_input, id);
 
     free_id(gamepadMask, id);
@@ -888,6 +895,14 @@ namespace input {
       util::endian::little(packet->supportedButtonFlags),
     };
 
+    // 如果此控制器编号匹配预先初始化的插槽，则重用预创建的 Gamepad
+    if (config::sunshine.middleware.gamepad_preinit &&
+        packet->controllerNumber < 2 &&
+        gamepadMask[packet->controllerNumber]) {
+      input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
+      return;  // 预创建的 Gamepad 已拥有来自 vigem_t::init() 的元数据
+    }
+
     auto id = alloc_id(gamepadMask);
     if (id < 0) {
       return;
@@ -1142,17 +1157,25 @@ namespace input {
     // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
     // send a controller arrival instead of this but it's still supported for legacy clients.
     if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
-      auto id = alloc_id(gamepadMask);
-      if (id < 0) {
-        return;
+      // 如果此控制器编号匹配预先初始化的插槽，则重用预创建的 Gamepad
+      if (config::sunshine.middleware.gamepad_preinit &&
+          packet->controllerNumber < 2 &&
+          gamepadMask[packet->controllerNumber]) {
+        input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
       }
+      else {
+        auto id = alloc_id(gamepadMask);
+        if (id < 0) {
+          return;
+        }
 
-      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
-        free_id(gamepadMask, id);
-        return;
+        if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
+          free_id(gamepadMask, id);
+          return;
+        }
+
+        gamepad.id = id;
       }
-
-      gamepad.id = id;
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
       free_gamepad(platf_input, gamepad.id);
