@@ -14,7 +14,6 @@
 #endif
 
 // local includes
-#include "confighttp.h"
 #include "display_device.h"
 #include "entry_handler.h"
 #include "globals.h"
@@ -383,6 +382,9 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
+  // Pre-create nvhttp_ready event so middleware can wait on it
+  mail::man->event<bool>(mail::nvhttp_ready);
+
   // 启动中间平台 WebSocket 连接
   std::unique_ptr<platf::deinit_t> middleware_deinit_guard;
   if (config::sunshine.middleware.enabled) {
@@ -408,7 +410,7 @@ int main(int argc, char *argv[]) {
   }
 
   std::thread httpThread {nvhttp::start};
-  std::thread configThread {confighttp::start};
+  // std::thread configThread {confighttp::start};  // Web UI removed
   std::thread rtspThread {rtsp_stream::start};
 
 #ifdef _WIN32
@@ -436,7 +438,7 @@ int main(int argc, char *argv[]) {
   mainThreadLoop(shutdown_event);
 
   httpThread.join();
-  configThread.join();
+  // configThread.join();  // removed
   rtspThread.join();
 
   task_pool.stop();
