@@ -37,6 +37,11 @@ namespace middleware {
   constexpr auto RECONNECT_MAX_DELAY = 60s;
   constexpr int RECONNECT_BACKOFF_MULTIPLIER = 2;
 
+  // Global pointers for send_to_upstream (set/cleared by middleware_t lifecycle)
+  net::io_context* g_ioc = nullptr;
+  websocket::stream<tcp::socket>* g_ws = nullptr;
+  safe::queue_t<std::string> g_outgoing_queue {30};
+
   // Events to subscribe to
   constexpr const char* SUBSCRIBED_EVENTS[] = {
     "force_disconnected_time",
@@ -54,10 +59,14 @@ namespace middleware {
         resolver {ioc},
         reconnect_delay {RECONNECT_BASE_DELAY},
         stopping {false} {
+      g_ioc = &ioc;
+      g_ws = &ws;
     }
 
     ~middleware_t() {
       stopping.store(true);
+      g_ioc = nullptr;
+      g_ws = nullptr;
       beast::error_code ec;
       ws.close(websocket::close_code::normal, ec);  // ignore errors during shutdown
       ioc.stop();
@@ -113,10 +122,11 @@ namespace middleware {
       BOOST_LOG(info) << "Middleware event received: "sv << event_type << " (msg_id="sv << msg_id << ')';
 
       if (event_type == "force_disconnected_time") {
-        // Store AFK timeout (seconds) for use by stream logic
+        // Store AFK timeout (seconds) for use by stream idle detection
         int timeout = msg.value("data", json::object()).value("timeout", 0);
         if (timeout <= 0) timeout = msg.value("data", 0);
         if (timeout > 0) {
+          config::sunshine.middleware.force_disconnected_timeout = timeout;
           BOOST_LOG(info) << "force_disconnected_time: timeout="sv << timeout;
         }
       }
@@ -124,6 +134,7 @@ namespace middleware {
         int timeout = msg.value("data", json::object()).value("timeout", 0);
         if (timeout <= 0) timeout = msg.value("data", 0);
         if (timeout > 0) {
+          config::sunshine.middleware.standby_disconnected_timeout = timeout;
           BOOST_LOG(info) << "standby_disconnected_time: timeout="sv << timeout;
         }
       }
@@ -144,6 +155,8 @@ namespace middleware {
       }
       else if (event_type == "disconnected") {
         BOOST_LOG(info) << "Middleware requested client disconnect"sv;
+        auto force_event = mail::man->event<bool>(mail::force_disconnect);
+        force_event->raise(true);
       }
       else if (event_type == "client_connect") {
         auto &data = msg["data"];
@@ -194,81 +207,99 @@ namespace middleware {
       }
     }
 
-    void read_loop() {
-      beast::flat_buffer buffer;
-      while (!stopping.load()) {
+    void drain_outgoing() {
+      while (g_outgoing_queue.peek()) {
+        auto payload = g_outgoing_queue.pop();
         beast::error_code ec;
-        ws.read(buffer, ec);
-
-        if (ec == net::error::operation_aborted || stopping.load()) {
+        ws.write(net::buffer(payload), ec);
+        if (ec) {
+          BOOST_LOG(warning) << "Failed to send to upstream: "sv << ec.message();
           break;
+        }
+      }
+    }
+
+    void do_async_read() {
+      auto buffer = std::make_shared<beast::flat_buffer>();
+      ws.async_read(*buffer, [this, buffer](beast::error_code ec, std::size_t /*bytes*/) {
+        if (ec == net::error::operation_aborted || stopping.load()) {
+          return;
         }
 
         if (ec) {
           BOOST_LOG(warning) << "Middleware read error: "sv << ec.message();
-          break;
+          // Connection broken — schedule reconnect
+          schedule_reconnect();
+          return;
         }
 
         try {
-          std::string payload = beast::buffers_to_string(buffer.data());
-          buffer.consume(buffer.size());
+          std::string payload = beast::buffers_to_string(buffer->data());
+          buffer->consume(buffer->size());
           json msg = json::parse(payload);
           on_message_event(msg);
         } catch (const json::parse_error& e) {
           BOOST_LOG(warning) << "Middleware JSON parse error: "sv << e.what();
         }
-      }
+
+        // Process any outgoing messages queued between reads
+        drain_outgoing();
+
+        // Continue async read loop
+        if (!stopping.load()) {
+          do_async_read();
+        }
+      });
     }
 
     void connect_and_subscribe() {
+      if (stopping.load()) return;
+
       auto& cfg = config::sunshine.middleware;
+      beast::error_code ec;
 
-      while (!stopping.load()) {
-        beast::error_code ec;
-
-        // Resolve and connect
-        auto results = resolver.resolve(cfg.address, std::to_string(cfg.port), ec);
-        if (ec) {
-          BOOST_LOG(warning) << "Middleware resolve failed: "sv << ec.message();
-          schedule_reconnect();
-          return;
-        }
-
-        net::connect(beast::get_lowest_layer(ws), results, ec);
-        if (ec) {
-          BOOST_LOG(warning) << "Middleware connect failed: "sv << ec.message();
-          schedule_reconnect();
-          return;
-        }
-
-        // WebSocket handshake
-        ws.handshake(cfg.address + ":" + std::to_string(cfg.port), "/", ec);
-        if (ec) {
-          BOOST_LOG(warning) << "Middleware handshake failed: "sv << ec.message();
-          schedule_reconnect();
-          return;
-        }
-
-        BOOST_LOG(info) << "Middleware connected to "sv << cfg.address << ':' << cfg.port;
-        reconnect_delay = RECONNECT_BASE_DELAY;  // reset backoff
-
-        // Subscribe to events
-        subscribe_all_events();
-
-        // Wait for nvhttp HTTPS server to be ready before sending stream_engine_info
-        auto nvhttp_ready = mail::man->event<bool>(mail::nvhttp_ready);
-        if (!nvhttp_ready->peek()) {
-          BOOST_LOG(info) << "Waiting for nvhttp server to be ready..."sv;
-          nvhttp_ready->view();  // block until nvhttp::start() raises the event
-        }
-        send_stream_engine_info();
-
-        // Enter read loop
-        read_loop();
-
-        // Read loop exited — reconnect
-        BOOST_LOG(info) << "Middleware disconnected, will reconnect..."sv;
+      // Resolve and connect
+      auto results = resolver.resolve(cfg.address, std::to_string(cfg.port), ec);
+      if (ec) {
+        BOOST_LOG(warning) << "Middleware resolve failed: "sv << ec.message();
+        schedule_reconnect();
+        return;
       }
+
+      net::connect(beast::get_lowest_layer(ws), results, ec);
+      if (ec) {
+        BOOST_LOG(warning) << "Middleware connect failed: "sv << ec.message();
+        schedule_reconnect();
+        return;
+      }
+
+      // WebSocket handshake
+      ws.handshake(cfg.address + ":" + std::to_string(cfg.port), "/", ec);
+      if (ec) {
+        BOOST_LOG(warning) << "Middleware handshake failed: "sv << ec.message();
+        schedule_reconnect();
+        return;
+      }
+
+      BOOST_LOG(info) << "Middleware connected to "sv << cfg.address << ':' << cfg.port;
+      reconnect_delay = RECONNECT_BASE_DELAY;  // reset backoff
+
+      // Subscribe to events
+      subscribe_all_events();
+
+      // Wait for nvhttp HTTPS server to be ready before sending stream_engine_info
+      auto nvhttp_ready = mail::man->event<bool>(mail::nvhttp_ready);
+      if (!nvhttp_ready->peek()) {
+        BOOST_LOG(info) << "Waiting for nvhttp server to be ready..."sv;
+        nvhttp_ready->view();  // block until nvhttp::start() raises the event
+      }
+      send_stream_engine_info();
+
+      // Drain any outgoing messages queued before we start reading
+      drain_outgoing();
+
+      // Start async read loop (non-blocking)
+      do_async_read();
     }
 
     void schedule_reconnect() {
@@ -320,6 +351,43 @@ namespace middleware {
     impl->run();
 
     return std::make_unique<deinit_t>(std::move(impl));
+  }
+
+  void send_to_upstream(nlohmann::json msg) {
+    if (!g_ioc || !g_ws) {
+      BOOST_LOG(debug) << "send_to_upstream: middleware not connected, dropping message"sv;
+      return;
+    }
+
+    msg["event"] = "send_to_upstream";
+    msg["message_id"] = std::to_string(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+      ).count()
+    );
+
+    std::string payload = msg.dump();
+    g_outgoing_queue.push(std::move(payload));
+
+    // Post to io_context to drain and send immediately.
+    // Cancel in-flight async_read, drain outgoing, then restart.
+    boost::asio::post(*g_ioc, []() {
+      if (!g_ws) return;
+      beast::error_code ec;
+      g_ws->cancel(ec);  // Cancel any in-flight async_read (safe on io_context thread)
+      // Note: drain_outgoing will be called when the cancelled read completes
+      // and before the next async_read starts, via do_async_read's completion handler.
+      // For immediate send, drain here too (the cancel above ensures no concurrent read):
+      while (g_outgoing_queue.peek()) {
+        auto payload = g_outgoing_queue.pop();
+        beast::error_code wec;
+        g_ws->write(net::buffer(payload), wec);
+        if (wec) {
+          BOOST_LOG(warning) << "send_to_upstream write failed: "sv << wec.message();
+          break;
+        }
+      }
+    });
   }
 
 }  // namespace middleware

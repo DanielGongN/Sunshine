@@ -45,6 +45,7 @@ namespace mail {
   // Global mail
   MAIL(shutdown);
   MAIL(broadcast_shutdown);
+  MAIL(force_disconnect);
   MAIL(video_packets);
   MAIL(audio_packets);
   MAIL(switch_display);

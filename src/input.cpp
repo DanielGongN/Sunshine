@@ -37,6 +37,9 @@ using namespace std::literals;
 
 namespace input {
 
+  // Track last user input time for idle/afk detection
+  std::atomic<std::chrono::steady_clock::time_point> last_input_time {std::chrono::steady_clock::now()};
+
   constexpr auto MAX_GAMEPADS = std::min((std::size_t) platf::MAX_GAMEPADS, sizeof(std::int16_t) * 8);
 #define DISABLE_LEFT_BUTTON_DELAY ((thread_pool_util::ThreadPool::task_id_t) 0x01)
 #define ENABLE_LEFT_BUTTON_DELAY nullptr
@@ -1649,6 +1652,9 @@ namespace input {
    * @param input_data The input message.
    */
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data) {
+    // Update last input time for idle/afk detection
+    update_input_time();
+
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
       input->input_queue.push_back(std::move(input_data));
@@ -1718,5 +1724,13 @@ namespace input {
                           100ms);
 
     return input;
+  }
+
+  void update_input_time() {
+    last_input_time.store(std::chrono::steady_clock::now(), std::memory_order_release);
+  }
+
+  std::chrono::steady_clock::time_point get_last_input_time() {
+    return last_input_time.load(std::memory_order_acquire);
   }
 }  // namespace input

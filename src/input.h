@@ -53,4 +53,15 @@ namespace input {
    * @return The major and minor axis pair.
    */
   std::pair<float, float> scale_client_contact_area(const std::pair<float, float> &val, uint16_t rotation, const std::pair<float, float> &scalar);
+
+  /**
+   * @brief Update the last user input timestamp (called on any input event).
+   */
+  void update_input_time();
+
+  /**
+   * @brief Get the time point of the last user input.
+   * @return The steady_clock time point of the last input event.
+   */
+  std::chrono::steady_clock::time_point get_last_input_time();
 }  // namespace input

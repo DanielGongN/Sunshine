@@ -32,6 +32,8 @@ extern "C" {
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
+#include "input.h"
+#include "middleware.h"
 #include "nvhttp.h"
 #include "utility.h"
 
@@ -1084,11 +1086,62 @@ namespace stream {
             break;
           }
 
+          // Check for force disconnect from upstream (via middleware)
+          auto force_event = mail::man->event<bool>(mail::force_disconnect);
+          if (force_event->peek()) {
+            BOOST_LOG(info) << "Force disconnect from upstream"sv;
+            force_event->pop();
+            nlohmann::json msg;
+            msg["data"]["event"] = "disconnected";
+            msg["data"]["message"] = u8"上游主动发送disconnected，回应上游平台";
+            middleware::send_to_upstream(msg);
+            // Stop all running sessions
+            for (auto pos2 = std::begin(*server->_sessions); pos2 != std::end(*server->_sessions); ++pos2) {
+              auto s = *pos2;
+              if (s->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
+                session::stop(*s);
+              }
+            }
+          }
+
           auto session = *pos;
+
+          // Idle/AFK detection — check if user has been inactive too long
+          if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
+            auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(
+              now - input::get_last_input_time()
+            ).count();
+
+            auto force_timeout = config::sunshine.middleware.force_disconnected_timeout;
+            if (force_timeout > 0 && idle_sec >= force_timeout) {
+              BOOST_LOG(info) << "Force disconnect: idle for "sv << idle_sec << " seconds"sv;
+              nlohmann::json msg;
+              msg["data"]["event"] = "disconnected";
+              msg["data"]["message"] = u8"长时间挂机，断开连接";
+              middleware::send_to_upstream(msg);
+              session::stop(*session);
+            }
+            else {
+              auto standby_timeout = config::sunshine.middleware.standby_disconnected_timeout;
+              if (standby_timeout > 0 && idle_sec >= standby_timeout) {
+                BOOST_LOG(info) << "Standby disconnect: idle for "sv << idle_sec << " seconds"sv;
+                nlohmann::json msg;
+                msg["data"]["event"] = "disconnected";
+                msg["data"]["message"] = u8"长时间无操作，断开连接";
+                middleware::send_to_upstream(msg);
+                session::stop(*session);
+              }
+            }
+          }
 
           if (now > session->pingTimeout) {
             auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
             BOOST_LOG(info) << address << ": Ping Timeout"sv;
+            // Notify upstream of network disconnect
+            nlohmann::json msg;
+            msg["data"]["event"] = "disconnected";
+            msg["data"]["message"] = u8"网络异常断开连接";
+            middleware::send_to_upstream(msg);
             session::stop(*session);
           }
 
