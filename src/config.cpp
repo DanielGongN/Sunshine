@@ -593,7 +593,7 @@ namespace config {
     {},  // Username
     {},  // Password
     {},  // Password Salt
-    platf::appdata().string() + "/sunshine.conf",  // config file
+    platf::appdata().string() + "/engine.conf",  // config file
     {},  // cmd args
     41205,  // Base port number
     "ipv4",  // Address family
