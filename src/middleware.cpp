@@ -17,9 +17,11 @@
 
 // local includes
 #include "config.h"
+#include "file_handler.h"
 #include "globals.h"
 #include "logging.h"
 #include "middleware.h"
+#include "nvhttp.h"
 
 using namespace std::literals;
 namespace beast = boost::beast;
@@ -143,8 +145,52 @@ namespace middleware {
       else if (event_type == "disconnected") {
         BOOST_LOG(info) << "Middleware requested client disconnect"sv;
       }
+      else if (event_type == "client_connect") {
+        auto &data = msg["data"];
+        std::string uuid = data.value("uuid", "");
+        std::string cert = data.value("cert", "");
+        if (uuid.empty() || cert.empty()) {
+          BOOST_LOG(warning) << "client_connect: missing uuid or cert"sv;
+        } else {
+          nvhttp::add_trusted_client(uuid, cert);
+        }
+      }
+      else if (event_type == "client_disconnect") {
+        std::string uuid = msg.value("data", json::object()).value("uuid", "");
+        if (uuid.empty()) {
+          BOOST_LOG(warning) << "client_disconnect: missing uuid"sv;
+        } else {
+          nvhttp::remove_trusted_client(uuid);
+        }
+      }
       else {
         BOOST_LOG(debug) << "Unknown middleware event: "sv << event_type;
+      }
+    }
+
+    void send_stream_engine_info() {
+      // Read server cert from disk
+      auto cert = file_handler::read_file(config::nvhttp.cert.c_str());
+      if (cert.empty()) {
+        BOOST_LOG(error) << "Failed to read server cert for stream_engine_info"sv;
+        return;
+      }
+
+      json msg;
+      msg["message_id"] = make_timestamp();
+      msg["event"] = "stream_engine_info";
+      json data;
+      data["cert"] = cert;
+      data["port"] = 41200;
+      msg["data"] = data;
+
+      std::string payload = msg.dump();
+      beast::error_code ec;
+      ws.write(net::buffer(payload), ec);
+      if (ec) {
+        BOOST_LOG(warning) << "Failed to send stream_engine_info: "sv << ec.message();
+      } else {
+        BOOST_LOG(info) << "Sent stream_engine_info to upstream"sv;
       }
     }
 
@@ -208,6 +254,14 @@ namespace middleware {
 
         // Subscribe to events
         subscribe_all_events();
+
+        // Wait for nvhttp HTTPS server to be ready before sending stream_engine_info
+        auto nvhttp_ready = mail::man->event<bool>(mail::nvhttp_ready);
+        if (!nvhttp_ready->peek()) {
+          BOOST_LOG(info) << "Waiting for nvhttp server to be ready..."sv;
+          nvhttp_ready->view();  // block until nvhttp::start() raises the event
+        }
+        send_stream_engine_info();
 
         // Enter read loop
         read_loop();
