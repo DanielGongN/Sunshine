@@ -290,8 +290,8 @@ namespace config {
       std::string address = "0.0.0.0";
       int port = 40002;
       bool gamepad_preinit = false;
-      int force_disconnected_timeout = 0;   // seconds, 0=disabled
-      int standby_disconnected_timeout = 0; // seconds, 0=disabled
+      int force_disconnected_timeout = 900;   // seconds, default 15 minutes
+      int standby_disconnected_timeout = 900; // seconds, default 15 minutes
     } middleware;
   };
 
