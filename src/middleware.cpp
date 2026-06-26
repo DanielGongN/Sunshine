@@ -210,8 +210,9 @@ namespace middleware {
     void drain_outgoing() {
       while (g_outgoing_queue.peek()) {
         auto payload = g_outgoing_queue.pop();
+        if (!payload) continue;
         beast::error_code ec;
-        ws.write(net::buffer(payload), ec);
+        ws.write(net::buffer(*payload), ec);
         if (ec) {
           BOOST_LOG(warning) << "Failed to send to upstream: "sv << ec.message();
           break;
@@ -380,8 +381,9 @@ namespace middleware {
       // For immediate send, drain here too (the cancel above ensures no concurrent read):
       while (g_outgoing_queue.peek()) {
         auto payload = g_outgoing_queue.pop();
+        if (!payload) continue;
         beast::error_code wec;
-        g_ws->write(net::buffer(payload), wec);
+        g_ws->write(net::buffer(*payload), wec);
         if (wec) {
           BOOST_LOG(warning) << "send_to_upstream write failed: "sv << wec.message();
           break;
