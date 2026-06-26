@@ -8,6 +8,8 @@
 // standard includes
 #include <filesystem>
 #include <format>
+#include <future>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -46,6 +48,9 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   crypto::cert_chain_t cert_chain;
+
+  // Mutex to protect client_root and cert_chain across threads (nvhttp + middleware)
+  std::mutex client_mutex;
 
   class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
   public:
@@ -144,6 +149,20 @@ namespace nvhttp {
   client_t client_root;
   std::atomic<uint32_t> session_id_counter;
 
+  // Rebuild cert_chain from client_root.named_devices
+  // Caller must hold client_mutex
+  void rebuild_cert_chain() {
+    cert_chain.clear();
+    for (auto &named_cert : client_root.named_devices) {
+      if (named_cert.enabled) {
+        auto x509 = crypto::x509(named_cert.cert);
+        if (x509) {
+          cert_chain.add(std::move(x509));
+        }
+      }
+    }
+  }
+
   // Set by TLS verify callback, read by launch/resume handler (single-threaded HTTPS server)
   std::string last_verified_client_cert;  // NOSONAR(cpp:S5421) - intentionally mutable global
 
@@ -208,6 +227,8 @@ namespace nvhttp {
   }
 
   void load_state() {
+    std::lock_guard<std::mutex> lg(client_mutex);
+
     if (!fs::exists(config::nvhttp.file_state)) {
       BOOST_LOG(info) << "File "sv << config::nvhttp.file_state << " doesn't exist"sv;
       http::unique_id = uuid_util::uuid_t::generate().string();
@@ -285,6 +306,80 @@ namespace nvhttp {
     }
   }
 
+  void add_trusted_client(std::string uuid, std::string cert) {
+    std::lock_guard lg {client_mutex};
+
+    // Validate the cert PEM before adding
+    auto x509 = crypto::x509(cert);
+    if (!x509) {
+      BOOST_LOG(error) << "add_trusted_client: invalid cert PEM for uuid "sv << uuid;
+      return;
+    }
+
+    // Check for duplicate uuid
+    for (auto &dev : client_root.named_devices) {
+      if (dev.uuid == uuid) {
+        BOOST_LOG(warning) << "add_trusted_client: uuid "sv << uuid << " already exists, replacing cert"sv;
+        dev.cert = cert;
+        rebuild_cert_chain();
+        return;
+      }
+    }
+
+    named_cert_t named_cert;
+    named_cert.name = uuid;  // use uuid as name since we don't get name from upstream
+    named_cert.uuid = std::move(uuid);
+    named_cert.cert = std::move(cert);
+    named_cert.enabled = true;
+
+    cert_chain.add(std::move(x509));
+    auto uuid_copy = named_cert.uuid;
+    client_root.named_devices.emplace_back(std::move(named_cert));
+
+    // Do NOT call save_state() — certificates are memory-only
+    BOOST_LOG(info) << "Trusted client added: "sv << uuid_copy;
+  }
+
+  void remove_trusted_client(std::string_view uuid) {
+    std::lock_guard lg {client_mutex};
+
+    auto &devices = client_root.named_devices;
+    auto it = std::find_if(devices.begin(), devices.end(), [&uuid](const named_cert_t &d) {
+      return d.uuid == uuid;
+    });
+
+    if (it == devices.end()) {
+      BOOST_LOG(warning) << "remove_trusted_client: uuid "sv << uuid << " not found"sv;
+      return;
+    }
+
+    BOOST_LOG(info) << "Trusted client removed: "sv << it->uuid;
+    devices.erase(it);
+    rebuild_cert_chain();
+  }
+
+  void remove_trusted_client_by_cert(std::string_view cert) {
+    if (cert.empty()) {
+      return;
+    }
+
+    std::lock_guard lg {client_mutex};
+
+    auto &devices = client_root.named_devices;
+    auto it = std::find_if(devices.begin(), devices.end(), [&cert](const named_cert_t &d) {
+      return d.cert == cert;
+    });
+
+    if (it == devices.end()) {
+      BOOST_LOG(debug) << "remove_trusted_client_by_cert: cert not found (may already be removed)"sv;
+      return;
+    }
+
+    BOOST_LOG(info) << "Trusted client removed by cert (stream ended): "sv << it->uuid;
+    devices.erase(it);
+    rebuild_cert_chain();
+  }
+
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, const args_t &args) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
@@ -360,6 +455,15 @@ namespace nvhttp {
       fail_pair(sess, tree, "Out of order call to getservercert");
       return;
     }
+
+    // PIN pairing disabled when middleware is active
+    if (config::sunshine.middleware.enabled) {
+      tree.put("root.paired", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
+      BOOST_LOG(warning) << "PIN pairing disabled: use upstream platform for client authorization"sv;
+      return;
+    }
+
     sess.last_phase = PAIR_PHASE::GETSERVERCERT;
 
     if (sess.async_insert_pin.salt.size() < 32) {
@@ -382,6 +486,11 @@ namespace nvhttp {
   void clientchallenge(pair_session_t &sess, pt::ptree &tree, const std::string &challenge) {
     if (sess.last_phase != PAIR_PHASE::GETSERVERCERT) {
       fail_pair(sess, tree, "Out of order call to clientchallenge");
+      return;
+    }
+    if (config::sunshine.middleware.enabled) {
+      tree.put("root.paired", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
       return;
     }
     sess.last_phase = PAIR_PHASE::CLIENTCHALLENGE;
@@ -427,6 +536,11 @@ namespace nvhttp {
       fail_pair(sess, tree, "Out of order call to serverchallengeresp");
       return;
     }
+    if (config::sunshine.middleware.enabled) {
+      tree.put("root.paired", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
+      return;
+    }
     sess.last_phase = PAIR_PHASE::SERVERCHALLENGERESP;
 
     if (!sess.cipher_key || sess.serversecret.empty()) {
@@ -454,6 +568,11 @@ namespace nvhttp {
   void clientpairingsecret(pair_session_t &sess, std::shared_ptr<safe::queue_t<crypto::x509_t>> &add_cert, pt::ptree &tree, const std::string &client_pairing_secret) {
     if (sess.last_phase != PAIR_PHASE::SERVERCHALLENGERESP) {
       fail_pair(sess, tree, "Out of order call to clientpairingsecret");
+      return;
+    }
+    if (config::sunshine.middleware.enabled) {
+      tree.put("root.paired", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
       return;
     }
     sess.last_phase = PAIR_PHASE::CLIENTPAIRINGSECRET;
@@ -607,6 +726,11 @@ namespace nvhttp {
           return;
         }
       } else if (it->second == "pairchallenge"sv) {
+        if (config::sunshine.middleware.enabled) {
+          tree.put("root.paired", 0);
+          tree.put("root.<xmlattr>.status_code", 403);
+          return;
+        }
         tree.put("root.paired", 1);
         tree.put("root.<xmlattr>.status_code", 200);
         return;
@@ -1117,6 +1241,8 @@ namespace nvhttp {
         return 0;
       }
 
+      std::lock_guard<std::mutex> lg(client_mutex);
+
       int verified = 0;
 
       auto fg = util::fail_guard([&]() {
@@ -1127,6 +1253,8 @@ namespace nvhttp {
         BOOST_LOG(debug) << subject_name << " -- "sv << (verified ? "verified"sv : "denied"sv);
       });
 
+      // Note: When middleware is enabled, PIN pairing is disabled so add_cert is never populated.
+      // This path is only active when middleware is disabled (traditional PIN pairing mode).
       while (add_cert->peek()) {
         char subject_name[256];
 
@@ -1201,24 +1329,41 @@ namespace nvhttp {
     http_server.config.address = net::get_bind_address(address_family);
     http_server.config.port = port_http;
 
-    auto accept_and_run = [&](auto *http_server) {
+    auto accept_and_run = [&](auto *http_server, std::promise<void> *ready) {
       try {
         std::string name = "nvhttp::" + std::to_string(http_server->config.port);
         platf::set_thread_name(name);
-        http_server->start();
+        http_server->start([ready](unsigned short /*port*/) {
+          ready->set_value();  // Server is now accepting connections
+        });
+        // start() blocks in io_service->run() — returns on shutdown, which is normal
       } catch (boost::system::system_error &err) {
         // It's possible the exception gets thrown after calling http_server->stop() from a different thread
         if (shutdown_event->peek()) {
+          ready->set_value();  // Don't deadlock if shutting down
           return;
         }
 
-        BOOST_LOG(fatal) << "Couldn't start http server on ports ["sv << port_https << ", "sv << port_https << "]: "sv << err.what();
+        BOOST_LOG(fatal) << "Couldn't start http server on ports ["sv << port_http << ", "sv << port_https << "]: "sv << err.what();
         shutdown_event->raise(true);
+        ready->set_value();  // Signal to unblock main thread even on error
         return;
       }
     };
-    std::thread ssl {accept_and_run, &https_server};
-    std::thread tcp {accept_and_run, &http_server};
+    std::promise<void> ssl_ready, tcp_ready;
+    auto ssl_future = ssl_ready.get_future();
+    auto tcp_future = tcp_ready.get_future();
+
+    std::thread ssl {accept_and_run, &https_server, &ssl_ready};
+    std::thread tcp {accept_and_run, &http_server, &tcp_ready};
+
+    ssl_future.wait();
+    tcp_future.wait();
+
+    // Signal middleware that nvhttp is ready
+    auto nvhttp_ready = mail::man->event<bool>(mail::nvhttp_ready);
+    nvhttp_ready->raise(true);
+    BOOST_LOG(info) << "nvhttp ready, middleware can now send stream_engine_info"sv;
 
     // Wait for any event
     shutdown_event->view();

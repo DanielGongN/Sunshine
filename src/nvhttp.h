@@ -209,4 +209,24 @@ namespace nvhttp {
    * @examples_end
    */
   void erase_all_clients();
+
+  /**
+   * @brief Add a trusted client certificate (memory-only, not persisted).
+   * @param uuid The unique identifier for the client.
+   * @param cert The PEM-encoded X.509 certificate.
+   */
+  void add_trusted_client(std::string uuid, std::string cert);
+
+  /**
+   * @brief Remove a trusted client certificate by uuid.
+   * @param uuid The unique identifier for the client.
+   */
+  void remove_trusted_client(std::string_view uuid);
+
+  /**
+   * @brief Remove a trusted client certificate by cert PEM.
+   *        Used by stream cleanup hook when a client disconnects.
+   * @param cert The PEM-encoded X.509 certificate.
+   */
+  void remove_trusted_client_by_cert(std::string_view cert);
 }  // namespace nvhttp
