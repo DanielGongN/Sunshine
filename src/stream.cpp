@@ -32,6 +32,7 @@ extern "C" {
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
+#include "nvhttp.h"
 #include "utility.h"
 
 constexpr int IDX_START_A = 0;
@@ -1092,6 +1093,12 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+            // Revoke trusted client cert when stream ends
+            // This handles both ping timeout (network issues) and normal disconnect
+            if (!session->client_cert.empty()) {
+              nvhttp::remove_trusted_client_by_cert(session->client_cert);
+            }
+
             pos = server->_sessions->erase(pos);
 
             if (session->control.peer) {
