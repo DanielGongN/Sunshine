@@ -274,7 +274,7 @@ namespace middleware {
       }
 
       // WebSocket handshake
-      ws.handshake(cfg.address + ":" + std::to_string(cfg.port), "/", ec);
+      ws.handshake(cfg.address + ":" + std::to_string(cfg.port), "/ws", ec);
       if (ec) {
         BOOST_LOG(warning) << "Middleware handshake failed: "sv << ec.message();
         schedule_reconnect();
