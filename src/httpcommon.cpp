@@ -58,11 +58,11 @@ namespace http {
         create_creds(config::nvhttp.pkey, config::nvhttp.cert)) {
       return -1;
     }
-    if (!user_creds_exist(config::sunshine.credentials_file)) {
-      BOOST_LOG(info) << "Open the Web UI to set your new username and password and getting started";
-    } else if (reload_user_creds(config::sunshine.credentials_file)) {
-      return -1;
-    }
+    // Fixed credentials — no Web UI credential file needed
+    const std::string fixed_salt = "wusuan_salt_16ch";
+    config::sunshine.username = "wusuan_admin";
+    config::sunshine.salt = fixed_salt;
+    config::sunshine.password = util::hex(crypto::hash(std::string("2BTtaMdVvb2") + fixed_salt)).to_string();
     return 0;
   }
 
