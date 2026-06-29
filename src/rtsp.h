@@ -12,7 +12,7 @@
 #include "thread_safe.h"
 
 namespace rtsp_stream {
-  constexpr auto RTSP_SETUP_PORT = 21;
+  constexpr auto RTSP_SETUP_PORT = 26;
 
   struct launch_session_t {
     uint32_t id;

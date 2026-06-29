@@ -3,6 +3,8 @@
 
 if(APPLE AND NOT SUNSHINE_BUILD_HOMEBREW)
     add_executable(sunshine MACOSX_BUNDLE ${SUNSHINE_TARGET_FILES})
+elseif(WIN32)
+    add_executable(sunshine WIN32 ${SUNSHINE_TARGET_FILES})
 else()
     add_executable(sunshine ${SUNSHINE_TARGET_FILES})
 endif()

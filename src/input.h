@@ -26,6 +26,13 @@ namespace input {
 
   std::shared_ptr<input_t> alloc(safe::mail_t mail);
 
+  /**
+   * @brief Inject a single button click on a gamepad slot (press → sleep → release).
+   * @param gamepad_nr The gamepad slot number (0 for first slot).
+   * @param button_flag The platf:: button flag (e.g. platf::A).
+   */
+  void click_gamepad(int gamepad_nr, std::uint32_t button_flag);
+
   struct touch_port_t: public platf::touch_port_t {
     int env_width;
     int env_height;

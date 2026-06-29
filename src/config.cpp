@@ -595,10 +595,10 @@ namespace config {
     {},  // Password Salt
     platf::appdata().string() + "/engine.conf",  // config file
     {},  // cmd args
-    41205,  // Base port number
+    41200,  // Base port number (HTTPS entry point)
     "ipv4",  // Address family
     {},  // Bind address
-    platf::appdata().string() + "/sunshine.log",  // log file
+    platf::appdata().string() + "/engine.log",  // log file
     false,  // notify_pre_releases
     true,  // system_tray
     {},  // prep commands
@@ -1265,12 +1265,18 @@ namespace config {
 #ifndef __ANDROID__
     // TODO: Android can possibly support this
     if (!fs::exists(stream.file_apps.c_str())) {
-      fs::copy_file(SUNSHINE_ASSETS_DIR "/apps.json", stream.file_apps);
-      fs::permissions(
-        stream.file_apps,
-        fs::perms::owner_read | fs::perms::owner_write,
-        fs::perm_options::add
-      );
+      // Try to copy default apps.json from assets; create an empty array if missing.
+      auto default_apps = std::filesystem::path(SUNSHINE_ASSETS_DIR) / "apps.json";
+      if (fs::exists(default_apps)) {
+        fs::copy_file(default_apps, stream.file_apps);
+        fs::permissions(
+          stream.file_apps,
+          fs::perms::owner_read | fs::perms::owner_write,
+          fs::perm_options::add
+        );
+      } else {
+        file_handler::write_file(stream.file_apps.c_str(), "[]");
+      }
     }
 #endif
 

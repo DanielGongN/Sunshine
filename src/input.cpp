@@ -1726,6 +1726,38 @@ namespace input {
     return input;
   }
 
+  void click_gamepad(int gamepad_nr, std::uint32_t button_flag) {
+    // Check if the gamepad slot exists before dispatching
+    if (gamepad_nr < 0 || gamepad_nr >= (int) gamepadMask.size() || !gamepadMask[gamepad_nr]) {
+      BOOST_LOG(warning) << "click_gamepad: slot "sv << gamepad_nr << " not allocated, dropping button=0x"sv
+                         << util::hex(button_flag).to_string_view();
+      return;
+    }
+
+    BOOST_LOG(info) << "click_gamepad: dispatching to slot "sv << gamepad_nr
+                    << " button=0x"sv << util::hex(button_flag).to_string_view();
+
+    task_pool.push([gamepad_nr, button_flag]() {
+      BOOST_LOG(info) << "click_gamepad: pressing button=0x"sv << util::hex(button_flag).to_string_view()
+                      << " on slot "sv << gamepad_nr;
+
+      platf::gamepad_state_t press_state {button_flag, 0, 0, 0, 0, 0, 0};
+      platf::gamepad_update(platf_input, gamepad_nr, press_state);
+
+      // Hold long enough for browser Gamepad API (~60Hz polling) to detect.
+      // 200ms = ~12 frames, well above single-frame jitter.
+      std::this_thread::sleep_for(200ms);
+
+      BOOST_LOG(info) << "click_gamepad: releasing button=0x"sv << util::hex(button_flag).to_string_view()
+                      << " on slot "sv << gamepad_nr;
+
+      platf::gamepad_state_t release_state {};
+      platf::gamepad_update(platf_input, gamepad_nr, release_state);
+
+      BOOST_LOG(info) << "click_gamepad: button sequence complete for slot "sv << gamepad_nr;
+    });
+  }
+
   void update_input_time() {
     last_input_time.store(std::chrono::steady_clock::now(), std::memory_order_release);
   }

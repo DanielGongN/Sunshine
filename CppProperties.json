@@ -1,0 +1,16 @@
+{
+    "configurations": [
+        {
+            "name": "MinGW-JSON-IntelliSense",
+            "includePath": [
+                "${workspaceRoot}/**",
+                "E:/WorkComp/msys64/ucrt64/include",
+                "E:/WorkComp/msys64/ucrt64/include/c++/*",
+                "E:/WorkComp/msys64/ucrt64/x86_64-w64-mingw32/include"
+            ],
+            "compilerSwitches": "-std=c++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compileCommands": "${workspaceRoot}/build/compile_commands.json"
+        }
+    ]
+}

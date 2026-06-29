@@ -35,14 +35,15 @@ namespace nvhttp {
   constexpr auto GFE_VERSION = "3.23.0.74";
 
   /**
-   * @brief The HTTP port, as a difference from the config port.
+   * @brief The HTTPS port, as a difference from the config port.
+   *        With base=41200, final port = 41200 + 0 = 41200.
    */
-  constexpr auto PORT_HTTP = 0;
+  constexpr auto PORT_HTTPS = 0;
 
   /**
-   * @brief The HTTPS port, as a difference from the config port.
+   * @brief The HTTP port (disabled in middleware-only mode).
    */
-  constexpr auto PORT_HTTPS = -5;
+  constexpr auto PORT_HTTP = 5;
 
   /**
    * @brief Start the nvhttp server.

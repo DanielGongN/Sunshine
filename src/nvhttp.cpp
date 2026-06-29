@@ -322,6 +322,7 @@ namespace nvhttp {
         BOOST_LOG(warning) << "add_trusted_client: uuid "sv << uuid << " already exists, replacing cert"sv;
         dev.cert = cert;
         rebuild_cert_chain();
+        save_state();
         return;
       }
     }
@@ -336,8 +337,9 @@ namespace nvhttp {
     auto uuid_copy = named_cert.uuid;
     client_root.named_devices.emplace_back(std::move(named_cert));
 
-    // Do NOT call save_state() — certificates are memory-only
-    BOOST_LOG(info) << "Trusted client added: "sv << uuid_copy;
+    rebuild_cert_chain();
+    save_state();
+    BOOST_LOG(info) << "Trusted client added (persisted): "sv << uuid_copy;
   }
 
   void remove_trusted_client(std::string_view uuid) {
@@ -1225,7 +1227,6 @@ namespace nvhttp {
     bool host_audio {};
 
     https_server_t https_server {config::nvhttp.cert, config::nvhttp.pkey};
-    http_server_t http_server;
 
     // Verify certificates after establishing connection
     https_server.verify = [add_cert](SSL *ssl) {
@@ -1319,15 +1320,7 @@ namespace nvhttp {
     https_server.config.address = net::get_bind_address(address_family);
     https_server.config.port = port_https;
 
-    http_server.default_resource["GET"] = not_found<SimpleWeb::HTTP>;
-    http_server.resource["^/serverinfo$"]["GET"] = serverinfo<SimpleWeb::HTTP>;
-    http_server.resource["^/pair$"]["GET"] = [&add_cert](auto resp, auto req) {
-      pair<SimpleWeb::HTTP>(add_cert, resp, req);
-    };
-
-    http_server.config.reuse_address = true;
-    http_server.config.address = net::get_bind_address(address_family);
-    http_server.config.port = port_http;
+    // HTTP server is disabled — Web UI removed, Moonlight uses HTTPS-only (PORT_HTTPS).
 
     auto accept_and_run = [&](auto *http_server, std::promise<void> *ready) {
       try {
@@ -1355,7 +1348,7 @@ namespace nvhttp {
     auto tcp_future = tcp_ready.get_future();
 
     std::thread ssl {accept_and_run, &https_server, &ssl_ready};
-    std::thread tcp {accept_and_run, &http_server, &tcp_ready};
+    tcp_ready.set_value();  // HTTP server disabled — signal immediately
 
     ssl_future.wait();
     tcp_future.wait();
@@ -1369,10 +1362,8 @@ namespace nvhttp {
     shutdown_event->view();
 
     https_server.stop();
-    http_server.stop();
 
     ssl.join();
-    tcp.join();
   }
 
   void erase_all_clients() {

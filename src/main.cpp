@@ -392,6 +392,8 @@ int main(int argc, char *argv[]) {
     if (!middleware_deinit_guard) {
       BOOST_LOG(error) << "Middleware failed to initialize"sv;
     }
+
+    BOOST_LOG(info) << "已连接agent服务"sv;
   }
 
   std::unique_ptr<platf::deinit_t> mDNS;

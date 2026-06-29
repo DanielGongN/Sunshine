@@ -29,4 +29,12 @@ namespace middleware {
    */
   void send_to_upstream(nlohmann::json msg);
 
+  /**
+   * @brief Notify middleware that a Moonlight client connection state changed.
+   * @param connected true if a client just connected, false if it disconnected.
+   *
+   * Thread-safe. Used by the heartbeat to report net_connected status.
+   */
+  void notify_client_state(bool connected);
+
 }  // namespace middleware
