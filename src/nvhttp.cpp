@@ -72,8 +72,8 @@ namespace nvhttp {
 
     void after_bind() override {
       if (verify) {
-        // 去掉 verify_fail_if_no_peer_cert：客户端可以不提供证书�?
-        // 无证书客户端�?author 由各 HTTP handler 按需检查（�?/serverinfo 公开�?launch 需认证）�?
+        // Do not require a peer certificate during TLS handshake.
+        // Handlers decide which HTTP endpoints require an authorized client certificate.
         context.set_verify_mode(boost::asio::ssl::verify_peer | boost::asio::ssl::verify_client_once);
         context.set_verify_callback([](int verified, boost::asio::ssl::verify_context &ctx) {
           // To respond with an error message, a connection must be established
@@ -86,7 +86,7 @@ namespace nvhttp {
     void accept() override {
       static std::atomic<int> accept_call_count {0};
       int call_id = ++accept_call_count;
-      BOOST_LOG(info) << "[HTTPS] accept() 被调�?#"sv << call_id;
+      BOOST_LOG(info) << "[HTTPS] accept() called #"sv << call_id;
 
       auto connection = create_connection(*io_service, context);
 
@@ -98,7 +98,7 @@ namespace nvhttp {
         }
 
         if (ec) {
-          BOOST_LOG(warning) << "[HTTPS] accept 错误: "sv << ec.message() << " (code="sv << ec.value() << ')';
+          BOOST_LOG(warning) << "[HTTPS] accept failed: "sv << ec.message() << " (code="sv << ec.value() << ')';
         }
 
         if (ec != SimpleWeb::error::operation_aborted) {
@@ -108,10 +108,10 @@ namespace nvhttp {
         auto session = std::make_shared<Session>(config.max_request_streambuf_size, connection);
 
         if (!ec) {
-          BOOST_LOG(info) << "[HTTPS] 新连接已接受 #"sv << call_id << ", 对端: "sv
+          BOOST_LOG(info) << "[HTTPS] accepted connection #"sv << call_id << ", peer: "sv
                           << session->connection->socket->lowest_layer().remote_endpoint().address().to_string()
                           << ':' << session->connection->socket->lowest_layer().remote_endpoint().port()
-                          << " -- 开�?TLS 握手"sv;
+                          << " -- starting TLS handshake"sv;
 
           boost::asio::ip::tcp::no_delay option(true);
           SimpleWeb::error_code ec;
@@ -125,20 +125,20 @@ namespace nvhttp {
               return;
             }
             if (!ec) {
-              BOOST_LOG(info) << "[HTTPS] TLS握手完成, 对端: "sv
+              BOOST_LOG(info) << "[HTTPS] TLS handshake completed, peer: "sv
                               << session->connection->socket->lowest_layer().remote_endpoint().address().to_string()
                               << ':' << session->connection->socket->lowest_layer().remote_endpoint().port();
 
               if (verify && !verify(session->connection->socket->native_handle())) {
-                BOOST_LOG(warning) << "[HTTPS] 客户端证书验证失�?-- 返回 401"sv;
+                BOOST_LOG(warning) << "[HTTPS] client certificate verification failed -- returning 401"sv;
                 this->write(session, on_verify_failed);
               } else {
-                BOOST_LOG(info) << "[HTTPS] 客户端证书验证通过 -- 开始读取HTTP请求"sv;
+                BOOST_LOG(info) << "[HTTPS] client certificate verified -- reading HTTP request"sv;
                 this->read(session);
               }
             } else {
-              BOOST_LOG(warning) << "[HTTPS] TLS握手失败: "sv << ec.message()
-                                 << " (对端可能未提供客户端证书)"sv;
+              BOOST_LOG(warning) << "[HTTPS] TLS handshake failed: "sv << ec.message()
+                                 << " (peer may not have provided a client certificate)"sv;
               if (this->on_error) {
                 this->on_error(session->request, ec);
               }
@@ -370,15 +370,15 @@ namespace nvhttp {
 
     rebuild_cert_chain();
     save_state();
-    BOOST_LOG(info) << "[客户端管理] �?受信任客户端已添�?已持久化): uuid="sv << uuid_copy
-                    << " | 当前信任链大�?"sv << client_root.named_devices.size();
+    BOOST_LOG(info) << "[client] trusted client added and persisted: uuid="sv << uuid_copy
+                    << " | trust chain size="sv << client_root.named_devices.size();
   }
 
   std::string start_stream_session(const nlohmann::json &params) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
     launch_session->id = ++session_id_counter;
 
-    // �?JSON 提取参数，缺失时使用默认�?
+    // Extract launch parameters from JSON and use defaults for missing values.
     launch_session->width   = params.value("width",   1920);
     launch_session->height  = params.value("height",  1080);
     launch_session->fps     = params.value("fps",     60);
@@ -392,7 +392,7 @@ namespace nvhttp {
     launch_session->continuous_audio = params.value("continuousAudio", 0);
     launch_session->client_cert = last_verified_client_cert;
 
-    // RTSP 加密密钥（必须由上游�?Moonlight 获取后传入）
+    // RTSP encryption key. Middleware must pass the key obtained from Moonlight.
     std::string rikey_hex = params.value("rikey", "");
     if (!rikey_hex.empty()) {
       auto rikey = util::from_hex_vec(rikey_hex, true);
@@ -401,19 +401,19 @@ namespace nvhttp {
       launch_session->rtsp_iv_counter = 0;
       launch_session->rtsp_url_scheme = "rtspenc://"s;
 
-      // rikeyid �?IV (用于 control stream 加密)
+      // rikeyid prepends the IV used for control stream encryption.
       auto rikeyid_str = params.value("rikeyid", "0");
       launch_session->iv.resize(16);
       uint32_t prepend_iv = util::endian::big<uint32_t>((int) util::from_view(rikeyid_str));
       std::copy_n((uint8_t *) &prepend_iv, sizeof(prepend_iv), std::begin(launch_session->iv));
 
-      BOOST_LOG(info) << "[start_stream_session] RTSP 加密已启�? rikey="sv << rikey_hex.substr(0, 8) << "..."
+      BOOST_LOG(info) << "[start_stream_session] RTSP encryption enabled: rikey="sv << rikey_hex.substr(0, 8) << "..."
                       << " rikeyid="sv << rikeyid_str << " gcm_key="sv << launch_session->gcm_key.size() << "B"sv;
     } else {
-      BOOST_LOG(warning) << "[start_stream_session] 未提�?rikey, RTSP 加密禁用"sv;
+      BOOST_LOG(warning) << "[start_stream_session] rikey not provided; RTSP encryption disabled"sv;
     }
 
-    // enable_sops �?�?JSON 读取，默认与标准 /launch 一�?
+    // Read enable_sops from JSON. Default to the standard /launch behavior.
     launch_session->enable_sops = params.value("sops", params.value("enable_sops", 1));
 
     // Random payloads for RTSP
@@ -437,14 +437,14 @@ namespace nvhttp {
     auto rtsp_url = std::format("{}127.0.0.1:{}", launch_session->rtsp_url_scheme, rtsp_port);
 
     rtsp_stream::launch_session_raise(launch_session);
-    BOOST_LOG(info) << "[start_stream_session] session 已创�? RTSP URL: "sv << rtsp_url;
+    BOOST_LOG(info) << "[start_stream_session] session created, RTSP URL: "sv << rtsp_url;
 
     return rtsp_url;
   }
 
   void set_pending_stream_config(const nlohmann::json &config) {
     pending_stream_config = config;
-    BOOST_LOG(info) << "[nvhttp] 已存储待处理 stream config"sv;
+    BOOST_LOG(info) << "[nvhttp] stored pending stream config"sv;
   }
 
   void remove_trusted_client(std::string_view uuid) {
@@ -460,7 +460,7 @@ namespace nvhttp {
       return;
     }
 
-    BOOST_LOG(info) << "[客户端管理] 移除受信任客户端: uuid="sv << it->uuid;
+    BOOST_LOG(info) << "[client] trusted client removed: uuid="sv << it->uuid;
     devices.erase(it);
     rebuild_cert_chain();
   }
@@ -959,18 +959,18 @@ namespace nvhttp {
 
       if (clientID != std::end(args)) {
         pair_status = 1;
-        BOOST_LOG(info) << "[serverinfo] 请求携带 uniqueid: "sv << clientID->second
-                        << " �?PairStatus=1 (已配�?"sv;
+        BOOST_LOG(info) << "[serverinfo] request includes uniqueid: "sv << clientID->second
+                        << " -> PairStatus=1 (paired)"sv;
       } else {
-        BOOST_LOG(info) << "[serverinfo] 请求未携�?uniqueid 参数 �?PairStatus=0"sv;
+        BOOST_LOG(info) << "[serverinfo] request has no uniqueid parameter -> PairStatus=0"sv;
       }
     } else {
-      BOOST_LOG(info) << "[serverinfo] HTTP请求 (非HTTPS) �?不检�?uniqueid"sv;
+      BOOST_LOG(info) << "[serverinfo] HTTP request (non-HTTPS) -> skipping uniqueid check"sv;
     }
 
     auto local_endpoint = request->local_endpoint();
 
-    BOOST_LOG(info) << "[serverinfo] 请求来源: "sv
+    BOOST_LOG(info) << "[serverinfo] request source: "sv
                     << net::addr_to_normalized_string(local_endpoint.address())
                     << ':' << local_endpoint.port()
                     << " | PairStatus="sv << pair_status;
@@ -1022,14 +1022,14 @@ namespace nvhttp {
     tree.put("root.currentgame", current_appid);
     tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
 
-    // 自动创建 stream session —�?使用 middleware client_connect 预先存储的参�?
+    // Auto-create a stream session from the config cached by middleware client_connect.
     if constexpr (std::is_same_v<SunshineHTTPS, T>) {
       if (!last_verified_client_cert.empty() && rtsp_stream::running_session_count() == 0 && pending_stream_config) {
-        BOOST_LOG(info) << "[serverinfo] 检测到待处�?stream config, 创建 session"sv;
+        BOOST_LOG(info) << "[serverinfo] pending stream config detected; creating session"sv;
         auto rtsp_url = start_stream_session(*pending_stream_config);
-        pending_stream_config.reset();  // 消费�?
+        pending_stream_config.reset();  // consumed
         if (rtsp_url.empty()) {
-          BOOST_LOG(warning) << "[serverinfo] session 创建失败"sv;
+          BOOST_LOG(warning) << "[serverinfo] session creation failed"sv;
         }
       }
     }
@@ -1040,7 +1040,7 @@ namespace nvhttp {
     response->write(data.str());
     response->close_connection_after_response = true;
 
-    BOOST_LOG(info) << "[serverinfo] 响应已发�?("sv << data.str().size() << " 字节), 关闭连接"sv;
+    BOOST_LOG(info) << "[serverinfo] response sent ("sv << data.str().size() << " bytes), closing connection"sv;
   }
 
   nlohmann::json get_all_clients() {
@@ -1374,10 +1374,10 @@ namespace nvhttp {
 #endif
       };
       if (!x509) {
-        // 客户端未提供证书 �?允许 TLS 握手完成，但不认证�?
-        // /serverinfo 等公开端点可以正常响应；需要认证的端点（如 /launch）应自行检查�?
+        // Missing client certificates are allowed to complete TLS but remain unauthenticated.
+        // Public endpoints such as /serverinfo can respond; protected endpoints must check authorization.
         last_verified_client_cert.clear();
-        BOOST_LOG(info) << "[证书验证] 客户端未提供证书 -- 放行(未认�?"sv;
+        BOOST_LOG(info) << "[cert verify] client did not provide a certificate -- allowing unauthenticated TLS"sv;
         return 1;
       }
 
@@ -1390,8 +1390,8 @@ namespace nvhttp {
 
         X509_NAME_oneline(X509_get_subject_name(x509.get()), subject_name, sizeof(subject_name));
 
-        BOOST_LOG(info) << "[证书验证] 客户�? "sv << subject_name
-                        << " -- "sv << (verified ? "�?通过"sv : "�?拒绝"sv);
+        BOOST_LOG(info) << "[cert verify] client "sv << subject_name
+                        << " -- "sv << (verified ? "accepted"sv : "rejected"sv);
       });
 
       // Note: When middleware is enabled, PIN pairing is disabled so add_cert is never populated.
@@ -1402,35 +1402,35 @@ namespace nvhttp {
         auto cert = add_cert->pop();
         X509_NAME_oneline(X509_get_subject_name(cert.get()), subject_name, sizeof(subject_name));
 
-        BOOST_LOG(info) << "[证书验证] PIN配对模式: 添加证书 ["sv << subject_name << ']';
+        BOOST_LOG(info) << "[cert verify] PIN pairing mode: adding certificate ["sv << subject_name << ']';
         cert_chain.add(std::move(cert));
       }
 
       auto err_str = cert_chain.verify(x509.get());
       if (err_str) {
-        BOOST_LOG(warning) << "[证书验证] 证书链验证失�? "sv << err_str
-                           << " (证书不在信任链中)"sv;
+        BOOST_LOG(warning) << "[cert verify] certificate chain validation failed: "sv << err_str
+                           << " (certificate is not in the trust chain)"sv;
         return verified;
       }
 
       // Check if this client is enabled
       auto pem = crypto::pem(x509);
       if (!is_client_enabled(pem)) {
-        BOOST_LOG(warning) << "[证书验证] 客户端已配对但被禁用 -- 拒绝"sv;
+        BOOST_LOG(warning) << "[cert verify] paired client is disabled -- rejecting"sv;
         return verified;
       }
 
       last_verified_client_cert = pem;
       verified = 1;
 
-      BOOST_LOG(info) << "[证书验证] 客户端证书受信任, PEM指纹: "sv
+      BOOST_LOG(info) << "[cert verify] client certificate trusted, PEM fingerprint: "sv
                       << pem.substr(0, std::min<size_t>(60, pem.size()));
       return verified;
     };
 
     https_server.on_verify_failed = [](resp_https_t resp, req_https_t req) {
-      BOOST_LOG(warning) << "[HTTPS] on_verify_failed: 证书验证未通过, 请求路径: "sv
-                         << (req->path.empty() ? "(未解�?"sv : req->path)
+      BOOST_LOG(warning) << "[HTTPS] on_verify_failed: certificate verification failed, request path: "sv
+                         << (req->path.empty() ? "(unknown)"sv : req->path)
                          << " -- returning 401 XML and closing connection"sv;
 
       pt::ptree tree;
@@ -1440,7 +1440,7 @@ namespace nvhttp {
         pt::write_xml(data, tree);
         resp->write(data.str());
         resp->close_connection_after_response = true;
-        BOOST_LOG(info) << "[HTTPS] 已发�?401 响应 (xml "sv << data.str().size() << " 字节), 即将关闭连接"sv;
+        BOOST_LOG(info) << "[HTTPS] sent 401 response (xml "sv << data.str().size() << " bytes), closing connection"sv;
       });
 
       tree.put("root.<xmlattr>.status_code"s, 401);
@@ -1468,7 +1468,7 @@ namespace nvhttp {
     https_server.config.address = "127.0.0.1";
     https_server.config.port = port_https_internal;
 
-    // HTTP server is disabled �?Web UI removed, Moonlight uses HTTPS-only (PORT_HTTPS).
+    // HTTP server is disabled; Web UI is removed and Moonlight uses HTTPS-only (PORT_HTTPS).
 
     auto accept_and_run = [&](auto *http_server, std::promise<void> *ready) {
       try {
@@ -1477,7 +1477,7 @@ namespace nvhttp {
         http_server->start([ready](unsigned short /*port*/) {
           ready->set_value();  // Server is now accepting connections
         });
-        // start() blocks in io_service->run() �?returns on shutdown, which is normal
+        // start() blocks in io_service->run() and returns on shutdown, which is normal.
       } catch (boost::system::system_error &err) {
         // It's possible the exception gets thrown after calling http_server->stop() from a different thread
         if (shutdown_event->peek()) {
@@ -1496,7 +1496,7 @@ namespace nvhttp {
     auto tcp_future = tcp_ready.get_future();
 
     std::thread ssl {accept_and_run, &https_server, &ssl_ready};
-    tcp_ready.set_value();  // HTTP server disabled �?signal immediately
+    tcp_ready.set_value();  // HTTP server disabled; signal immediately
 
     ssl_future.wait();
     tcp_future.wait();

@@ -1,19 +1,25 @@
 #!/bin/bash
-set -e  # 遇到错误立即退出
+set -e
 
-# 强制将输出编码设为 UTF-8
 export LANG=zh_CN.UTF-8
 export LC_ALL=zh_CN.UTF-8
 
-# 不需要手动设 PATH，npm_wrapper.cmd 会在 cmd 上下文中设置正确的 Node.js 路径
+ROOT_DIR="$(pwd)"
+BUILD_DIR="cmake-build-local"
+LOCAL_HOME="${ROOT_DIR}/.home"
+LOCAL_TMP="${ROOT_DIR}/.tmp"
 
-# 1. 强��删掉之前的 build 残留
-rm -rf build
+mkdir -p "${LOCAL_HOME}" "${LOCAL_TMP}"
 
-# 2. 重新创建并进入 build 目录
-mkdir build && cd build
+export HOME="${LOCAL_HOME}"
+export TMPDIR="${LOCAL_TMP}"
+export TMP="${LOCAL_TMP}"
+export TEMP="${LOCAL_TMP}"
 
-# 3. 手动绑定 UCRT64 的编译器路径进行配置
+rm -rf "${BUILD_DIR}"
+mkdir "${BUILD_DIR}"
+cd "${BUILD_DIR}"
+
 cmake -G "Ninja" \
   -DCMAKE_C_COMPILER="E:/WorkComp/msys64/ucrt64/bin/gcc.exe" \
   -DCMAKE_CXX_COMPILER="E:/WorkComp/msys64/ucrt64/bin/g++.exe" \
@@ -22,5 +28,4 @@ cmake -G "Ninja" \
   -DBUILD_TESTS=OFF \
   ..
 
-# 4. 编译
 ninja

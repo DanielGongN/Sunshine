@@ -1106,7 +1106,7 @@ namespace stream {
 
           auto session = *pos;
 
-          // Idle/AFK detection �?check if user has been inactive too long
+          // Idle/AFK detection: check if user has been inactive too long
           if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
             auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(
               now - input::get_last_input_time()
@@ -1915,7 +1915,7 @@ namespace stream {
       );
       session->video.peer.address(boost::asio::ip::make_address("127.0.0.1"));
       session->video.peer.port(gateway_port);
-      BOOST_LOG(info) << "[网关模式] video peer 使用网关出向端口 127.0.0.1:"sv
+      BOOST_LOG(info) << "[gateway mode] video peer uses gateway outbound port 127.0.0.1:"sv
                       << gateway_port;
     }
 
@@ -1946,7 +1946,7 @@ namespace stream {
       );
       session->audio.peer.address(boost::asio::ip::make_address("127.0.0.1"));
       session->audio.peer.port(gateway_port);
-      BOOST_LOG(info) << "[网关模式] audio peer 使用网关出向端口 127.0.0.1:"sv
+      BOOST_LOG(info) << "[gateway mode] audio peer uses gateway outbound port 127.0.0.1:"sv
                       << gateway_port;
     }
 

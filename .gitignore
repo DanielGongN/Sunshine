@@ -60,3 +60,4 @@ venv/
 release.zip
 .worktrees/
 .vs/
+.tmp/
