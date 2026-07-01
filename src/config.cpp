@@ -600,7 +600,7 @@ namespace config {
     {},  // Bind address
     platf::appdata().string() + "/engine.log",  // log file
     false,  // notify_pre_releases
-    true,  // system_tray
+    false,  // system_tray
     {},  // prep commands
   };
 

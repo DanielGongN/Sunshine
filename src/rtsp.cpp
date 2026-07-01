@@ -10,6 +10,7 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <format>
@@ -544,6 +545,13 @@ namespace rtsp_stream {
       return (int) _session_slots->size();
     }
 
+    int running_session_count() {
+      auto lg = _session_slots.lock();
+      return (int) std::count_if(std::begin(*_session_slots), std::end(*_session_slots), [](const auto &slot) {
+        return stream::session::state(*slot) == stream::session::state_e::RUNNING;
+      });
+    }
+
     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;
 
     /**
@@ -651,6 +659,12 @@ namespace rtsp_stream {
     server.clear(false);
 
     return server.session_count();
+  }
+
+  int running_session_count() {
+    server.clear(false);
+
+    return server.running_session_count();
   }
 
   void terminate_sessions() {

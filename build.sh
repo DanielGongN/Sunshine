@@ -1,29 +1,26 @@
 #!/bin/bash
 set -e  # 遇到错误立即退出
 
-# 👈 ✨ 针对 MINGW64 环境的强制编码清洗
+# 强制将输出编码设为 UTF-8
 export LANG=zh_CN.UTF-8
 export LC_ALL=zh_CN.UTF-8
-export OUTPUT_CHARSET=utf-8
 
-# 强制将 Windows 宿主工具的输出流在控制台中转换为 UTF-8
-if [ -n "$COMSPEC" ]; then
-    export PYTHONIOENCODING=utf-8
-fi
+# 不需要手动设 PATH，npm_wrapper.cmd 会在 cmd 上下文中设置正确的 Node.js 路径
 
+# 1. 强��删掉之前的 build 残留
 rm -rf build
 
-# 0. 创建 build 目录（如果不存在）
-mkdir -p build
-cd build
+# 2. 重新创建并进入 build 目录
+mkdir build && cd build
 
-# 1. 清除旧的 CMake 缓存
-rm -f CMakeCache.txt
-
-# 2. 重新配置，显式指定链接器搜索路径   -DSUNSHINE_BUILD_ASSETS=OFF \
+# 3. 手动绑定 UCRT64 的编译器路径进行配置
 cmake -G "Ninja" \
-  -DCMAKE_EXE_LINKER_FLAGS="-LE:/WorkComp/msys64/mingw64/lib" \
-  -DSUNSHINE_ENABLE_TRAY=OFF ..
+  -DCMAKE_C_COMPILER="E:/WorkComp/msys64/ucrt64/bin/gcc.exe" \
+  -DCMAKE_CXX_COMPILER="E:/WorkComp/msys64/ucrt64/bin/g++.exe" \
+  -DNPM="E:/work/c++/Sunshine/npm_wrapper.cmd" \
+  -DBUILD_DOCS=OFF \
+  -DBUILD_TESTS=OFF \
+  ..
 
-# 3. 再次运行编译
+# 4. 编译
 ninja

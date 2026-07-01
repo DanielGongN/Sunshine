@@ -35,15 +35,21 @@ namespace nvhttp {
   constexpr auto GFE_VERSION = "3.23.0.74";
 
   /**
-   * @brief The HTTPS port, as a difference from the config port.
-   *        With base=41200, final port = 41200 + 0 = 41200.
+   * @brief HTTPS 端口，相对于配置端口的偏移量。
+   *        以 base=41200 为例，最终端口 = 41200 + 0 = 41200（网关在此监听）。
    */
   constexpr auto PORT_HTTPS = 0;
 
   /**
-   * @brief The HTTP port (disabled in middleware-only mode).
+   * @brief HTTP 端口（仅中间件模式下禁用）。
    */
   constexpr auto PORT_HTTP = 5;
+
+  /**
+   * @brief 内部 HTTPS 端口偏移量，供网关隧道使用。
+   *        nvhttp 绑定到 127.0.0.1:base+100（41300），网关将 TLS 流量转发至此。
+   */
+  constexpr auto PORT_HTTPS_INTERNAL = 100;
 
   /**
    * @brief Start the nvhttp server.
@@ -217,6 +223,26 @@ namespace nvhttp {
    * @param cert The PEM-encoded X.509 certificate.
    */
   void add_trusted_client(std::string uuid, std::string cert);
+
+  /**
+   * @brief Start a stream session directly (bypasses /launch HTTP endpoint).
+   *
+   * For architectures where game lifecycle is managed externally.
+   * Creates a launch session and registers it for RTSP.
+   *
+   * @param stream_params JSON with optional: width, height, fps, appid, rikey, rikeyid,
+   *                       surroundAudioInfo, gcmap, enable_hdr, enable_sops, uniqueid
+   * @return RTSP session URL on success, empty string on failure
+   */
+  std::string start_stream_session(const nlohmann::json &stream_params);
+
+  /**
+   * @brief Store pending stream config from middleware.
+   *
+   * Set by client_connect handler before serverinfo runs.
+   * Consumed and cleared by serverinfo to auto-create RTSP session.
+   */
+  void set_pending_stream_config(const nlohmann::json &config);
 
   /**
    * @brief Remove a trusted client certificate by uuid.

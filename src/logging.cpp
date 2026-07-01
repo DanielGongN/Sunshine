@@ -3,6 +3,7 @@
  * @brief Definitions for logging related functions.
  */
 // standard includes
+#include <array>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -165,7 +166,12 @@ namespace logging {
     sink->locked_backend()->add_stream(stream);
 #endif
 
-    sink->locked_backend()->add_stream(boost::make_shared<std::ofstream>(log_file));
+    auto log_stream = boost::make_shared<std::ofstream>(log_file, std::ios::binary | std::ios::app);
+    if (log_stream->tellp() == 0) {
+      constexpr std::array<unsigned char, 3> utf8_bom {0xEF, 0xBB, 0xBF};
+      log_stream->write(reinterpret_cast<const char *>(utf8_bom.data()), utf8_bom.size());
+    }
+    sink->locked_backend()->add_stream(log_stream);
     sink->set_filter(severity >= min_log_level);
     sink->set_formatter(&formatter);
 

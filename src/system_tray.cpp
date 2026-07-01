@@ -288,11 +288,11 @@ namespace system_tray {
     tray_set_app_info(PROJECT_NAME, PROJECT_NAME, PROJECT_FQDN);
 
     if (tray_init(&tray) < 0) {
-      BOOST_LOG(warning) << "Failed to create system tray"sv;
+      BOOST_LOG(warning) << "[系统托盘] 创建失败"sv;
       return 1;
     }
 
-    BOOST_LOG(info) << "System tray created"sv;
+    BOOST_LOG(info) << "[系统托盘] 托盘图标已创建"sv;
     tray_initialized = true;
     return 0;
   }
@@ -403,18 +403,18 @@ namespace system_tray {
   // Threading functions available on all platforms
   static void tray_thread_worker() {
     platf::set_thread_name("system_tray");
-    BOOST_LOG(info) << "System tray thread started"sv;
+    BOOST_LOG(info) << "[系统托盘] 工作线程已启动"sv;
 
     // Initialize the tray in this thread
     if (init_tray() != 0) {
-      BOOST_LOG(error) << "Failed to initialize tray in thread"sv;
+      BOOST_LOG(error) << "[系统托盘] 工作线程初始化失败"sv;
       return;
     }
 
     // Main tray event loop
     while (process_tray_events() == 0);
 
-    BOOST_LOG(info) << "System tray thread ended"sv;
+    BOOST_LOG(info) << "[系统托盘] 工作线程已退出"sv;
   }
 
   int init_tray_threaded() {

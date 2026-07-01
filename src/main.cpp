@@ -20,6 +20,7 @@
 #include "httpcommon.h"
 #include "logging.h"
 #include "main.h"
+#include "gateway.h"
 #include "middleware.h"
 #include "nvhttp.h"
 #include "process.h"
@@ -411,6 +412,15 @@ int main(int argc, char *argv[]) {
     return lifetime::desired_exit_code;
   }
 
+  // 启动进程内网关（监听 0.0.0.0:41200 TCP+UDP）
+  // 必须在 nvhttp 之前启动，确保 TLS 隧道目标就绪
+  std::unique_ptr<platf::deinit_t> gateway_deinit_guard;
+  gateway_deinit_guard = gateway::start();
+  if (!gateway_deinit_guard) {
+    BOOST_LOG(error) << "网关初始化失败"sv;
+  }
+  BOOST_LOG(info) << "网关已启动，等待客户端连接"sv;
+
   std::thread httpThread {nvhttp::start};
   // std::thread configThread {confighttp::start};  // Web UI removed
   std::thread rtspThread {rtsp_stream::start};
@@ -424,7 +434,7 @@ int main(int argc, char *argv[]) {
 #endif
 
   if (tray_is_enabled && config::sunshine.system_tray) {
-    BOOST_LOG(info) << "Starting system tray"sv;
+    BOOST_LOG(info) << "[启动] 系统托盘已启用 -- 正在初始化..."sv;
 #ifdef _WIN32
     // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,
     // the tray icon would not appear even though Sunshine is running correctly otherwise.
@@ -435,6 +445,9 @@ int main(int argc, char *argv[]) {
 #else
     system_tray::init_tray();
 #endif
+  } else {
+    BOOST_LOG(info) << "[启动] 系统托盘已禁用 (SUNSHINE_TRAY="sv << tray_is_enabled
+                    << " system_tray="sv << config::sunshine.system_tray << ")"sv;
   }
 
   mainThreadLoop(shutdown_event);

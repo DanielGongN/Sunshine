@@ -57,6 +57,12 @@ namespace rtsp_stream {
   int session_count();
 
   /**
+   * @brief Get the number of running sessions.
+   * @return Count of sessions that are actively running, excluding sessions still being cleaned up.
+   */
+  int running_session_count();
+
+  /**
    * @brief Terminates all running streaming sessions.
    */
   void terminate_sessions();

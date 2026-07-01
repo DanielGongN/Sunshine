@@ -1,0 +1,11 @@
+CompileFlags:
+  Add:
+    - "-Wno-c++98-compat"
+    - "-Wno-c++98-compat-pedantic"
+    - "-U_MSC_VER"
+    - "-fms-extensions"
+
+  Remove:
+    - "-std=c++17"
+
+  Compiler: "E:/WorkComp/msys64/mingw64/bin/g++.exe"

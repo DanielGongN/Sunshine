@@ -9,6 +9,13 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
 # gcc complains about misleading indentation in some mingw includes
 list(APPEND SUNSHINE_COMPILE_OPTIONS -Wno-misleading-indentation)
 
+# Keep non-ASCII string literals encoded as UTF-8 in Windows builds.
+if(MSVC)
+    list(APPEND SUNSHINE_COMPILE_OPTIONS /utf-8)
+else()
+    list(APPEND SUNSHINE_COMPILE_OPTIONS -finput-charset=UTF-8 -fexec-charset=UTF-8)
+endif()
+
 # Disable warnings for Windows ARM64
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64")
     list(APPEND SUNSHINE_COMPILE_OPTIONS -Wno-dll-attribute-on-redeclaration)  # Boost
@@ -75,6 +82,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.h"
         "${CMAKE_SOURCE_DIR}/src/middleware.h"
         "${CMAKE_SOURCE_DIR}/src/middleware.cpp"
+        "${CMAKE_SOURCE_DIR}/src/gateway.h"
+        "${CMAKE_SOURCE_DIR}/src/gateway.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/src/ViGEmClient.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Client.h"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Common.h"

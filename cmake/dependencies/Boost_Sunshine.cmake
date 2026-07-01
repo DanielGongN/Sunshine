@@ -3,7 +3,7 @@
 #
 include_guard(GLOBAL)
 
-set(BOOST_VERSION "1.90.0")
+set(BOOST_VERSION "1.91.0")
 set(BOOST_COMPONENTS
         filesystem
         log

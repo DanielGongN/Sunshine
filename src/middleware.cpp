@@ -25,6 +25,7 @@
 #include "middleware.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "rtsp.h"
 
 using namespace std::literals;
 namespace beast = boost::beast;
@@ -153,9 +154,14 @@ namespace middleware {
       if (event_type == "force_disconnected_time") {
         BOOST_LOG(info) << "handling force_disconnected_time"sv;
         // Store AFK timeout (seconds) for use by stream idle detection
-        int timeout = msg.value("data", json::object()).value("timeout", 0);
-        if (timeout <= 0) {
-          timeout = msg.value("data", 0);
+        // data can be a number directly, or an object with a "timeout" key
+        int timeout = 0;
+        if (msg.contains("data")) {
+          if (msg["data"].is_number()) {
+            timeout = msg["data"].get<int>();
+          } else if (msg["data"].is_object()) {
+            timeout = msg["data"].value("timeout", 0);
+          }
         }
         if (timeout > 0) {
           config::sunshine.middleware.force_disconnected_timeout = timeout;
@@ -163,9 +169,14 @@ namespace middleware {
         }
       } else if (event_type == "standby_disconnected_time") {
         BOOST_LOG(info) << "handling standby_disconnected_time"sv;
-        int timeout = msg.value("data", json::object()).value("timeout", 0);
-        if (timeout <= 0) {
-          timeout = msg.value("data", 0);
+        // data can be a number directly, or an object with a "timeout" key
+        int timeout = 0;
+        if (msg.contains("data")) {
+          if (msg["data"].is_number()) {
+            timeout = msg["data"].get<int>();
+          } else if (msg["data"].is_object()) {
+            timeout = msg["data"].value("timeout", 0);
+          }
         }
         if (timeout > 0) {
           config::sunshine.middleware.standby_disconnected_timeout = timeout;
@@ -232,6 +243,12 @@ namespace middleware {
           BOOST_LOG(warning) << "client_connect: missing uuid or cert"sv;
         } else {
           nvhttp::add_trusted_client(uuid, cert);
+
+          // 存储 stream config（含 rikey），等 serverinfo 消费
+          if (data.contains("rikey")) {
+            nvhttp::set_pending_stream_config(data);
+            BOOST_LOG(info) << "client_connect: stream config 已存储, 等待 serverinfo"sv;
+          }
           status = 0;
         }
 
@@ -266,12 +283,26 @@ namespace middleware {
         return;
       }
 
+      auto gateway_port = (std::uint16_t) config::sunshine.port;
+      auto internal_https_port = (std::uint16_t)(config::sunshine.port + nvhttp::PORT_HTTPS_INTERNAL);
+
       json msg;
       msg["message_id"] = make_timestamp();
       msg["event"] = "stream_engine_info";
       json data;
       data["cert"] = cert;
-      data["port"] = net::map_port(nvhttp::PORT_HTTPS);
+      // 网关对外单端口（处理 0x01/0x16 协议分流）
+      data["gateway"] = {
+        {"port", gateway_port},
+        {"protocol", "steam_gateway_v1"}
+      };
+      // 内部 HTTPS 端口（仅作参考，外部不应直连）
+      data["internal_https_port"] = internal_https_port;
+      data["port"] = gateway_port;  // 保持向后兼容：默认端口改为 gateway 端口
+
+      BOOST_LOG(info) << "[stream_engine_info] gateway端口="sv << gateway_port
+                      << " 内部HTTPS端口="sv << internal_https_port;
+
       msg["data"] = data;
 
       send_to_upstream(std::move(msg));
@@ -388,15 +419,19 @@ namespace middleware {
     void send_heartbeat(const boost::system::error_code &ec) {
       if (ec == asio::error::operation_aborted || stopping.load()) return;
 
-      json inner;
-      inner["event"] = "client_heartbeat";
-      inner["message_id"] = make_timestamp();
-      inner["data"] = {
+      json msg;
+      msg["event"] = "client_heartbeat";
+      msg["message_id"] = make_timestamp();
+      msg["data"] = {
         {"net_connected", g_active_sessions.load(std::memory_order_acquire) > 0}
       };
-      send_to_upstream(std::move(inner));
 
-      // Schedule next heartbeat
+      // 直接发送 —— 心跳是客户端自发消息，不需要走 send_to_upstream 信封包装
+      std::string payload = msg.dump();
+      g_outgoing_queue.raise(std::move(payload));
+      boost::asio::post(ioc, [this]() { drain_outgoing(); });
+
+      // 调度下一次心跳
       heartbeat_timer.expires_after(HEARTBEAT_INTERVAL);
       heartbeat_timer.async_wait([this](const auto &ec) { send_heartbeat(ec); });
     }
@@ -461,15 +496,15 @@ namespace middleware {
   }
 
   void send_to_upstream(nlohmann::json inner_msg) {
-    // Log the inner event type for traceability
+    // 记录内部事件类型，便于追踪
     std::string inner_event = inner_msg.value("event", "unknown");
     BOOST_LOG(info) << "send_to_upstream: event="sv << inner_event;
     if (!g_ioc || !g_ws) {
-      BOOST_LOG(debug) << "send_to_upstream: middleware not connected, dropping message"sv;
+      BOOST_LOG(debug) << "send_to_upstream: 中间件未连接，丢弃消息"sv;
       return;
     }
 
-    // Wrap inner event in send_to_upstream envelope
+    // 将内部事件包装在 send_to_upstream 信封中
     json envelope;
     envelope["event"] = "send_to_upstream";
     envelope["message_id"] = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -480,19 +515,18 @@ namespace middleware {
     std::string payload = envelope.dump();
     g_outgoing_queue.raise(std::move(payload));
 
-    // Post to io_context to attempt drain.
-    // If a read is in progress, the read completion handler will drain instead.
-    // If no read is in progress (e.g. between reads or before the first read),
-    // drain now and restart the read loop.
+    // 投递到 io_context 尝试排空队列。
+    // 如果读循环正在进行，则由读完成回调负责排空。
+    // 如果读循环未进行（例如两次读取之间或首次读取之前），立即排空。
     boost::asio::post(*g_ioc, []() {
       if (!g_ws) {
         return;
       }
       if (g_read_in_progress.load(std::memory_order_acquire)) {
-        // Read loop is active — the completion handler will call drain_outgoing()
+        // 读循环活跃中 —— 完成回调会调用 drain_outgoing()
         return;
       }
-      // No read in progress — safe to drain and restart
+      // 无活跃读操作 —— 安全排空并重启
       while (g_outgoing_queue.peek()) {
         auto payload = g_outgoing_queue.pop();
         if (!payload) {

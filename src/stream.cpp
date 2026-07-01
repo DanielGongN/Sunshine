@@ -22,6 +22,7 @@ extern "C" {
 // local includes
 #include "config.h"
 #include "display_device.h"
+#include "gateway.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -1074,8 +1075,6 @@ namespace stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
-      bool has_session_awaiting_peer = false;
-
       {
         auto lg = server->_sessions.lock();
 
@@ -1094,7 +1093,7 @@ namespace stream {
             force_event->pop();
             nlohmann::json msg;
             msg["data"]["event"] = "disconnected";
-            msg["data"]["message"] = u8"上游主动发送disconnected，回应上游平台";
+            msg["data"]["message"] = "Upstream requested disconnect";
             middleware::send_to_upstream(msg);
             // Stop all running sessions
             for (auto pos2 = std::begin(*server->_sessions); pos2 != std::end(*server->_sessions); ++pos2) {
@@ -1107,7 +1106,7 @@ namespace stream {
 
           auto session = *pos;
 
-          // Idle/AFK detection — check if user has been inactive too long
+          // Idle/AFK detection �?check if user has been inactive too long
           if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
             auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(
               now - input::get_last_input_time()
@@ -1147,12 +1146,6 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
-            // Revoke trusted client cert when stream ends
-            // This handles both ping timeout (network issues) and normal disconnect
-            if (!session->client_cert.empty()) {
-              nvhttp::remove_trusted_client_by_cert(session->client_cert);
-            }
-
             pos = server->_sessions->erase(pos);
 
             if (session->control.peer) {
@@ -1168,12 +1161,7 @@ namespace stream {
             continue;
           }
 
-          // Remember if we have a session that's waiting for a peer to connect to the
-          // control stream. This ensures the clients are properly notified even when
-          // the app terminates before they finish connecting.
-          if (!session->control.peer) {
-            has_session_awaiting_peer = true;
-          } else {
+          if (session->control.peer) {
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
@@ -1191,12 +1179,6 @@ namespace stream {
 
           ++pos;
         })
-      }
-
-      // Don't break until any pending sessions either expire or connect
-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
-        BOOST_LOG(info) << "Process terminated"sv;
-        break;
       }
 
       server->iterate(150ms);
@@ -1927,6 +1909,16 @@ namespace stream {
       return;
     }
 
+    if (!gateway::get_client_ip().empty() && session->video.peer.address().is_loopback()) {
+      auto gateway_port = static_cast<std::uint16_t>(
+        net::map_port(VIDEO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
+      );
+      session->video.peer.address(boost::asio::ip::make_address("127.0.0.1"));
+      session->video.peer.port(gateway_port);
+      BOOST_LOG(info) << "[网关模式] video peer 使用网关出向端口 127.0.0.1:"sv
+                      << gateway_port;
+    }
+
     // Enable local prioritization and QoS tagging on video traffic if requested by the client
     auto address = session->video.peer.address();
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
@@ -1947,6 +1939,15 @@ namespace stream {
     auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
     if (error < 0) {
       return;
+    }
+    if (!gateway::get_client_ip().empty() && session->audio.peer.address().is_loopback()) {
+      auto gateway_port = static_cast<std::uint16_t>(
+        net::map_port(AUDIO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
+      );
+      session->audio.peer.address(boost::asio::ip::make_address("127.0.0.1"));
+      session->audio.peer.port(gateway_port);
+      BOOST_LOG(info) << "[网关模式] audio peer 使用网关出向端口 127.0.0.1:"sv
+                      << gateway_port;
     }
 
     // Enable local prioritization and QoS tagging on audio traffic if requested by the client
@@ -2047,7 +2048,6 @@ namespace stream {
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video.peer.address(addr);
       session.video.peer.port(0);
-
       session.audio.peer.address(addr);
       session.audio.peer.port(0);
 
