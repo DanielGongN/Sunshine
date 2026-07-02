@@ -107,8 +107,9 @@ namespace middleware {
   private:
     static std::int64_t make_timestamp() {
       return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-      ).count();
+               std::chrono::system_clock::now().time_since_epoch()
+      )
+        .count();
     }
 
     void send_subscribe_msg(const std::string &topic) {
@@ -147,7 +148,7 @@ namespace middleware {
       }
 
       std::string event_type = msg["event"].get<std::string>();
-      std::int64_t msg_id = msg.value("message_id", std::int64_t{0});
+      std::int64_t msg_id = msg.value("message_id", std::int64_t {0});
 
       BOOST_LOG(info) << "Middleware event received: "sv << event_type << " (msg_id="sv << msg_id << ')';
 
@@ -235,19 +236,19 @@ namespace middleware {
       } else if (event_type == "client_connect") {
         BOOST_LOG(info) << "handling client_connect"sv;
         auto &data = msg["data"];
+        BOOST_LOG(info) << "client_connect data="sv << data.dump();
         std::string uuid = data.value("uuid", "");
         std::string cert = data.value("cert", "");
         std::string user_uuid = data.value("user_uuid", "");
         int status = -1;
         if (uuid.empty() || cert.empty()) {
           BOOST_LOG(warning) << "client_connect: missing uuid or cert"sv;
+        } else if (!nvhttp::add_trusted_client(uuid, cert)) {
+          BOOST_LOG(warning) << "client_connect: failed to add trusted client certificate, uuid="sv << uuid;
         } else {
-          nvhttp::add_trusted_client(uuid, cert);
-
-          // 存储 stream config（含 rikey），等 serverinfo 消费
           if (data.contains("rikey")) {
             nvhttp::set_pending_stream_config(data);
-            BOOST_LOG(info) << "client_connect: stream config 已存储, 等待 serverinfo"sv;
+            BOOST_LOG(info) << "client_connect: stream config stored, waiting for serverinfo"sv;
           }
           status = 0;
         }
@@ -284,7 +285,7 @@ namespace middleware {
       }
 
       auto gateway_port = (std::uint16_t) config::sunshine.port;
-      auto internal_https_port = (std::uint16_t)(config::sunshine.port + nvhttp::PORT_HTTPS_INTERNAL);
+      auto internal_https_port = (std::uint16_t) (config::sunshine.port + nvhttp::PORT_HTTPS_INTERNAL);
 
       json msg;
       msg["message_id"] = make_timestamp();
@@ -417,7 +418,9 @@ namespace middleware {
     }
 
     void send_heartbeat(const boost::system::error_code &ec) {
-      if (ec == asio::error::operation_aborted || stopping.load()) return;
+      if (ec == asio::error::operation_aborted || stopping.load()) {
+        return;
+      }
 
       json msg;
       msg["event"] = "client_heartbeat";
@@ -429,16 +432,22 @@ namespace middleware {
       // 直接发送 —— 心跳是客户端自发消息，不需要走 send_to_upstream 信封包装
       std::string payload = msg.dump();
       g_outgoing_queue.raise(std::move(payload));
-      boost::asio::post(ioc, [this]() { drain_outgoing(); });
+      boost::asio::post(ioc, [this]() {
+        drain_outgoing();
+      });
 
       // 调度下一次心跳
       heartbeat_timer.expires_after(HEARTBEAT_INTERVAL);
-      heartbeat_timer.async_wait([this](const auto &ec) { send_heartbeat(ec); });
+      heartbeat_timer.async_wait([this](const auto &ec) {
+        send_heartbeat(ec);
+      });
     }
 
     void start_heartbeat() {
       heartbeat_timer.expires_after(HEARTBEAT_INTERVAL);
-      heartbeat_timer.async_wait([this](const auto &ec) { send_heartbeat(ec); });
+      heartbeat_timer.async_wait([this](const auto &ec) {
+        send_heartbeat(ec);
+      });
     }
 
     void schedule_reconnect() {
@@ -508,8 +517,9 @@ namespace middleware {
     json envelope;
     envelope["event"] = "send_to_upstream";
     envelope["message_id"] = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch()
-    ).count();
+                               std::chrono::system_clock::now().time_since_epoch()
+    )
+                               .count();
     envelope["data"] = std::move(inner_msg);
 
     std::string payload = envelope.dump();

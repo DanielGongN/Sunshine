@@ -19,6 +19,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
+#include <openssl/evp.h>
 #include <Simple-Web-Server/server_http.hpp>
 
 // local includes
@@ -175,6 +176,24 @@ namespace nvhttp {
   client_t client_root;
   std::atomic<uint32_t> session_id_counter;
 
+  std::string x509_fingerprint_sha256(const X509 *cert) {
+    if (!cert) {
+      return {};
+    }
+
+    unsigned char digest[EVP_MAX_MD_SIZE] {};
+    unsigned int digest_len = 0;
+    if (X509_digest(cert, EVP_sha256(), digest, &digest_len) != 1) {
+      return {};
+    }
+
+    return util::hex_vec(digest, digest + digest_len, true);
+  }
+
+  std::string x509_fingerprint_sha256(const crypto::x509_t &cert) {
+    return x509_fingerprint_sha256(cert.get());
+  }
+
   // Rebuild cert_chain from client_root.named_devices
   // Caller must hold client_mutex
   void rebuild_cert_chain() {
@@ -313,13 +332,8 @@ namespace nvhttp {
       }
     }
 
-    // Empty certificate chain and import certs from file
-    cert_chain.clear();
-    for (auto &named_cert : client.named_devices) {
-      cert_chain.add(crypto::x509(named_cert.cert));
-    }
-
     client_root = client;
+    rebuild_cert_chain();
   }
 
   void add_authorized_client(const std::string &name, std::string &&cert) {
@@ -335,43 +349,55 @@ namespace nvhttp {
     }
   }
 
-  void add_trusted_client(std::string uuid, std::string cert) {
+  bool add_trusted_client(std::string uuid, std::string cert) {
     std::lock_guard lg {client_mutex};
 
-    BOOST_LOG(info) << "[客户端管理] 收到添加请求: uuid="sv << uuid;
+    BOOST_LOG(info) << "[client] add trusted client request: uuid="sv << uuid
+                    << " cert_len="sv << cert.size();
 
-    // Validate the cert PEM before adding
     auto x509 = crypto::x509(cert);
     if (!x509) {
-      BOOST_LOG(error) << "[客户端管理] 无效的证书PEM, uuid="sv << uuid << " -- 拒绝添加"sv;
-      return;
+      BOOST_LOG(error) << "[client] invalid client certificate PEM: uuid="sv << uuid
+                       << " cert_len="sv << cert.size();
+      return false;
     }
 
-    // Check for duplicate uuid
+    auto fingerprint = x509_fingerprint_sha256(x509);
+    if (fingerprint.empty()) {
+      BOOST_LOG(error) << "[client] failed to calculate client certificate fingerprint: uuid="sv << uuid;
+      return false;
+    }
+
     for (auto &dev : client_root.named_devices) {
       if (dev.uuid == uuid) {
-        BOOST_LOG(warning) << "[client] uuid="sv << uuid << " already exists, replacing cert"sv;
-        dev.cert = cert;
+        BOOST_LOG(warning) << "[client] uuid="sv << uuid
+                           << " already exists, replacing cert sha256="sv << fingerprint;
+        dev.cert = std::move(cert);
+        dev.enabled = true;
         rebuild_cert_chain();
         save_state();
-        return;
+        BOOST_LOG(info) << "[client] trusted client replaced and persisted: uuid="sv << uuid
+                        << " sha256="sv << fingerprint
+                        << " trust_chain_size="sv << client_root.named_devices.size();
+        return true;
       }
     }
 
     named_cert_t named_cert;
-    named_cert.name = uuid;  // use uuid as name since we don't get name from upstream
+    named_cert.name = uuid;
     named_cert.uuid = std::move(uuid);
     named_cert.cert = std::move(cert);
     named_cert.enabled = true;
 
-    cert_chain.add(std::move(x509));
     auto uuid_copy = named_cert.uuid;
     client_root.named_devices.emplace_back(std::move(named_cert));
 
     rebuild_cert_chain();
     save_state();
     BOOST_LOG(info) << "[client] trusted client added and persisted: uuid="sv << uuid_copy
-                    << " | trust chain size="sv << client_root.named_devices.size();
+                    << " sha256="sv << fingerprint
+                    << " trust_chain_size="sv << client_root.named_devices.size();
+    return true;
   }
 
   std::string start_stream_session(const nlohmann::json &params) {
@@ -379,16 +405,16 @@ namespace nvhttp {
     launch_session->id = ++session_id_counter;
 
     // Extract launch parameters from JSON and use defaults for missing values.
-    launch_session->width   = params.value("width",   1920);
-    launch_session->height  = params.value("height",  1080);
-    launch_session->fps     = params.value("fps",     60);
-    launch_session->appid   = params.value("appid",   0);
+    launch_session->width = params.value("width", 1920);
+    launch_session->height = params.value("height", 1080);
+    launch_session->fps = params.value("fps", 60);
+    launch_session->appid = params.value("appid", 0);
     launch_session->unique_id = params.value("uniqueid", "middleware");
     launch_session->enable_sops = params.value("enable_sops", 0);
-    launch_session->surround_info  = params.value("surroundAudioInfo", 196610);
-    launch_session->gcmap          = params.value("gcmap", 0);
-    launch_session->enable_hdr     = params.value("enable_hdr", 0);
-    launch_session->host_audio     = params.value("localAudioPlayMode", 0);
+    launch_session->surround_info = params.value("surroundAudioInfo", 196610);
+    launch_session->gcmap = params.value("gcmap", 0);
+    launch_session->enable_hdr = params.value("enable_hdr", 0);
+    launch_session->host_audio = params.value("localAudioPlayMode", 0);
     launch_session->continuous_audio = params.value("continuousAudio", 0);
     launch_session->client_cert = last_verified_client_cert;
 
@@ -1406,10 +1432,12 @@ namespace nvhttp {
         cert_chain.add(std::move(cert));
       }
 
+      auto peer_fingerprint = x509_fingerprint_sha256(x509);
       auto err_str = cert_chain.verify(x509.get());
       if (err_str) {
         BOOST_LOG(warning) << "[cert verify] certificate chain validation failed: "sv << err_str
-                           << " (certificate is not in the trust chain)"sv;
+                           << " (certificate is not in the trust chain) sha256="sv << peer_fingerprint
+                           << " trusted_clients="sv << client_root.named_devices.size();
         return verified;
       }
 
@@ -1423,8 +1451,8 @@ namespace nvhttp {
       last_verified_client_cert = pem;
       verified = 1;
 
-      BOOST_LOG(info) << "[cert verify] client certificate trusted, PEM fingerprint: "sv
-                      << pem.substr(0, std::min<size_t>(60, pem.size()));
+      BOOST_LOG(info) << "[cert verify] client certificate trusted: sha256="sv << peer_fingerprint
+                      << " pem_prefix="sv << pem.substr(0, std::min<size_t>(60, pem.size()));
       return verified;
     };
 
@@ -1564,15 +1592,15 @@ namespace nvhttp {
     for (const auto &named_cert : client.named_devices) {
       if (named_cert.cert == cert_pem) {
         if (named_cert.enabled) {
-          BOOST_LOG(info) << "[客户端管理] 客户端已启用: uuid="sv << named_cert.uuid;
+          BOOST_LOG(info) << "[client] client enabled: uuid="sv << named_cert.uuid;
         } else {
-          BOOST_LOG(warning) << "[客户端管理] 客户端已禁用: uuid="sv << named_cert.uuid;
+          BOOST_LOG(warning) << "[client] client disabled: uuid="sv << named_cert.uuid;
         }
         return named_cert.enabled;
       }
     }
-    BOOST_LOG(warning) << "[客户端管理] 证书未在 named_devices 中匹配到 (当前 "sv
-                       << client.named_devices.size() << " 个已知客户端)"sv;
+    BOOST_LOG(warning) << "[client] certificate not found in named_devices, known_clients="sv
+                       << client.named_devices.size();
     return true;  // default to enabled (should not reach here if cert_chain.verify already passed)
   }
 }  // namespace nvhttp

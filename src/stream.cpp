@@ -28,15 +28,13 @@ extern "C" {
 #include "logging.h"
 #include "middleware.h"
 #include "network.h"
+#include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
 #include "stream.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
-#include "input.h"
-#include "middleware.h"
-#include "nvhttp.h"
 #include "utility.h"
 
 constexpr int IDX_START_A = 0;
@@ -84,10 +82,79 @@ using namespace std::literals;
 
 namespace stream {
 
+  constexpr auto CONTROL_SERVICE_WAIT = std::chrono::milliseconds(1);
+  constexpr auto CONTROL_SERVICE_DRAIN_TIMEOUT = std::chrono::milliseconds::zero();
+  constexpr auto CONTROL_STATS_LOG_INTERVAL = std::chrono::seconds(1);
+  constexpr int CONTROL_MAX_EVENTS_PER_ITERATION = 256;
+  constexpr int CONTROL_MAX_FEEDBACK_DROP_PER_SESSION = 64;
+  constexpr int CONTROL_MAX_HDR_PER_SESSION = 2;
+  constexpr std::uint64_t PING_DIAG_SAMPLE_LIMIT = 32;
+  constexpr std::uint64_t PING_DIAG_SAMPLE_INTERVAL = 1000;
+
+  std::string udp_endpoint_to_string(const udp::endpoint &endpoint) {
+    return endpoint.address().to_string() + ':' + std::to_string(endpoint.port());
+  }
+
+  bool should_log_ping_sample(std::uint64_t count) {
+    return count <= PING_DIAG_SAMPLE_LIMIT || count % PING_DIAG_SAMPLE_INTERVAL == 0;
+  }
+
+  std::string_view control_packet_type_name(std::uint16_t type) {
+    if (type == packetTypes[IDX_START_A]) {
+      return "START_A"sv;
+    }
+    if (type == packetTypes[IDX_START_B]) {
+      return "START_B"sv;
+    }
+    if (type == packetTypes[IDX_INVALIDATE_REF_FRAMES]) {
+      return "INVALIDATE_REF_FRAMES"sv;
+    }
+    if (type == packetTypes[IDX_LOSS_STATS]) {
+      return "LOSS_STATS"sv;
+    }
+    if (type == packetTypes[IDX_INPUT_DATA]) {
+      return "INPUT_DATA"sv;
+    }
+    if (type == packetTypes[IDX_RUMBLE_DATA]) {
+      return "RUMBLE_DATA"sv;
+    }
+    if (type == packetTypes[IDX_TERMINATION]) {
+      return "TERMINATION"sv;
+    }
+    if (type == packetTypes[IDX_PERIODIC_PING]) {
+      return "PERIODIC_PING"sv;
+    }
+    if (type == packetTypes[IDX_REQUEST_IDR_FRAME]) {
+      return "REQUEST_IDR_FRAME"sv;
+    }
+    if (type == packetTypes[IDX_ENCRYPTED]) {
+      return "ENCRYPTED"sv;
+    }
+    if (type == packetTypes[IDX_HDR_MODE]) {
+      return "HDR_MODE"sv;
+    }
+    if (type == packetTypes[IDX_RUMBLE_TRIGGER_DATA]) {
+      return "RUMBLE_TRIGGER_DATA"sv;
+    }
+    if (type == packetTypes[IDX_SET_MOTION_EVENT]) {
+      return "SET_MOTION_EVENT"sv;
+    }
+    if (type == packetTypes[IDX_SET_RGB_LED]) {
+      return "SET_RGB_LED"sv;
+    }
+    if (type == packetTypes[IDX_SET_ADAPTIVE_TRIGGERS]) {
+      return "SET_ADAPTIVE_TRIGGERS"sv;
+    }
+    return "UNKNOWN"sv;
+  }
   enum class socket_e : int {
     video,  ///< Video
     audio  ///< Audio
   };
+
+  std::string_view socket_type_name(socket_e type) {
+    return type == socket_e::video ? "video"sv : "audio"sv;
+  }
 
 #pragma pack(push, 1)
 
@@ -573,15 +640,39 @@ namespace stream {
 
   void control_server_t::iterate(std::chrono::milliseconds timeout) {
     ENetEvent event;
-    auto res = enet_host_service(_host.get(), &event, (enet_uint32) timeout.count());
+    auto wait = timeout;
+    bool processed_any = false;
+    int events_processed_this_call = 0;
+    static std::chrono::steady_clock::time_point last_stats_log;
+    static std::uint64_t receive_events {};
+    static std::uint64_t connect_events {};
+    static std::uint64_t disconnect_events {};
+    static std::uint64_t input_events {};
+    static std::uint64_t encrypted_events {};
+    static std::uint64_t ping_events {};
+    static std::uint64_t loss_events {};
+    static std::uint64_t other_events {};
+    static std::uint16_t last_type {};
+    static std::size_t last_payload_len {};
 
-    if (res > 0) {
+    for (int events_processed = 0; events_processed < CONTROL_MAX_EVENTS_PER_ITERATION; ++events_processed) {
+      auto res = enet_host_service(_host.get(), &event, static_cast<enet_uint32>(wait.count()));
+      wait = CONTROL_SERVICE_DRAIN_TIMEOUT;
+
+      if (res <= 0) {
+        if (res < 0) {
+          BOOST_LOG(warning) << "Control ENet service failed"sv;
+        }
+        break;
+      }
+
+      processed_any = true;
+      ++events_processed_this_call;
       auto session = get_session(event.peer, event.data);
       if (!session) {
         BOOST_LOG(warning) << "Rejected connection from ["sv << platf::from_sockaddr((sockaddr *) &event.peer->address.address) << "]: it's not properly set up"sv;
         enet_peer_disconnect_now(event.peer, 0);
-
-        return;
+        continue;
       }
 
       session->pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
@@ -593,22 +684,65 @@ namespace stream {
 
             auto type = *(std::uint16_t *) packet->data;
             std::string_view payload {(char *) packet->data + sizeof(type), packet->dataLength - sizeof(type)};
+            ++receive_events;
+            last_type = type;
+            last_payload_len = payload.size();
+            if (type == packetTypes[IDX_INPUT_DATA]) {
+              ++input_events;
+            } else if (type == packetTypes[IDX_ENCRYPTED]) {
+              ++encrypted_events;
+            } else if (type == packetTypes[IDX_PERIODIC_PING]) {
+              ++ping_events;
+            } else if (type == packetTypes[IDX_LOSS_STATS]) {
+              ++loss_events;
+            } else {
+              ++other_events;
+            }
 
             call(type, session, payload, false);
           }
           break;
         case ENET_EVENT_TYPE_CONNECT:
-          BOOST_LOG(info) << "CLIENT CONNECTED"sv;
+          ++connect_events;
+          BOOST_LOG(info) << "[control][event] CLIENT CONNECTED peer="sv
+                          << platf::from_sockaddr((sockaddr *) &event.peer->address.address)
+                          << " data="sv << event.data;
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
-          BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
-          // No more clients to send video data to ^_^
+          ++disconnect_events;
+          BOOST_LOG(warning) << "[control][disconnect] CLIENT DISCONNECTED peer="sv
+                             << platf::from_sockaddr((sockaddr *) &event.peer->address.address)
+                             << " data="sv << event.data
+                             << " last_type="sv << control_packet_type_name(last_type)
+                             << " last_type_hex=0x"sv << util::hex(last_type).to_string_view()
+                             << " last_payload="sv << last_payload_len
+                             << " session_state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
           if (session->state == session::state_e::RUNNING) {
             session::stop(*session);
           }
           break;
         case ENET_EVENT_TYPE_NONE:
           break;
+      }
+    }
+
+    if (processed_any) {
+      enet_host_flush(_host.get());
+      auto now = std::chrono::steady_clock::now();
+      if (last_stats_log.time_since_epoch().count() == 0 || now - last_stats_log >= CONTROL_STATS_LOG_INTERVAL) {
+        last_stats_log = now;
+        BOOST_LOG(info) << "[control][stats] events_this_call="sv << events_processed_this_call
+                        << " recv="sv << receive_events
+                        << " connect="sv << connect_events
+                        << " disconnect="sv << disconnect_events
+                        << " input="sv << input_events
+                        << " encrypted="sv << encrypted_events
+                        << " ping="sv << ping_events
+                        << " loss="sv << loss_events
+                        << " other="sv << other_events
+                        << " last_type="sv << control_packet_type_name(last_type)
+                        << " last_type_hex=0x"sv << util::hex(last_type).to_string_view()
+                        << " last_payload="sv << last_payload_len;
       }
     }
   }
@@ -986,7 +1120,9 @@ namespace stream {
       if (cipher.decrypt(tagged_cipher, plaintext, &iv)) {
         // something went wrong :(
 
-        BOOST_LOG(error) << "Failed to verify tag"sv;
+        BOOST_LOG(error) << "[control][stop] reason=legacy_input_tag_verify_failed tagged_len="sv
+                         << tagged_cipher_length
+                         << " payload_len="sv << payload.size();
 
         session::stop(*session);
         return;
@@ -1041,7 +1177,10 @@ namespace stream {
       if (cipher.decrypt(tagged_cipher, plaintext, &iv)) {
         // something went wrong :(
 
-        BOOST_LOG(error) << "Failed to verify tag"sv;
+        BOOST_LOG(error) << "[control][stop] reason=encrypted_tag_verify_failed seq="sv << seq
+                         << " length="sv << length
+                         << " tagged_len="sv << tagged_cipher_length
+                         << " payload_len="sv << payload.size();
 
         session::stop(*session);
         return;
@@ -1051,7 +1190,8 @@ namespace stream {
       std::string_view next_payload {(char *) plaintext.data() + 4, plaintext.size() - 4};
 
       if (type == packetTypes[IDX_ENCRYPTED]) {
-        BOOST_LOG(error) << "Bad packet type [IDX_ENCRYPTED] found"sv;
+        BOOST_LOG(error) << "[control][stop] reason=bad_nested_encrypted seq="sv << seq
+                         << " plaintext_size="sv << plaintext.size();
         session::stop(*session);
         return;
       }
@@ -1075,6 +1215,8 @@ namespace stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
+      server->iterate(CONTROL_SERVICE_WAIT);
+
       {
         auto lg = server->_sessions.lock();
 
@@ -1089,7 +1231,7 @@ namespace stream {
           // Check for force disconnect from upstream (via middleware)
           auto force_event = mail::man->event<bool>(mail::force_disconnect);
           if (force_event->peek()) {
-            BOOST_LOG(info) << "Force disconnect from upstream"sv;
+            BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream"sv;
             force_event->pop();
             nlohmann::json msg;
             msg["data"]["event"] = "disconnected";
@@ -1109,22 +1251,22 @@ namespace stream {
           // Idle/AFK detection: check if user has been inactive too long
           if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
             auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(
-              now - input::get_last_input_time()
-            ).count();
+                              now - input::get_last_input_time()
+            )
+                              .count();
 
             auto force_timeout = config::sunshine.middleware.force_disconnected_timeout;
             if (force_timeout > 0 && idle_sec >= force_timeout) {
-              BOOST_LOG(info) << "Force disconnect: idle for "sv << idle_sec << " seconds"sv;
+              BOOST_LOG(warning) << "[control][stop] reason=force_idle_timeout idle_sec="sv << idle_sec;
               nlohmann::json msg;
               msg["data"]["event"] = "disconnected";
               msg["data"]["message"] = u8"长时间挂机，断开连接";
               middleware::send_to_upstream(msg);
               session::stop(*session);
-            }
-            else {
+            } else {
               auto standby_timeout = config::sunshine.middleware.standby_disconnected_timeout;
               if (standby_timeout > 0 && idle_sec >= standby_timeout) {
-                BOOST_LOG(info) << "Standby disconnect: idle for "sv << idle_sec << " seconds"sv;
+                BOOST_LOG(warning) << "[control][stop] reason=standby_idle_timeout idle_sec="sv << idle_sec;
                 nlohmann::json msg;
                 msg["data"]["event"] = "disconnected";
                 msg["data"]["message"] = u8"长时间无操作，断开连接";
@@ -1136,7 +1278,7 @@ namespace stream {
 
           if (now > session->pingTimeout) {
             auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
-            BOOST_LOG(info) << address << ": Ping Timeout"sv;
+            BOOST_LOG(warning) << "[control][stop] reason=ping_timeout address="sv << address << " state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
             // Notify upstream of network disconnect
             nlohmann::json msg;
             msg["data"]["event"] = "disconnected";
@@ -1163,14 +1305,12 @@ namespace stream {
 
           if (session->control.peer) {
             auto &feedback_queue = session->control.feedback_queue;
-            while (feedback_queue->peek()) {
-              auto feedback_msg = feedback_queue->pop();
-
-              send_feedback_msg(session, *feedback_msg);
+            for (int feedback_dropped = 0; feedback_dropped < CONTROL_MAX_FEEDBACK_DROP_PER_SESSION && feedback_queue->peek(); ++feedback_dropped) {
+              feedback_queue->pop();
             }
 
             auto &hdr_queue = session->control.hdr_queue;
-            while (session->control.peer && hdr_queue->peek()) {
+            for (int hdr_sent = 0; session->control.peer && hdr_sent < CONTROL_MAX_HDR_PER_SESSION && hdr_queue->peek(); ++hdr_sent) {
               auto hdr_info = hdr_queue->pop();
 
               send_hdr_mode(session, std::move(hdr_info));
@@ -1181,7 +1321,8 @@ namespace stream {
         })
       }
 
-      server->iterate(150ms);
+      server->flush();
+      server->iterate(CONTROL_SERVICE_DRAIN_TIMEOUT);
     }
 
     // Let all remaining connections know the server is shutting down
@@ -1229,7 +1370,10 @@ namespace stream {
 
     auto &io = ctx.io_context;
 
-    udp::endpoint peer;
+    std::array<udp::endpoint, 2> peers;
+    std::array<std::uint64_t, 2> recv_counts {};
+    std::array<std::uint64_t, 2> matched_counts {};
+    std::array<std::uint64_t, 2> unmatched_counts {};
 
     std::array<char, 2048> buf[2];
     std::function<void(const boost::system::error_code, size_t)> recv_func[2];
@@ -1260,52 +1404,99 @@ namespace stream {
       }
     };
 
-    auto recv_func_init = [&](udp::socket &sock, int buf_elem, std::map<av_session_id_t, message_queue_t> &peer_to_session) {
-      recv_func[buf_elem] = [&, buf_elem](const boost::system::error_code &ec, size_t bytes) {
+    auto recv_func_init = [&](udp::socket &sock, int buf_elem, socket_e socket_type, std::map<av_session_id_t, message_queue_t> &peer_to_session) {
+      auto sock_ptr = &sock;
+      auto peer_to_session_ptr = &peer_to_session;
+      recv_func[buf_elem] = [&, buf_elem, socket_type, sock_ptr, peer_to_session_ptr](const boost::system::error_code &ec, size_t bytes) {
         auto fg = util::fail_guard([&]() {
-          sock.async_receive_from(asio::buffer(buf[buf_elem]), peer, 0, recv_func[buf_elem]);
+          sock_ptr->async_receive_from(asio::buffer(buf[buf_elem]), peers[buf_elem], 0, recv_func[buf_elem]);
         });
 
-        auto type_str = buf_elem ? "AUDIO"sv : "VIDEO"sv;
-        BOOST_LOG(verbose) << "Recv: "sv << peer.address().to_string() << ':' << peer.port() << " :: " << type_str;
+        auto &peer = peers[buf_elem];
+        auto &peer_to_session = *peer_to_session_ptr;
+        auto type_name = socket_type_name(socket_type);
 
         populate_peer_to_session();
 
         // No data, yet no error
         if (ec == boost::system::errc::connection_refused || ec == boost::system::errc::connection_reset) {
+          BOOST_LOG(info) << "[stream][ping-recv] ignored reset type="sv << type_name
+                          << " from="sv << udp_endpoint_to_string(peer)
+                          << " err="sv << ec.message();
           return;
         }
 
         if (ec || !bytes) {
-          BOOST_LOG(error) << "Couldn't receive data from udp socket: "sv << ec.message();
+          BOOST_LOG(error) << "[stream][ping-recv] failed type="sv << type_name
+                           << " from="sv << udp_endpoint_to_string(peer)
+                           << " bytes="sv << bytes
+                           << " err="sv << ec.message();
           return;
+        }
+
+        auto packet_count = ++recv_counts[buf_elem];
+        if (should_log_ping_sample(packet_count)) {
+          BOOST_LOG(info) << "[stream][ping-recv] type="sv << type_name
+                          << " count="sv << packet_count
+                          << " bytes="sv << bytes
+                          << " from="sv << udp_endpoint_to_string(peer)
+                          << " sessions="sv << peer_to_session.size();
         }
 
         if (bytes == 4) {
           // For legacy PING packets, find the matching session by address.
           auto it = peer_to_session.find(peer.address());
           if (it != std::end(peer_to_session)) {
-            BOOST_LOG(debug) << "RAISE: "sv << peer.address().to_string() << ':' << peer.port() << " :: " << type_str;
+            ++matched_counts[buf_elem];
+            BOOST_LOG(info) << "[stream][ping-match] type="sv << type_name
+                            << " mode=v1 from="sv << udp_endpoint_to_string(peer)
+                            << " matched="sv << matched_counts[buf_elem];
             it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
+          } else {
+            ++unmatched_counts[buf_elem];
+            BOOST_LOG(warning) << "[stream][ping-unmatched] type="sv << type_name
+                               << " mode=v1 from="sv << udp_endpoint_to_string(peer)
+                               << " sessions="sv << peer_to_session.size()
+                               << " unmatched="sv << unmatched_counts[buf_elem];
           }
         } else if (bytes >= sizeof(SS_PING)) {
           auto ping = (PSS_PING) buf[buf_elem].data();
+          std::string payload {ping->payload, sizeof(ping->payload)};
 
           // For new PING packets that include a client identifier, search by payload.
-          auto it = peer_to_session.find(std::string {ping->payload, sizeof(ping->payload)});
+          auto it = peer_to_session.find(payload);
           if (it != std::end(peer_to_session)) {
-            BOOST_LOG(debug) << "RAISE: "sv << peer.address().to_string() << ':' << peer.port() << " :: " << type_str;
+            ++matched_counts[buf_elem];
+            BOOST_LOG(info) << "[stream][ping-match] type="sv << type_name
+                            << " mode=v2 from="sv << udp_endpoint_to_string(peer)
+                            << " payload="sv << util::hex_vec(payload)
+                            << " matched="sv << matched_counts[buf_elem];
             it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
+          } else {
+            ++unmatched_counts[buf_elem];
+            BOOST_LOG(warning) << "[stream][ping-unmatched] type="sv << type_name
+                               << " mode=v2 from="sv << udp_endpoint_to_string(peer)
+                               << " bytes="sv << bytes
+                               << " payload="sv << util::hex_vec(payload)
+                               << " sessions="sv << peer_to_session.size()
+                               << " unmatched="sv << unmatched_counts[buf_elem];
           }
+        } else {
+          ++unmatched_counts[buf_elem];
+          BOOST_LOG(warning) << "[stream][ping-unmatched] type="sv << type_name
+                             << " mode=too_short from="sv << udp_endpoint_to_string(peer)
+                             << " bytes="sv << bytes
+                             << " sessions="sv << peer_to_session.size()
+                             << " unmatched="sv << unmatched_counts[buf_elem];
         }
       };
     };
 
-    recv_func_init(video_sock, 0, peer_to_video_session);
-    recv_func_init(audio_sock, 1, peer_to_audio_session);
+    recv_func_init(video_sock, 0, socket_e::video, peer_to_video_session);
+    recv_func_init(audio_sock, 1, socket_e::audio, peer_to_audio_session);
 
-    video_sock.async_receive_from(asio::buffer(buf[0]), peer, 0, recv_func[0]);
-    audio_sock.async_receive_from(asio::buffer(buf[1]), peer, 0, recv_func[1]);
+    video_sock.async_receive_from(asio::buffer(buf[0]), peers[0], 0, recv_func[0]);
+    audio_sock.async_receive_from(asio::buffer(buf[1]), peers[1], 0, recv_func[1]);
 
     while (!broadcast_shutdown_event->peek()) {
       io.run();
@@ -1558,13 +1749,11 @@ namespace stream {
               session->video.cipher->encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
             }
 
-            if (x - next_shard_to_send + 1 >= send_batch_size ||
-                x + 1 == shards.size()) {
+            if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
               // Do pacing within the frame.
               // Also trigger pacing before the first send_batch() of the frame
               // to account for the last send_batch() of the previous frame.
-              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
-                  ratecontrol_frame_packets_sent == 0) {
+              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms || ratecontrol_frame_packets_sent == 0) {
                 auto due = ratecontrol_frame_start +
                            std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
                              ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
@@ -1845,6 +2034,17 @@ namespace stream {
   int recv_ping(session_t *session, decltype(broadcast)::ptr_t ref, socket_e type, std::string_view expected_payload, udp::endpoint &peer, std::chrono::milliseconds timeout) {
     auto messages = std::make_shared<message_queue_t::element_type>(30);
     av_session_id_t session_id = std::string {expected_payload};
+    auto type_name = socket_type_name(type);
+    std::size_t queue_messages = 0;
+    std::string last_peer;
+    std::string last_msg_hex;
+    std::size_t last_msg_size = 0;
+
+    BOOST_LOG(info) << "[stream][ping-wait] type="sv << type_name
+                    << " expected_payload="sv << expected_payload
+                    << " expected_peer="sv << udp_endpoint_to_string(peer)
+                    << " timeout_ms="sv << timeout.count()
+                    << " ml_flags=0x"sv << util::hex(session->config.mlFeatureFlags).to_string_view();
 
     // Only allow matches on the peer address for legacy clients
     if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1)) {
@@ -1865,23 +2065,34 @@ namespace stream {
     auto start_time = std::chrono::steady_clock::now();
     auto current_time = start_time;
 
-    while (current_time - start_time < config::stream.ping_timeout) {
+    while (current_time - start_time < timeout) {
       auto delta_time = current_time - start_time;
 
-      auto msg_opt = messages->pop(config::stream.ping_timeout - delta_time);
+      auto msg_opt = messages->pop(timeout - delta_time);
       if (!msg_opt) {
         break;
       }
 
+      ++queue_messages;
       TUPLE_2D_REF(recv_peer, msg, *msg_opt);
+      last_peer = udp_endpoint_to_string(recv_peer);
+      last_msg_hex = util::hex_vec(msg);
+      last_msg_size = msg.size();
       if (msg.find(expected_payload) != std::string::npos) {
-        // Match the new PING payload format
-        BOOST_LOG(debug) << "Received ping [v2] from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
+        BOOST_LOG(info) << "[stream][ping-ok] type="sv << type_name
+                        << " mode=v2 from="sv << last_peer
+                        << " queued="sv << queue_messages
+                        << " bytes="sv << msg.size();
       } else if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) && msg == "PING"sv) {
-        // Match the legacy fixed PING payload only if the new type is not supported
-        BOOST_LOG(debug) << "Received ping [v1] from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
+        BOOST_LOG(info) << "[stream][ping-ok] type="sv << type_name
+                        << " mode=v1 from="sv << last_peer
+                        << " queued="sv << queue_messages;
       } else {
-        BOOST_LOG(debug) << "Received non-ping from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
+        BOOST_LOG(warning) << "[stream][ping-nonmatch] type="sv << type_name
+                           << " from="sv << last_peer
+                           << " bytes="sv << msg.size()
+                           << " expected_payload="sv << expected_payload
+                           << " msg="sv << last_msg_hex;
         current_time = std::chrono::steady_clock::now();
         continue;
       }
@@ -1891,6 +2102,14 @@ namespace stream {
       return 0;
     }
 
+    BOOST_LOG(error) << "[stream][ping-timeout] type="sv << type_name
+                     << " expected_payload="sv << expected_payload
+                     << " expected_peer="sv << udp_endpoint_to_string(peer)
+                     << " timeout_ms="sv << timeout.count()
+                     << " queued="sv << queue_messages
+                     << " last_peer="sv << last_peer
+                     << " last_msg_size="sv << last_msg_size
+                     << " last_msg="sv << last_msg_hex;
     BOOST_LOG(error) << "Initial Ping Timeout"sv;
     return -1;
   }

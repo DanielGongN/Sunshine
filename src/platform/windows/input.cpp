@@ -8,8 +8,9 @@
 #include <Windows.h>
 
 // standard includes
-#include <cmath>
 #include <bitset>
+#include <chrono>
+#include <cmath>
 #include <thread>
 #include <vector>
 
@@ -85,6 +86,41 @@ namespace platf {
     gamepad_feedback_msg_t last_rumble;
     gamepad_feedback_msg_t last_rgb_led;
   };
+
+  constexpr auto VIGEM_SLOW_UPDATE_THRESHOLD = std::chrono::milliseconds(8);
+
+  void log_vigem_update_result(
+    std::string_view type,
+    int nr,
+    VIGEM_ERROR status,
+    std::chrono::steady_clock::duration elapsed,
+    const gamepad_state_t &gamepad_state
+  ) {
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    if (!VIGEM_SUCCESS(status)) {
+      BOOST_LOG(warning) << "[vigem][error] gamepad_update nr="sv << nr
+                         << " type="sv << type
+                         << " status=0x"sv << util::hex(status).to_string_view()
+                         << " elapsed_ms="sv << elapsed_ms
+                         << " buttons=0x"sv << util::hex(gamepad_state.buttonFlags).to_string_view()
+                         << " lt="sv << static_cast<std::uint32_t>(gamepad_state.lt)
+                         << " rt="sv << static_cast<std::uint32_t>(gamepad_state.rt)
+                         << " ls=("sv << gamepad_state.lsX << ","sv << gamepad_state.lsY << ")"sv
+                         << " rs=("sv << gamepad_state.rsX << ","sv << gamepad_state.rsY << ")"sv;
+      return;
+    }
+
+    if (elapsed >= VIGEM_SLOW_UPDATE_THRESHOLD) {
+      BOOST_LOG(warning) << "[vigem][slow] gamepad_update nr="sv << nr
+                         << " type="sv << type
+                         << " elapsed_ms="sv << elapsed_ms
+                         << " buttons=0x"sv << util::hex(gamepad_state.buttonFlags).to_string_view()
+                         << " lt="sv << static_cast<std::uint32_t>(gamepad_state.lt)
+                         << " rt="sv << static_cast<std::uint32_t>(gamepad_state.rt)
+                         << " ls=("sv << gamepad_state.lsX << ","sv << gamepad_state.lsY << ")"sv
+                         << " rs=("sv << gamepad_state.rsX << ","sv << gamepad_state.rsY << ")"sv;
+    }
+  }
 
   constexpr float EARTH_G = 9.80665f;
 
@@ -251,7 +287,10 @@ namespace platf {
             ULONG userIndex = 0;
             for (int retry = 0; retry < 40; ++retry) {
               auto idxErr = vigem_target_x360_get_user_index(
-                  client.get(), gamepad.gp.get(), &userIndex);
+                client.get(),
+                gamepad.gp.get(),
+                &userIndex
+              );
               if (VIGEM_SUCCESS(idxErr)) {
                 BOOST_LOG(info) << "Preinit slot="sv << slot
                                 << " XInput user index="sv << userIndex;
@@ -263,7 +302,11 @@ namespace platf {
 
           // Register notification callback (non-fatal on failure)
           status = vigem_target_x360_register_notification(
-              client.get(), gamepad.gp.get(), x360_notify, this);
+            client.get(),
+            gamepad.gp.get(),
+            x360_notify,
+            this
+          );
           if (!VIGEM_SUCCESS(status)) {
             BOOST_LOG(warning) << "Preinit: register_notification slot="sv << slot
                                << " failed: 0x"sv << util::hex(status).to_string_view();
@@ -415,8 +458,7 @@ namespace platf {
           uint16_t normalizedSmallMotor = smallMotor << 8;
 
           // Don't resend duplicate rumble data
-          if (normalizedSmallMotor != gamepad.last_rumble.data.rumble.highfreq ||
-              normalizedLargeMotor != gamepad.last_rumble.data.rumble.lowfreq) {
+          if (normalizedSmallMotor != gamepad.last_rumble.data.rumble.highfreq || normalizedLargeMotor != gamepad.last_rumble.data.rumble.lowfreq) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(
               gamepad.client_relative_index,
@@ -444,9 +486,7 @@ namespace platf {
 
         if (gamepad.gp.get() == target) {
           // Don't resend duplicate RGB data
-          if (r != gamepad.last_rgb_led.data.rgb_led.r ||
-              g != gamepad.last_rgb_led.data.rgb_led.g ||
-              b != gamepad.last_rgb_led.data.rgb_led.b) {
+          if (r != gamepad.last_rgb_led.data.rgb_led.r || g != gamepad.last_rgb_led.data.rgb_led.g || b != gamepad.last_rgb_led.data.rgb_led.b) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
             gamepad.feedback_queue->raise(msg);
@@ -825,8 +865,7 @@ namespace platf {
 
     // Try to find a matching pointer ID
     for (UINT32 i = 0; i < ARRAYSIZE(raw->touchInfo); i++) {
-      if (raw->touchInfo[i].touchInfo.pointerInfo.pointerId == pointerId &&
-          raw->touchInfo[i].touchInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
+      if (raw->touchInfo[i].touchInfo.pointerInfo.pointerId == pointerId && raw->touchInfo[i].touchInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
         if (eventType == LI_TOUCH_EVENT_DOWN && (raw->touchInfo[i].touchInfo.pointerInfo.pointerFlags & POINTER_FLAG_INCONTACT)) {
           BOOST_LOG(warning) << "Pointer "sv << pointerId << " already down. Did the client drop an up/cancel event?"sv;
         }
@@ -985,9 +1024,7 @@ namespace platf {
     auto raw = (client_input_raw_t *) input;
 
     // Bail if we're not running on an OS that supports virtual touch input
-    if (!raw->global->fnCreateSyntheticPointerDevice ||
-        !raw->global->fnInjectSyntheticPointerInput ||
-        !raw->global->fnDestroySyntheticPointerDevice) {
+    if (!raw->global->fnCreateSyntheticPointerDevice || !raw->global->fnInjectSyntheticPointerInput || !raw->global->fnDestroySyntheticPointerDevice) {
       BOOST_LOG(warning) << "Touch input requires Windows 10 1809 or later"sv;
       return;
     }
@@ -1111,9 +1148,7 @@ namespace platf {
     auto raw = (client_input_raw_t *) input;
 
     // Bail if we're not running on an OS that supports virtual pen input
-    if (!raw->global->fnCreateSyntheticPointerDevice ||
-        !raw->global->fnInjectSyntheticPointerInput ||
-        !raw->global->fnDestroySyntheticPointerDevice) {
+    if (!raw->global->fnCreateSyntheticPointerDevice || !raw->global->fnInjectSyntheticPointerInput || !raw->global->fnDestroySyntheticPointerDevice) {
       BOOST_LOG(warning) << "Pen input requires Windows 10 1809 or later"sv;
       return;
     }
@@ -1543,10 +1578,21 @@ namespace platf {
       // Timestamp is reported in 5.333us units
       gamepad.report.ds4.Report.wTimestamp += (uint16_t) (delta_ns.count() / 5333);
 
+      platf::gamepad_state_t gamepad_state {
+        static_cast<std::uint32_t>(gamepad.report.ds4.Report.wButtons) | (static_cast<std::uint32_t>(gamepad.report.ds4.Report.bSpecial) << 16),
+        gamepad.report.ds4.Report.bTriggerL,
+        gamepad.report.ds4.Report.bTriggerR,
+        static_cast<std::int16_t>(gamepad.report.ds4.Report.bThumbLX),
+        static_cast<std::int16_t>(gamepad.report.ds4.Report.bThumbLY),
+        static_cast<std::int16_t>(gamepad.report.ds4.Report.bThumbRX),
+        static_cast<std::int16_t>(gamepad.report.ds4.Report.bThumbRY)
+      };
+
       // Send the report to the virtual device
+      auto send_start = std::chrono::steady_clock::now();
       auto status = vigem_target_ds4_update_ex(vigem->client.get(), gamepad.gp.get(), gamepad.report.ds4);
+      log_vigem_update_result("ds4"sv, nr, status, std::chrono::steady_clock::now() - send_start, gamepad_state);
       if (!VIGEM_SUCCESS(status)) {
-        BOOST_LOG(warning) << "Couldn't send gamepad input to ViGEm ["sv << util::hex(status).to_string_view() << ']';
         return;
       }
 
@@ -1575,14 +1621,11 @@ namespace platf {
       return;
     }
 
-    VIGEM_ERROR status;
-
     if (vigem_target_get_type(gamepad.gp.get()) == Xbox360Wired) {
       x360_update_state(gamepad, gamepad_state);
-      status = vigem_target_x360_update(vigem->client.get(), gamepad.gp.get(), gamepad.report.x360);
-      if (!VIGEM_SUCCESS(status)) {
-        BOOST_LOG(warning) << "Couldn't send gamepad input to ViGEm ["sv << util::hex(status).to_string_view() << ']';
-      }
+      auto send_start = std::chrono::steady_clock::now();
+      auto status = vigem_target_x360_update(vigem->client.get(), gamepad.gp.get(), gamepad.report.x360);
+      log_vigem_update_result("x360"sv, nr, status, std::chrono::steady_clock::now() - send_start, gamepad_state);
     } else {
       ds4_update_state(gamepad, gamepad_state);
       ds4_update_ts_and_send(vigem, nr);

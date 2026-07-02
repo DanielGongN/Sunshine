@@ -5,7 +5,7 @@ export LANG=zh_CN.UTF-8
 export LC_ALL=zh_CN.UTF-8
 
 ROOT_DIR="$(pwd)"
-BUILD_DIR="cmake-build-local"
+BUILD_DIR="build"
 LOCAL_HOME="${ROOT_DIR}/.home"
 LOCAL_TMP="${ROOT_DIR}/.tmp"
 

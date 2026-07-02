@@ -9,10 +9,14 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <bitset>
 #include <chrono>
 #include <cmath>
 #include <list>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 
@@ -118,13 +122,225 @@ namespace input {
   static platf::input_t platf_input;
   std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
 
+  constexpr auto INPUT_STATS_LOG_INTERVAL = std::chrono::seconds(1);
+  constexpr auto INPUT_GAMEPAD_LOG_INTERVAL = std::chrono::seconds(1);
+  constexpr std::size_t INPUT_QUEUE_WARN_PACKETS = 128;
+
+  struct input_stats_t {
+    std::chrono::steady_clock::time_point last_stats_log;
+    std::chrono::steady_clock::time_point last_gamepad_log;
+    std::uint64_t queued_messages {};
+    std::uint64_t processed_messages {};
+    std::uint64_t queued_bytes {};
+    std::uint64_t processed_bytes {};
+    std::uint64_t keyboard_packets {};
+    std::uint64_t mouse_move_packets {};
+    std::uint64_t mouse_button_packets {};
+    std::uint64_t scroll_packets {};
+    std::uint64_t unicode_packets {};
+    std::uint64_t gamepad_packets {};
+    std::uint64_t touch_packets {};
+    std::uint64_t motion_packets {};
+    std::uint64_t battery_packets {};
+    std::uint64_t arrival_packets {};
+    std::uint64_t unknown_packets {};
+    std::size_t queue_peak {};
+    bool has_last_gamepad {};
+    std::uint16_t last_gamepad_controller {};
+    std::uint16_t last_gamepad_active_mask {};
+    std::uint32_t last_gamepad_buttons {};
+    std::uint8_t last_gamepad_lt {};
+    std::uint8_t last_gamepad_rt {};
+    std::int16_t last_gamepad_lsx {};
+    std::int16_t last_gamepad_lsy {};
+    std::int16_t last_gamepad_rsx {};
+    std::int16_t last_gamepad_rsy {};
+  };
+
+  static input_stats_t input_stats;
+  static std::mutex input_stats_lock;
+
+  std::string_view input_packet_type_name(std::uint32_t magic) {
+    switch (magic) {
+      case MOUSE_MOVE_REL_MAGIC_GEN5:
+        return "MOUSE_MOVE_REL"sv;
+      case MOUSE_MOVE_ABS_MAGIC:
+        return "MOUSE_MOVE_ABS"sv;
+      case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
+        return "MOUSE_BUTTON_DOWN"sv;
+      case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
+        return "MOUSE_BUTTON_UP"sv;
+      case SCROLL_MAGIC_GEN5:
+        return "SCROLL"sv;
+      case SS_HSCROLL_MAGIC:
+        return "HSCROLL"sv;
+      case KEY_DOWN_EVENT_MAGIC:
+        return "KEY_DOWN"sv;
+      case KEY_UP_EVENT_MAGIC:
+        return "KEY_UP"sv;
+      case UTF8_TEXT_EVENT_MAGIC:
+        return "UTF8_TEXT"sv;
+      case MULTI_CONTROLLER_MAGIC_GEN5:
+        return "MULTI_CONTROLLER"sv;
+      case SS_TOUCH_MAGIC:
+        return "TOUCH"sv;
+      case SS_PEN_MAGIC:
+        return "PEN"sv;
+      case SS_CONTROLLER_ARRIVAL_MAGIC:
+        return "CONTROLLER_ARRIVAL"sv;
+      case SS_CONTROLLER_TOUCH_MAGIC:
+        return "CONTROLLER_TOUCH"sv;
+      case SS_CONTROLLER_MOTION_MAGIC:
+        return "CONTROLLER_MOTION"sv;
+      case SS_CONTROLLER_BATTERY_MAGIC:
+        return "CONTROLLER_BATTERY"sv;
+      default:
+        return "UNKNOWN"sv;
+    }
+  }
+
+  void log_input_stats_locked(std::chrono::steady_clock::time_point now) {
+    if (input_stats.last_stats_log.time_since_epoch().count() != 0 && now - input_stats.last_stats_log < INPUT_STATS_LOG_INTERVAL) {
+      return;
+    }
+
+    input_stats.last_stats_log = now;
+    BOOST_LOG(info) << "[input][stats] queued="sv << input_stats.queued_messages
+                    << " processed="sv << input_stats.processed_messages
+                    << " queue_peak="sv << input_stats.queue_peak
+                    << " bytes(queued/processed)="sv << input_stats.queued_bytes << "/"sv << input_stats.processed_bytes
+                    << " keyboard="sv << input_stats.keyboard_packets
+                    << " mouse_move="sv << input_stats.mouse_move_packets
+                    << " mouse_button="sv << input_stats.mouse_button_packets
+                    << " scroll="sv << input_stats.scroll_packets
+                    << " unicode="sv << input_stats.unicode_packets
+                    << " gamepad="sv << input_stats.gamepad_packets
+                    << " touch="sv << input_stats.touch_packets
+                    << " motion="sv << input_stats.motion_packets
+                    << " battery="sv << input_stats.battery_packets
+                    << " arrival="sv << input_stats.arrival_packets
+                    << " unknown="sv << input_stats.unknown_packets;
+  }
+
+  void note_input_queued(std::size_t bytes, std::size_t queue_size) {
+    std::lock_guard<std::mutex> lg(input_stats_lock);
+    ++input_stats.queued_messages;
+    input_stats.queued_bytes += bytes;
+    input_stats.queue_peak = std::max(input_stats.queue_peak, queue_size);
+    if (queue_size == INPUT_QUEUE_WARN_PACKETS) {
+      BOOST_LOG(warning) << "[input][queue] queued input backlog reached "sv << queue_size << " packets"sv;
+    }
+    log_input_stats_locked(std::chrono::steady_clock::now());
+  }
+
+  void note_input_processed(std::uint32_t magic, std::size_t bytes, std::size_t queue_size_after_batch, std::size_t batched_entries) {
+    std::lock_guard<std::mutex> lg(input_stats_lock);
+    ++input_stats.processed_messages;
+    input_stats.processed_bytes += bytes;
+    input_stats.queue_peak = std::max(input_stats.queue_peak, queue_size_after_batch);
+
+    switch (magic) {
+      case KEY_DOWN_EVENT_MAGIC:
+      case KEY_UP_EVENT_MAGIC:
+        ++input_stats.keyboard_packets;
+        break;
+      case MOUSE_MOVE_REL_MAGIC_GEN5:
+      case MOUSE_MOVE_ABS_MAGIC:
+        ++input_stats.mouse_move_packets;
+        break;
+      case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
+      case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
+        ++input_stats.mouse_button_packets;
+        break;
+      case SCROLL_MAGIC_GEN5:
+      case SS_HSCROLL_MAGIC:
+        ++input_stats.scroll_packets;
+        break;
+      case UTF8_TEXT_EVENT_MAGIC:
+        ++input_stats.unicode_packets;
+        break;
+      case MULTI_CONTROLLER_MAGIC_GEN5:
+        ++input_stats.gamepad_packets;
+        break;
+      case SS_TOUCH_MAGIC:
+      case SS_PEN_MAGIC:
+      case SS_CONTROLLER_TOUCH_MAGIC:
+        ++input_stats.touch_packets;
+        break;
+      case SS_CONTROLLER_MOTION_MAGIC:
+        ++input_stats.motion_packets;
+        break;
+      case SS_CONTROLLER_BATTERY_MAGIC:
+        ++input_stats.battery_packets;
+        break;
+      case SS_CONTROLLER_ARRIVAL_MAGIC:
+        ++input_stats.arrival_packets;
+        break;
+      default:
+        ++input_stats.unknown_packets;
+        BOOST_LOG(warning) << "[input][unknown] magic=0x"sv << util::hex(magic).to_string_view()
+                           << " type="sv << input_packet_type_name(magic)
+                           << " payload_bytes="sv << bytes
+                           << " queue_after_batch="sv << queue_size_after_batch
+                           << " batched="sv << batched_entries;
+        break;
+    }
+
+    log_input_stats_locked(std::chrono::steady_clock::now());
+  }
+
+  void note_gamepad_packet(PNV_MULTI_CONTROLLER_PACKET packet, std::size_t queue_size_after_batch, std::size_t batched_entries) {
+    auto now = std::chrono::steady_clock::now();
+    auto controller = static_cast<std::uint16_t>(packet->controllerNumber);
+    auto active_mask = static_cast<std::uint16_t>(packet->activeGamepadMask);
+    auto button_flags = static_cast<std::uint32_t>(static_cast<std::uint16_t>(packet->buttonFlags)) |
+                        (static_cast<std::uint32_t>(static_cast<std::uint16_t>(packet->buttonFlags2)) << 16);
+    auto lt = static_cast<std::uint8_t>(packet->leftTrigger);
+    auto rt = static_cast<std::uint8_t>(packet->rightTrigger);
+    auto lsx = static_cast<std::int16_t>(packet->leftStickX);
+    auto lsy = static_cast<std::int16_t>(packet->leftStickY);
+    auto rsx = static_cast<std::int16_t>(packet->rightStickX);
+    auto rsy = static_cast<std::int16_t>(packet->rightStickY);
+
+    std::lock_guard<std::mutex> lg(input_stats_lock);
+    auto buttons_changed = !input_stats.has_last_gamepad ||
+                           input_stats.last_gamepad_controller != controller ||
+                           input_stats.last_gamepad_active_mask != active_mask ||
+                           input_stats.last_gamepad_buttons != button_flags;
+    auto timed_log = input_stats.last_gamepad_log.time_since_epoch().count() == 0 || now - input_stats.last_gamepad_log >= INPUT_GAMEPAD_LOG_INTERVAL;
+
+    if (buttons_changed || timed_log) {
+      input_stats.last_gamepad_log = now;
+      BOOST_LOG(info) << "[input][gamepad] controller="sv << controller
+                      << " active_mask=0x"sv << util::hex(active_mask).to_string_view()
+                      << " buttons=0x"sv << util::hex(button_flags).to_string_view()
+                      << " lt="sv << static_cast<std::uint32_t>(lt)
+                      << " rt="sv << static_cast<std::uint32_t>(rt)
+                      << " ls=("sv << lsx << ","sv << lsy << ")"sv
+                      << " rs=("sv << rsx << ","sv << rsy << ")"sv
+                      << " queue_after_batch="sv << queue_size_after_batch
+                      << " batched="sv << batched_entries;
+    }
+
+    input_stats.has_last_gamepad = true;
+    input_stats.last_gamepad_controller = controller;
+    input_stats.last_gamepad_active_mask = active_mask;
+    input_stats.last_gamepad_buttons = button_flags;
+    input_stats.last_gamepad_lt = lt;
+    input_stats.last_gamepad_rt = rt;
+    input_stats.last_gamepad_lsx = lsx;
+    input_stats.last_gamepad_lsy = lsy;
+    input_stats.last_gamepad_rsx = rsx;
+    input_stats.last_gamepad_rsy = rsy;
+  }
+
   void free_gamepad(platf::input_t &platf_input, int id) {
     // Reset gamepad state to neutral
     platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
 
-    // 预创建的 Gamepad 是持久的——永远不要将它们从 ViGEm 中移除
+    // Pre-created gamepads are persistent and must not be removed from ViGEm.
     if (config::sunshine.middleware.gamepad_preinit && id < 2) {
-      return;  // 跳过 vigem_target_remove() 和 free_id()
+      return;  // Skip vigem_target_remove() and free_id().
     }
 
     platf::free_gamepad(platf_input, id);
@@ -898,12 +1114,10 @@ namespace input {
       util::endian::little(packet->supportedButtonFlags),
     };
 
-    // 如果此控制器编号匹配预先初始化的插槽，则重用预创建的 Gamepad
-    if (config::sunshine.middleware.gamepad_preinit &&
-        packet->controllerNumber < 2 &&
-        gamepadMask[packet->controllerNumber]) {
+    // Reuse the pre-created gamepad when the controller number matches a pre-initialized slot.
+    if (config::sunshine.middleware.gamepad_preinit && packet->controllerNumber < 2 && gamepadMask[packet->controllerNumber]) {
       input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
-      return;  // 预创建的 Gamepad 已拥有来自 vigem_t::init() 的元数据
+      return;  // Pre-created gamepads already have metadata from vigem_t::init().
     }
 
     auto id = alloc_id(gamepadMask);
@@ -1160,13 +1374,10 @@ namespace input {
     // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
     // send a controller arrival instead of this but it's still supported for legacy clients.
     if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
-      // 如果此控制器编号匹配预先初始化的插槽，则重用预创建的 Gamepad
-      if (config::sunshine.middleware.gamepad_preinit &&
-          packet->controllerNumber < 2 &&
-          gamepadMask[packet->controllerNumber]) {
+      // Reuse the pre-created gamepad when the controller number matches a pre-initialized slot.
+      if (config::sunshine.middleware.gamepad_preinit && packet->controllerNumber < 2 && gamepadMask[packet->controllerNumber]) {
         input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
-      }
-      else {
+      } else {
         auto id = alloc_id(gamepadMask);
         if (id < 0) {
           return;
@@ -1389,14 +1600,12 @@ namespace input {
    */
   batch_result_e batch(PSS_TOUCH_PACKET dest, PSS_TOUCH_PACKET src) {
     // Only batch hover or move events
-    if (dest->eventType != LI_TOUCH_EVENT_MOVE &&
-        dest->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
     // Don't batch beyond state changing events
-    if (src->eventType != LI_TOUCH_EVENT_MOVE &&
-        src->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (src->eventType != LI_TOUCH_EVENT_MOVE && src->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1423,8 +1632,7 @@ namespace input {
    */
   batch_result_e batch(PSS_PEN_PACKET dest, PSS_PEN_PACKET src) {
     // Only batch hover or move events
-    if (dest->eventType != LI_TOUCH_EVENT_MOVE &&
-        dest->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1456,8 +1664,7 @@ namespace input {
    */
   batch_result_e batch(PSS_CONTROLLER_TOUCH_PACKET dest, PSS_CONTROLLER_TOUCH_PACKET src) {
     // Only batch hover or move events
-    if (dest->eventType != LI_TOUCH_EVENT_MOVE &&
-        dest->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1468,8 +1675,7 @@ namespace input {
     }
 
     // Don't batch beyond state changing events
-    if (src->eventType != LI_TOUCH_EVENT_MOVE &&
-        src->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (src->eventType != LI_TOUCH_EVENT_MOVE && src->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1557,6 +1763,8 @@ namespace input {
     // 'entry' backs the 'payload' pointer, so they must remain in scope together
     std::vector<uint8_t> entry;
     PNV_INPUT_HEADER payload;
+    std::size_t queue_size_after_batch = 0;
+    std::size_t batched_entries = 0;
 
     // Lock the input queue while batching, but release it before sending
     // the input to the OS. This avoids potentially lengthy lock contention
@@ -1587,18 +1795,27 @@ namespace input {
         } else if (batch_result == batch_result_e::batched) {
           // Erase this entry since it was batched
           i = input->input_queue.erase(i);
+          ++batched_entries;
         } else {
           // We couldn't batch this entry, but try to batch later entries.
           i++;
         }
       }
+
+      queue_size_after_batch = input->input_queue.size();
     }
 
     // Print the final input packet
     input::print((void *) payload);
 
+    auto magic = util::endian::little(payload->magic);
+    note_input_processed(magic, entry.size(), queue_size_after_batch, batched_entries);
+    if (magic == MULTI_CONTROLLER_MAGIC_GEN5) {
+      note_gamepad_packet((PNV_MULTI_CONTROLLER_PACKET) payload, queue_size_after_batch, batched_entries);
+    }
+
     // Send the batched input to the OS
-    switch (util::endian::little(payload->magic)) {
+    switch (magic) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
         passthrough(input, (PNV_REL_MOUSE_MOVE_PACKET) payload);
         break;
@@ -1643,6 +1860,8 @@ namespace input {
       case SS_CONTROLLER_BATTERY_MAGIC:
         passthrough(input, (PSS_CONTROLLER_BATTERY_PACKET) payload);
         break;
+      default:
+        break;
     }
   }
 
@@ -1655,10 +1874,14 @@ namespace input {
     // Update last input time for idle/afk detection
     update_input_time();
 
+    auto input_data_size = input_data.size();
+    std::size_t queue_size = 0;
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
       input->input_queue.push_back(std::move(input_data));
+      queue_size = input->input_queue.size();
     }
+    note_input_queued(input_data_size, queue_size);
     task_pool.push(passthrough_next_message, input);
   }
 

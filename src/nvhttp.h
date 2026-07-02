@@ -218,11 +218,12 @@ namespace nvhttp {
   void erase_all_clients();
 
   /**
-   * @brief Add a trusted client certificate (memory-only, not persisted).
+   * @brief Add a trusted client certificate.
    * @param uuid The unique identifier for the client.
    * @param cert The PEM-encoded X.509 certificate.
+   * @return true if the certificate was parsed and added to the trust chain.
    */
-  void add_trusted_client(std::string uuid, std::string cert);
+  bool add_trusted_client(std::string uuid, std::string cert);
 
   /**
    * @brief Start a stream session directly (bypasses /launch HTTP endpoint).
