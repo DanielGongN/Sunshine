@@ -39,8 +39,7 @@ namespace platf {
 
   struct joypad_state {
     std::unique_ptr<joypads_t> joypad;
-    gamepad_feedback_msg_t last_rumble;
-    gamepad_feedback_msg_t last_rgb_led;
+    gamepad_feedback_state_t feedback_state;
   };
 
   struct input_raw_t {

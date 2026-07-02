@@ -121,6 +121,7 @@ namespace input {
 
   static platf::input_t platf_input;
   std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
+  std::bitset<platf::MAX_GAMEPADS> preinitializedGamepadMask {};
 
   constexpr auto INPUT_STATS_LOG_INTERVAL = std::chrono::seconds(1);
   constexpr auto INPUT_GAMEPAD_LOG_INTERVAL = std::chrono::seconds(1);
@@ -334,16 +335,25 @@ namespace input {
     input_stats.last_gamepad_rsy = rsy;
   }
 
-  void free_gamepad(platf::input_t &platf_input, int id) {
+  bool has_gamepad_index(int id) {
+    return id >= 0 && static_cast<std::size_t>(id) < gamepadMask.size();
+  }
+
+  bool is_preinitialized_gamepad(int id) {
+    return config::sunshine.middleware.gamepad_preinit && has_gamepad_index(id) && preinitializedGamepadMask[id];
+  }
+
+  void free_gamepad(platf::input_t &platf_input, int id, const platf::feedback_queue_t &feedback_queue, bool preinitialized) {
     // Reset gamepad state to neutral
     platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
 
     // Pre-created gamepads are persistent and must not be removed from ViGEm.
-    if (config::sunshine.middleware.gamepad_preinit && id < 2) {
-      return;  // Skip vigem_target_remove() and free_id().
+    if (preinitialized) {
+      platf::free_gamepad(platf_input, id, feedback_queue);
+      return;
     }
 
-    platf::free_gamepad(platf_input, id);
+    platf::free_gamepad(platf_input, id, feedback_queue);
 
     free_id(gamepadMask, id);
   }
@@ -352,14 +362,16 @@ namespace input {
     gamepad_t():
         gamepad_state {},
         back_timeout_id {},
+        feedback_queue {},
         id {-1},
+        preinitialized {},
         back_button_state {button_state_e::NONE} {
     }
 
     ~gamepad_t() {
       if (id >= 0) {
-        task_pool.push([id = this->id]() {
-          free_gamepad(platf_input, id);
+        task_pool.push([id = this->id, feedback_queue = this->feedback_queue, preinitialized = this->preinitialized]() {
+          free_gamepad(platf_input, id, feedback_queue, preinitialized);
         });
       }
     }
@@ -368,7 +380,11 @@ namespace input {
 
     thread_pool_util::ThreadPool::task_id_t back_timeout_id;
 
+    platf::feedback_queue_t feedback_queue;
+
     int id;
+
+    bool preinitialized;
 
     // When emulating the HOME button, we may need to artificially release the back button.
     // Afterwards, the gamepad state on sunshine won't match the state on Moonlight.
@@ -1115,8 +1131,14 @@ namespace input {
     };
 
     // Reuse the pre-created gamepad when the controller number matches a pre-initialized slot.
-    if (config::sunshine.middleware.gamepad_preinit && packet->controllerNumber < 2 && gamepadMask[packet->controllerNumber]) {
+    if (is_preinitialized_gamepad(packet->controllerNumber)) {
+      if (platf::alloc_gamepad(platf_input, {packet->controllerNumber, packet->controllerNumber}, arrival, input->feedback_queue)) {
+        return;
+      }
+
       input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
+      input->gamepads[packet->controllerNumber].feedback_queue = input->feedback_queue;
+      input->gamepads[packet->controllerNumber].preinitialized = true;
       return;  // Pre-created gamepads already have metadata from vigem_t::init().
     }
 
@@ -1132,6 +1154,8 @@ namespace input {
     }
 
     input->gamepads[packet->controllerNumber].id = id;
+    input->gamepads[packet->controllerNumber].feedback_queue = input->feedback_queue;
+    input->gamepads[packet->controllerNumber].preinitialized = false;
   }
 
   /**
@@ -1375,8 +1399,14 @@ namespace input {
     // send a controller arrival instead of this but it's still supported for legacy clients.
     if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
       // Reuse the pre-created gamepad when the controller number matches a pre-initialized slot.
-      if (config::sunshine.middleware.gamepad_preinit && packet->controllerNumber < 2 && gamepadMask[packet->controllerNumber]) {
+      if (is_preinitialized_gamepad(packet->controllerNumber)) {
+        if (platf::alloc_gamepad(platf_input, {packet->controllerNumber, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
+          return;
+        }
+
         input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
+        input->gamepads[packet->controllerNumber].feedback_queue = input->feedback_queue;
+        input->gamepads[packet->controllerNumber].preinitialized = true;
       } else {
         auto id = alloc_id(gamepadMask);
         if (id < 0) {
@@ -1389,10 +1419,14 @@ namespace input {
         }
 
         gamepad.id = id;
+        gamepad.feedback_queue = input->feedback_queue;
+        gamepad.preinitialized = false;
       }
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
-      free_gamepad(platf_input, gamepad.id);
+      free_gamepad(platf_input, gamepad.id, gamepad.feedback_queue, gamepad.preinitialized);
+      gamepad.feedback_queue.reset();
+      gamepad.preinitialized = false;
       gamepad.id = -1;
       return;
     }
@@ -1951,7 +1985,7 @@ namespace input {
 
   void click_gamepad(int gamepad_nr, std::uint32_t button_flag) {
     // Check if the gamepad slot exists before dispatching
-    if (gamepad_nr < 0 || gamepad_nr >= (int) gamepadMask.size() || !gamepadMask[gamepad_nr]) {
+    if (!has_gamepad_index(gamepad_nr) || !gamepadMask[gamepad_nr]) {
       BOOST_LOG(warning) << "click_gamepad: slot "sv << gamepad_nr << " not allocated, dropping button=0x"sv
                          << util::hex(button_flag).to_string_view();
       return;

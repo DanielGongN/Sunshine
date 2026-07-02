@@ -23,6 +23,7 @@ namespace input {
   bool probe_gamepads();
 
   extern std::bitset<platf::MAX_GAMEPADS> gamepadMask;
+  extern std::bitset<platf::MAX_GAMEPADS> preinitializedGamepadMask;
 
   std::shared_ptr<input_t> alloc(safe::mail_t mail);
 

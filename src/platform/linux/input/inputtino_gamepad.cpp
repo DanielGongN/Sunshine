@@ -20,6 +20,10 @@ using namespace std::literals;
 
 namespace platf::gamepad {
 
+  bool has_gamepad_index(const std::vector<std::shared_ptr<joypad_state>> &gamepads, int index) {
+    return index >= 0 && static_cast<std::size_t>(index) < gamepads.size();
+  }
+
   enum GamepadStatus {
     UHID_NOT_AVAILABLE = 0,  ///< UHID is not available
     UINPUT_NOT_AVAILABLE,  ///< UINPUT is not available
@@ -105,16 +109,22 @@ namespace platf::gamepad {
       }
     }
 
+    if (!has_gamepad_index(raw->gamepads, id.globalIndex) || !feedback_queue) {
+      return -1;
+    }
+
     auto gamepad = std::make_shared<joypad_state>(joypad_state {});
     auto on_rumble_fn = [feedback_queue, idx = id.clientRelativeIndex, gamepad](int low_freq, int high_freq) {
       // Don't resend duplicate rumble data
-      if (gamepad->last_rumble.type == platf::gamepad_feedback_e::rumble && gamepad->last_rumble.data.rumble.lowfreq == low_freq && gamepad->last_rumble.data.rumble.highfreq == high_freq) {
+      const auto &last = gamepad->feedback_state.rumble;
+      if (gamepad->feedback_state.has_rumble && last.data.rumble.lowfreq == low_freq && last.data.rumble.highfreq == high_freq) {
         return;
       }
 
       gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(idx, low_freq, high_freq);
       feedback_queue->raise(msg);
-      gamepad->last_rumble = msg;
+      gamepad->feedback_state.rumble = msg;
+      gamepad->feedback_state.has_rumble = true;
     };
 
     switch (selectedGamepadType) {
@@ -151,13 +161,15 @@ namespace platf::gamepad {
             (*ds5).set_on_rumble(on_rumble_fn);
             (*ds5).set_on_led([feedback_queue, idx = id.clientRelativeIndex, gamepad](int r, int g, int b) {
               // Don't resend duplicate LED data
-              if (gamepad->last_rgb_led.type == platf::gamepad_feedback_e::set_rgb_led && gamepad->last_rgb_led.data.rgb_led.r == r && gamepad->last_rgb_led.data.rgb_led.g == g && gamepad->last_rgb_led.data.rgb_led.b == b) {
+              const auto &last = gamepad->feedback_state.rgb_led;
+              if (gamepad->feedback_state.has_rgb_led && last.data.rgb_led.r == r && last.data.rgb_led.g == g && last.data.rgb_led.b == b) {
                 return;
               }
 
               auto msg = gamepad_feedback_msg_t::make_rgb_led(idx, r, g, b);
               feedback_queue->raise(msg);
-              gamepad->last_rgb_led = msg;
+              gamepad->feedback_state.rgb_led = msg;
+              gamepad->feedback_state.has_rgb_led = true;
             });
 
             (*ds5).set_on_trigger_effect([feedback_queue, idx = id.clientRelativeIndex](const inputtino::PS5Joypad::TriggerEffect &trigger_effect) {
@@ -181,12 +193,20 @@ namespace platf::gamepad {
   }
 
   void free(input_raw_t *raw, int nr) {
+    if (!has_gamepad_index(raw->gamepads, nr) || !raw->gamepads[nr]) {
+      return;
+    }
+
     // This will call the destructor which in turn will stop the background threads for rumble and LED (and ultimately remove the joypad device)
     raw->gamepads[nr]->joypad.reset();
     raw->gamepads[nr].reset();
   }
 
   void update(input_raw_t *raw, int nr, const gamepad_state_t &gamepad_state) {
+    if (!has_gamepad_index(raw->gamepads, nr)) {
+      return;
+    }
+
     auto gamepad = raw->gamepads[nr];
     if (!gamepad) {
       return;
@@ -202,6 +222,10 @@ namespace platf::gamepad {
   }
 
   void touch(input_raw_t *raw, const gamepad_touch_t &touch) {
+    if (!has_gamepad_index(raw->gamepads, touch.id.globalIndex)) {
+      return;
+    }
+
     auto gamepad = raw->gamepads[touch.id.globalIndex];
     if (!gamepad) {
       return;
@@ -217,6 +241,10 @@ namespace platf::gamepad {
   }
 
   void motion(input_raw_t *raw, const gamepad_motion_t &motion) {
+    if (!has_gamepad_index(raw->gamepads, motion.id.globalIndex)) {
+      return;
+    }
+
     auto gamepad = raw->gamepads[motion.id.globalIndex];
     if (!gamepad) {
       return;
@@ -235,6 +263,10 @@ namespace platf::gamepad {
   }
 
   void battery(input_raw_t *raw, const gamepad_battery_t &battery) {
+    if (!has_gamepad_index(raw->gamepads, battery.id.globalIndex)) {
+      return;
+    }
+
     auto gamepad = raw->gamepads[battery.id.globalIndex];
     if (!gamepad) {
       return;

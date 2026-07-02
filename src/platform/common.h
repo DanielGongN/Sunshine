@@ -72,6 +72,11 @@ namespace nvenc {
 namespace platf {
   // Limited by bits in activeGamepadMask
   constexpr auto MAX_GAMEPADS = 16;
+#ifdef _WIN32
+  constexpr auto PREINITIALIZED_GAMEPADS = 1;
+#else
+  constexpr auto PREINITIALIZED_GAMEPADS = 0;
+#endif
 
   constexpr std::uint32_t DPAD_UP = 0x0001;
   constexpr std::uint32_t DPAD_DOWN = 0x0002;
@@ -295,6 +300,13 @@ namespace platf {
     std::int16_t lsY;
     std::int16_t rsX;
     std::int16_t rsY;
+  };
+
+  struct gamepad_feedback_state_t {
+    bool has_rumble {};
+    bool has_rgb_led {};
+    gamepad_feedback_msg_t rumble {};
+    gamepad_feedback_msg_t rgb_led {};
   };
 
   struct gamepad_id_t {
@@ -833,7 +845,7 @@ namespace platf {
    * @return 0 on success.
    */
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue);
-  void free_gamepad(input_t &input, int nr);
+  void free_gamepad(input_t &input, int nr, feedback_queue_t feedback_queue = nullptr);
 
   /**
    * @brief Get the supported platform capabilities to advertise to the client.

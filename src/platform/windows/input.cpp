@@ -83,11 +83,15 @@ namespace platf {
     thread_pool_util::ThreadPool::task_id_t repeat_task {};
     std::chrono::steady_clock::time_point last_report_ts;
 
-    gamepad_feedback_msg_t last_rumble;
-    gamepad_feedback_msg_t last_rgb_led;
+    gamepad_feedback_state_t feedback_state;
+    bool preinitialized {};
   };
 
   constexpr auto VIGEM_SLOW_UPDATE_THRESHOLD = std::chrono::milliseconds(8);
+
+  bool has_gamepad_index(const std::vector<gamepad_context_t> &gamepads, int index) {
+    return index >= 0 && static_cast<std::size_t>(index) < gamepads.size();
+  }
 
   void log_vigem_update_result(
     std::string_view type,
@@ -259,7 +263,7 @@ namespace platf {
         }
 
         int slot = 0;
-        for (slot = 0; slot < 2; ++slot) {
+        for (slot = 0; slot < PREINITIALIZED_GAMEPADS; ++slot) {
           auto &gamepad = gamepads[slot];
 
           // Allocate and add target
@@ -312,11 +316,13 @@ namespace platf {
                                << " failed: 0x"sv << util::hex(status).to_string_view();
           }
 
+          gamepad.preinitialized = true;
           input::gamepadMask[slot] = true;
+          input::preinitializedGamepadMask[slot] = true;
           BOOST_LOG(info) << "Preinit gamepad slot="sv << slot << " ready"sv;
         }
 
-        BOOST_LOG(info) << "Preinit: 2 gamepads ready"sv;
+        BOOST_LOG(info) << "Preinit: "sv << PREINITIALIZED_GAMEPADS << " gamepad(s) ready"sv;
         return 0;
 
       preinit_fail:
@@ -326,7 +332,9 @@ namespace platf {
             vigem_target_remove(client.get(), gamepads[j].gp.get());
           }
           gamepads[j].gp.reset();  // safe_ptr calls vigem_target_free
+          gamepads[j].preinitialized = false;
           input::gamepadMask[j] = false;
+          input::preinitializedGamepadMask[j] = false;
         }
         vigem_disconnect(client.get());
         client.reset();  // safe_ptr calls vigem_free
@@ -344,11 +352,22 @@ namespace platf {
      * @return 0 on success.
      */
     int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, VIGEM_TARGET_TYPE gp_type) {
+      if (!has_gamepad_index(gamepads, id.globalIndex)) {
+        return -1;
+      }
+
       auto &gamepad = gamepads[id.globalIndex];
-      assert(!gamepad.gp);
 
       gamepad.client_relative_index = id.clientRelativeIndex;
       gamepad.last_report_ts = std::chrono::steady_clock::now();
+
+      if (gamepad.preinitialized && gamepad.gp) {
+        gamepad.feedback_queue = std::move(feedback_queue);
+        gamepad.feedback_state = {};
+        return 0;
+      }
+
+      assert(!gamepad.gp);
 
       // Establish a connect to the ViGEm driver if we don't have one yet
       if (!client) {
@@ -410,8 +429,20 @@ namespace platf {
      * @brief Detaches the specified gamepad
      * @param nr The gamepad.
      */
-    void free_target(int nr) {
+    void free_target(int nr, const feedback_queue_t &feedback_queue) {
+      if (!has_gamepad_index(gamepads, nr)) {
+        return;
+      }
+
       auto &gamepad = gamepads[nr];
+
+      if (gamepad.preinitialized) {
+        if (!feedback_queue || feedback_queue == gamepad.feedback_queue) {
+          gamepad.feedback_queue.reset();
+          gamepad.feedback_state = {};
+        }
+        return;
+      }
 
       if (gamepad.repeat_task) {
         task_pool.cancel(gamepad.repeat_task);
@@ -426,6 +457,9 @@ namespace platf {
       }
 
       gamepad.gp.reset();
+      gamepad.feedback_queue.reset();
+      gamepad.feedback_state = {};
+      gamepad.preinitialized = false;
 
       // Disconnect from ViGEm if we just removed the last gamepad
       bool disconnect = true;
@@ -457,8 +491,13 @@ namespace platf {
           uint16_t normalizedLargeMotor = largeMotor << 8;
           uint16_t normalizedSmallMotor = smallMotor << 8;
 
+          if (!gamepad.feedback_queue) {
+            return;
+          }
+
+          auto &last = gamepad.feedback_state.rumble;
           // Don't resend duplicate rumble data
-          if (normalizedSmallMotor != gamepad.last_rumble.data.rumble.highfreq || normalizedLargeMotor != gamepad.last_rumble.data.rumble.lowfreq) {
+          if (!gamepad.feedback_state.has_rumble || normalizedSmallMotor != last.data.rumble.highfreq || normalizedLargeMotor != last.data.rumble.lowfreq) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(
               gamepad.client_relative_index,
@@ -466,7 +505,8 @@ namespace platf {
               normalizedSmallMotor
             );
             gamepad.feedback_queue->raise(msg);
-            gamepad.last_rumble = msg;
+            gamepad.feedback_state.rumble = msg;
+            gamepad.feedback_state.has_rumble = true;
           }
           return;
         }
@@ -485,12 +525,18 @@ namespace platf {
         auto &gamepad = gamepads[x];
 
         if (gamepad.gp.get() == target) {
+          if (!gamepad.feedback_queue) {
+            return;
+          }
+
+          auto &last = gamepad.feedback_state.rgb_led;
           // Don't resend duplicate RGB data
-          if (r != gamepad.last_rgb_led.data.rgb_led.r || g != gamepad.last_rgb_led.data.rgb_led.g || b != gamepad.last_rgb_led.data.rgb_led.b) {
+          if (!gamepad.feedback_state.has_rgb_led || r != last.data.rgb_led.r || g != last.data.rgb_led.g || b != last.data.rgb_led.b) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
             gamepad.feedback_queue->raise(msg);
-            gamepad.last_rgb_led = msg;
+            gamepad.feedback_state.rgb_led = msg;
+            gamepad.feedback_state.has_rgb_led = true;
           }
           return;
         }
@@ -1337,14 +1383,14 @@ namespace platf {
     return raw->vigem->alloc_gamepad_internal(id, feedback_queue, selectedGamepadType);
   }
 
-  void free_gamepad(input_t &input, int nr) {
+  void free_gamepad(input_t &input, int nr, feedback_queue_t feedback_queue) {
     auto raw = (input_raw_t *) input.get();
 
-    if (!raw->vigem) {
+    if (!raw->vigem || !has_gamepad_index(raw->vigem->gamepads, nr)) {
       return;
     }
 
-    raw->vigem->free_target(nr);
+    raw->vigem->free_target(nr, feedback_queue);
   }
 
   /**
@@ -1563,6 +1609,10 @@ namespace platf {
    * @param nr The global gamepad index.
    */
   void ds4_update_ts_and_send(vigem_t *vigem, int nr) {
+    if (!vigem || !has_gamepad_index(vigem->gamepads, nr)) {
+      return;
+    }
+
     auto &gamepad = vigem->gamepads[nr];
 
     // Cancel any pending updates. We will requeue one here when we're finished.
@@ -1616,6 +1666,10 @@ namespace platf {
       return;
     }
 
+    if (!has_gamepad_index(vigem->gamepads, nr)) {
+      return;
+    }
+
     auto &gamepad = vigem->gamepads[nr];
     if (!gamepad.gp) {
       return;
@@ -1642,6 +1696,10 @@ namespace platf {
 
     // If there is no gamepad support
     if (!vigem) {
+      return;
+    }
+
+    if (!has_gamepad_index(vigem->gamepads, touch.id.globalIndex)) {
       return;
     }
 
@@ -1751,6 +1809,10 @@ namespace platf {
       return;
     }
 
+    if (!has_gamepad_index(vigem->gamepads, motion.id.globalIndex)) {
+      return;
+    }
+
     auto &gamepad = vigem->gamepads[motion.id.globalIndex];
     if (!gamepad.gp) {
       return;
@@ -1775,6 +1837,10 @@ namespace platf {
 
     // If there is no gamepad support
     if (!vigem) {
+      return;
+    }
+
+    if (!has_gamepad_index(vigem->gamepads, battery.id.globalIndex)) {
       return;
     }
 

@@ -84,7 +84,7 @@ namespace platf {
     return platf::gamepad::alloc(raw, id, metadata, feedback_queue);
   }
 
-  void free_gamepad(input_t &input, int nr) {
+  void free_gamepad(input_t &input, int nr, feedback_queue_t) {
     auto raw = (input_raw_t *) input.get();
     platf::gamepad::free(raw, nr);
   }

@@ -86,7 +86,7 @@ namespace stream {
   constexpr auto CONTROL_SERVICE_DRAIN_TIMEOUT = std::chrono::milliseconds::zero();
   constexpr auto CONTROL_STATS_LOG_INTERVAL = std::chrono::seconds(1);
   constexpr int CONTROL_MAX_EVENTS_PER_ITERATION = 256;
-  constexpr int CONTROL_MAX_FEEDBACK_DROP_PER_SESSION = 64;
+  constexpr int CONTROL_MAX_FEEDBACK_PER_SESSION = 64;
   constexpr int CONTROL_MAX_HDR_PER_SESSION = 2;
   constexpr std::uint64_t PING_DIAG_SAMPLE_LIMIT = 32;
   constexpr std::uint64_t PING_DIAG_SAMPLE_INTERVAL = 1000;
@@ -1305,8 +1305,15 @@ namespace stream {
 
           if (session->control.peer) {
             auto &feedback_queue = session->control.feedback_queue;
-            for (int feedback_dropped = 0; feedback_dropped < CONTROL_MAX_FEEDBACK_DROP_PER_SESSION && feedback_queue->peek(); ++feedback_dropped) {
-              feedback_queue->pop();
+            for (int feedback_sent = 0; session->control.peer && feedback_sent < CONTROL_MAX_FEEDBACK_PER_SESSION; ++feedback_sent) {
+              auto feedback_msg = feedback_queue->pop(CONTROL_SERVICE_DRAIN_TIMEOUT);
+              if (!feedback_msg) {
+                break;
+              }
+
+              if (send_feedback_msg(session, *feedback_msg)) {
+                break;
+              }
             }
 
             auto &hdr_queue = session->control.hdr_queue;
