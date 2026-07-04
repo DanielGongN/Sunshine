@@ -49,4 +49,9 @@ namespace gateway {
    */
   std::uint16_t get_client_port(std::uint8_t stream_id);
 
+  /**
+   * @brief Clear recorded UDP client endpoints so queued client-bound packets are dropped.
+   */
+  void clear_udp_clients();
+
 }  // namespace gateway

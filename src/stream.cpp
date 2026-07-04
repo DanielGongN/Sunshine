@@ -88,6 +88,7 @@ namespace stream {
   constexpr int CONTROL_MAX_EVENTS_PER_ITERATION = 256;
   constexpr int CONTROL_MAX_FEEDBACK_PER_SESSION = 64;
   constexpr int CONTROL_MAX_HDR_PER_SESSION = 2;
+  constexpr std::uint32_t CONTROL_TERMINATION_GRACEFUL = 0x80030023;
   constexpr std::uint64_t PING_DIAG_SAMPLE_LIMIT = 32;
   constexpr std::uint64_t PING_DIAG_SAMPLE_INTERVAL = 1000;
 
@@ -474,6 +475,7 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      bool termination_sent {};
     } control;
 
     std::uint32_t launch_session_id;
@@ -484,6 +486,10 @@ namespace stream {
 
     std::atomic<session::state_e> state;
   };
+
+  bool can_send_av_packet(session_t *session, const udp::endpoint &peer) {
+    return session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && peer.port() != 0;
+  }
 
   /**
    * First part of cipher must be struct of type control_encrypted_t
@@ -688,10 +694,12 @@ namespace stream {
             last_type = type;
             last_payload_len = payload.size();
             if (type == packetTypes[IDX_INPUT_DATA]) {
+              input::update_input_time();
               ++input_events;
             } else if (type == packetTypes[IDX_ENCRYPTED]) {
               ++encrypted_events;
             } else if (type == packetTypes[IDX_PERIODIC_PING]) {
+              input::update_input_time();
               ++ping_events;
             } else if (type == packetTypes[IDX_LOSS_STATS]) {
               ++loss_events;
@@ -1030,6 +1038,36 @@ namespace stream {
     return 0;
   }
 
+  int send_termination_msg(session_t *session, std::uint32_t reason, std::string_view reason_name) {
+    if (session->control.termination_sent) {
+      return 0;
+    }
+
+    if (!session->control.peer) {
+      BOOST_LOG(warning) << "Couldn't send termination code, control peer is not connected, reason="sv << reason_name;
+      return -1;
+    }
+
+    control_terminate_t plaintext;
+    plaintext.header.type = packetTypes[IDX_TERMINATION];
+    plaintext.header.payloadLength = sizeof(plaintext.ec);
+    plaintext.ec = util::endian::big<std::uint32_t>(reason);
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+      BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << "], reason="sv << reason_name;
+      return -1;
+    }
+    session->control.termination_sent = true;
+
+    BOOST_LOG(info) << "[control][termination] sent reason="sv << reason_name << " code=0x"sv << util::hex(reason).to_string_view();
+    return 0;
+  }
+
   int send_hdr_mode(session_t *session, video::hdr_info_t hdr_info) {
     if (!session->control.peer) {
       BOOST_LOG(warning) << "Couldn't send HDR mode, still waiting for PING from Moonlight"sv;
@@ -1061,6 +1099,7 @@ namespace stream {
 
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
+      input::update_input_time();
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
     });
 
@@ -1198,6 +1237,7 @@ namespace stream {
 
       // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
       if (type == packetTypes[IDX_INPUT_DATA]) {
+        input::update_input_time();
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + 4);
         input::passthrough(session->input, std::move(plaintext));
       } else {
@@ -1241,6 +1281,7 @@ namespace stream {
             for (auto pos2 = std::begin(*server->_sessions); pos2 != std::end(*server->_sessions); ++pos2) {
               auto s = *pos2;
               if (s->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
+                send_termination_msg(s, CONTROL_TERMINATION_GRACEFUL, "force_disconnect_from_upstream"sv);
                 session::stop(*s);
               }
             }
@@ -1248,8 +1289,8 @@ namespace stream {
 
           auto session = *pos;
 
-          // Idle/AFK detection: check if user has been inactive too long
-          if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
+          // Idle/AFK detection starts after the control channel is connected.
+          if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && session->control.peer) {
             auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(
                               now - input::get_last_input_time()
             )
@@ -1262,6 +1303,7 @@ namespace stream {
               msg["data"]["event"] = "disconnected";
               msg["data"]["message"] = u8"长时间挂机，断开连接";
               middleware::send_to_upstream(msg);
+              send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "force_idle_timeout"sv);
               session::stop(*session);
             } else {
               auto standby_timeout = config::sunshine.middleware.standby_disconnected_timeout;
@@ -1271,6 +1313,7 @@ namespace stream {
                 msg["data"]["event"] = "disconnected";
                 msg["data"]["message"] = u8"长时间无操作，断开连接";
                 middleware::send_to_upstream(msg);
+                send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "standby_idle_timeout"sv);
                 session::stop(*session);
               }
             }
@@ -1288,6 +1331,10 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+            if (session->control.peer) {
+              send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "session_stopping"sv);
+            }
+            server->flush();
             pos = server->_sessions->erase(pos);
 
             if (session->control.peer) {
@@ -1334,7 +1381,7 @@ namespace stream {
 
     // Let all remaining connections know the server is shutting down
     // reason: graceful termination
-    std::uint32_t reason = 0x80030023;
+    std::uint32_t reason = CONTROL_TERMINATION_GRACEFUL;
 
     control_terminate_t plaintext;
     plaintext.header.type = packetTypes[IDX_TERMINATION];
@@ -1540,9 +1587,15 @@ namespace stream {
         break;
       }
 
+      auto session = (session_t *) packet->channel_data;
+      if (!can_send_av_packet(session, session->video.peer)) {
+        BOOST_LOG(debug) << "[stream][video-drop] reason=no_active_client state="sv << static_cast<int>(session->state.load(std::memory_order_acquire))
+                         << " peer="sv << udp_endpoint_to_string(session->video.peer);
+        continue;
+      }
+
       frame_network_latency_logger.first_point_now();
 
-      auto session = (session_t *) packet->channel_data;
       auto lowseq = session->video.lowseq;
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
@@ -1863,6 +1916,11 @@ namespace stream {
 
       TUPLE_2D_REF(channel_data, packet_data, *packet);
       auto session = (session_t *) channel_data;
+      if (!can_send_av_packet(session, session->audio.peer)) {
+        BOOST_LOG(debug) << "[stream][audio-drop] reason=no_active_client state="sv << static_cast<int>(session->state.load(std::memory_order_acquire))
+                         << " peer="sv << udp_endpoint_to_string(session->audio.peer);
+        continue;
+      }
 
       auto sequenceNumber = session->audio.sequenceNumber;
       auto timestamp = session->audio.timestamp;
@@ -2233,6 +2291,7 @@ namespace stream {
 
       // If this is the last session, invoke the platform callbacks
       if (--running_sessions == 0) {
+        gateway::clear_udp_clients();
         middleware::notify_client_state(false);
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
         if (proc::proc.running()) {
@@ -2282,6 +2341,7 @@ namespace stream {
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
+      input::update_input_time();
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
 
       // If this is the first session, invoke the platform callbacks

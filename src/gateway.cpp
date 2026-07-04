@@ -54,6 +54,7 @@ namespace gateway {
     std::uint8_t stream_id;
     udp::endpoint endpoint;
     std::shared_ptr<std::vector<std::uint8_t>> data;
+    std::uint64_t client_generation;
   };
 
   struct udp_raw_packet_t {
@@ -79,14 +80,20 @@ namespace gateway {
     }
   }
 
+  class gateway_t;
+
   static std::string g_client_ip;
   static std::map<std::uint8_t, std::uint16_t> g_client_ports;
+  static gateway_t *g_gateway_impl {};
+  static std::mutex g_client_mutex;
 
   std::string get_client_ip() {
+    std::lock_guard lock {g_client_mutex};
     return g_client_ip;
   }
 
   std::uint16_t get_client_port(std::uint8_t stream_id) {
+    std::lock_guard lock {g_client_mutex};
     auto it = g_client_ports.find(stream_id);
     return it != g_client_ports.end() ? it->second : 0;
   }
@@ -136,6 +143,12 @@ namespace gateway {
         stopping {false} {}
 
     ~gateway_t() {
+      {
+        std::lock_guard lock {g_client_mutex};
+        if (g_gateway_impl == this) {
+          g_gateway_impl = nullptr;
+        }
+      }
       stopping.store(true);
       boost::system::error_code ec;
       acceptor.close(ec);
@@ -165,6 +178,27 @@ namespace gateway {
       });
     }
 
+    void clear_udp_clients() {
+      std::size_t client_count {};
+      {
+        std::lock_guard lock {udp_mutex};
+        client_count = udp_clients.size();
+        udp_clients.clear();
+        ++udp_client_generation;
+      }
+
+      {
+        std::lock_guard lock {g_client_mutex};
+        g_client_ip.clear();
+        g_client_ports.clear();
+      }
+
+      BOOST_LOG(info) << "[gateway][udp-clear] clients="sv << client_count;
+      asio::post(ioc, [this]() {
+        schedule_udp_client_sends();
+      });
+    }
+
   private:
     void start_listeners();
     void do_accept();
@@ -187,11 +221,13 @@ namespace gateway {
     void do_https_i2c_read(socket_ptr client, socket_ptr internal);
 
     void start_udp_forwarder(std::uint16_t target_port, std::uint8_t stream_id);
-    void enqueue_control_client_send(const udp::endpoint &client_ep, const char *payload, std::size_t payload_len);
+    void enqueue_control_client_send(const udp::endpoint &client_ep, std::uint64_t client_generation, const char *payload, std::size_t payload_len);
     void enqueue_control_internal_send(const std::shared_ptr<udp::socket> &socket, const udp::endpoint &internal_ep, const char *payload, std::size_t payload_len);
-    void enqueue_udp_send(std::uint8_t stream_id, const udp::endpoint &client_ep, const char *payload, std::size_t payload_len);
+    void enqueue_udp_send(std::uint8_t stream_id, const udp::endpoint &client_ep, std::uint64_t client_generation, const char *payload, std::size_t payload_len);
     void record_udp_client(std::uint8_t stream_id, const udp::endpoint &client_ep);
-    bool get_udp_client(std::uint8_t stream_id, udp::endpoint &client_ep);
+    bool get_udp_client(std::uint8_t stream_id, udp::endpoint &client_ep, std::uint64_t &client_generation);
+    bool is_current_udp_client(const udp_queued_packet_t &packet);
+    void log_stale_udp_client_drop(const udp_queued_packet_t &packet);
     void mark_control_activity();
     void log_udp_stats();
     bool has_pending_control_out() const;
@@ -211,6 +247,7 @@ namespace gateway {
     std::atomic<bool> stopping;
 
     std::map<std::uint8_t, udp::endpoint> udp_clients;
+    std::uint64_t udp_client_generation {};
     std::mutex udp_mutex;
 
     std::map<std::uint8_t, std::shared_ptr<udp::socket>> udp_internal_sockets;
@@ -297,12 +334,14 @@ namespace gateway {
         return;
       }
 
+#if 0
       BOOST_LOG(info) << "[gateway][udp-idle] public="sv << udp_endpoint_to_string(udp_public_endpoint)
                       << " clients(video/control/audio)="sv << get_client_port(STREAM_VIDEO) << '/' << get_client_port(STREAM_CONTROL) << '/' << get_client_port(STREAM_AUDIO)
                       << " in(video/control/audio/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
                       << udp_invalid_in_packets
                       << " out(control/audio/video)="sv << udp_control_out_packets << '/' << udp_audio_out_packets << '/' << udp_video_out_packets
                       << " bytes_in(video/control/audio)="sv << udp_video_in_bytes << '/' << udp_control_in_bytes << '/' << udp_audio_in_bytes;
+#endif
 
       schedule_udp_stats_timer();
     });
@@ -313,8 +352,11 @@ namespace gateway {
     auto remote_ep = client_ptr->remote_endpoint();
 
     auto client_ip_str = remote_ep.address().to_string();
-    if (client_ip_str != "127.0.0.1" && g_client_ip.empty()) {
-      g_client_ip = client_ip_str;
+    {
+      std::lock_guard lock {g_client_mutex};
+      if (client_ip_str != "127.0.0.1" && g_client_ip.empty()) {
+        g_client_ip = client_ip_str;
+      }
     }
     BOOST_LOG(info) << "[gateway] new TCP connection from "sv << client_ip_str << ':' << remote_ep.port();
 
@@ -615,17 +657,24 @@ namespace gateway {
   void gateway_t::record_udp_client(std::uint8_t stream_id, const udp::endpoint &client_ep) {
     {
       std::lock_guard lock {udp_mutex};
+      auto it = udp_clients.find(stream_id);
+      if (it != udp_clients.end() && it->second != client_ep) {
+        ++udp_client_generation;
+      }
       udp_clients[stream_id] = client_ep;
     }
 
-    g_client_ports[stream_id] = client_ep.port();
     auto client_ip = client_ep.address().to_string();
-    if (!client_ep.address().is_loopback() && g_client_ip.empty()) {
-      g_client_ip = client_ip;
+    {
+      std::lock_guard lock {g_client_mutex};
+      g_client_ports[stream_id] = client_ep.port();
+      if (!client_ep.address().is_loopback() && g_client_ip.empty()) {
+        g_client_ip = client_ip;
+      }
     }
   }
 
-  bool gateway_t::get_udp_client(std::uint8_t stream_id, udp::endpoint &client_ep) {
+  bool gateway_t::get_udp_client(std::uint8_t stream_id, udp::endpoint &client_ep, std::uint64_t &client_generation) {
     std::lock_guard lock {udp_mutex};
     auto it = udp_clients.find(stream_id);
     if (it == udp_clients.end()) {
@@ -633,10 +682,24 @@ namespace gateway {
     }
 
     client_ep = it->second;
+    client_generation = udp_client_generation;
     return true;
   }
 
-  void gateway_t::enqueue_control_client_send(const udp::endpoint &client_ep, const char *payload, std::size_t payload_len) {
+  bool gateway_t::is_current_udp_client(const udp_queued_packet_t &packet) {
+    std::lock_guard lock {udp_mutex};
+    auto it = udp_clients.find(packet.stream_id);
+    return it != udp_clients.end() && it->second == packet.endpoint && packet.client_generation == udp_client_generation;
+  }
+
+  void gateway_t::log_stale_udp_client_drop(const udp_queued_packet_t &packet) {
+    BOOST_LOG(debug) << "[gateway][udp-out-drop] stream="sv << udp_stream_name(packet.stream_id)
+                     << " reason=stale_client len="sv << packet.data->size()
+                     << " to="sv << udp_endpoint_to_string(packet.endpoint)
+                     << " generation="sv << packet.client_generation;
+  }
+
+  void gateway_t::enqueue_control_client_send(const udp::endpoint &client_ep, std::uint64_t client_generation, const char *payload, std::size_t payload_len) {
     if (payload_len == 0 || payload_len > 0xFFFF) {
       return;
     }
@@ -651,7 +714,7 @@ namespace gateway {
     mark_control_activity();
     ++udp_control_out_packets;
     udp_control_out_bytes += payload_len;
-    udp_control_out_queue.emplace_back(udp_queued_packet_t {STREAM_CONTROL, client_ep, std::move(data)});
+    udp_control_out_queue.emplace_back(udp_queued_packet_t {STREAM_CONTROL, client_ep, std::move(data), client_generation});
     udp_control_out_peak = std::max(udp_control_out_peak, udp_control_out_queue.size());
     log_udp_stats();
     if (udp_control_out_queue.size() == UDP_CONTROL_WARN_QUEUE_PACKETS) {
@@ -678,13 +741,13 @@ namespace gateway {
     send_next_control_internal_packet();
   }
 
-  void gateway_t::enqueue_udp_send(std::uint8_t stream_id, const udp::endpoint &client_ep, const char *payload, std::size_t payload_len) {
+  void gateway_t::enqueue_udp_send(std::uint8_t stream_id, const udp::endpoint &client_ep, std::uint64_t client_generation, const char *payload, std::size_t payload_len) {
     if (payload_len == 0 || payload_len > 0xFFFF) {
       return;
     }
 
     if (stream_id == STREAM_CONTROL) {
-      enqueue_control_client_send(client_ep, payload, payload_len);
+      enqueue_control_client_send(client_ep, client_generation, payload, payload_len);
       return;
     }
 
@@ -695,7 +758,7 @@ namespace gateway {
     data->push_back(static_cast<std::uint8_t>(payload_len & 0xFF));
     data->insert(data->end(), payload, payload + payload_len);
 
-    udp_queued_packet_t packet {stream_id, client_ep, std::move(data)};
+    udp_queued_packet_t packet {stream_id, client_ep, std::move(data), client_generation};
 
     switch (stream_id) {
       case STREAM_AUDIO:
@@ -734,9 +797,10 @@ namespace gateway {
     }
     udp_last_stats_log = now;
 
-    auto control_idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - udp_last_control_activity).count();
     udp_audio_out_peak = std::max(udp_audio_out_peak, udp_audio_out_queue.size());
     udp_video_out_peak = std::max(udp_video_out_peak, udp_video_out_queue.size());
+#if 0
+    auto control_idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - udp_last_control_activity).count();
     BOOST_LOG(info) << "[gateway][udp-stats] in(video/control/audio/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
                     << udp_invalid_in_packets
                     << " out(control/audio/video)="sv << udp_control_out_packets << '/' << udp_audio_out_packets << '/' << udp_video_out_packets
@@ -749,6 +813,7 @@ namespace gateway {
                     << " bytes_out(control/audio/video)="sv << udp_control_out_bytes << '/' << udp_audio_out_payload_bytes << '/' << udp_video_out_payload_bytes
                     << " active(ctrl/audio/video)="sv << udp_control_out_send_active << '/' << udp_audio_out_send_active << '/' << udp_video_out_send_active
                     << " control_idle_ms="sv << control_idle_ms;
+#endif
   }
 
   void gateway_t::mark_control_activity() {
@@ -774,21 +839,25 @@ namespace gateway {
       return;
     }
 
-    if (udp_control_out_queue.empty()) {
+    while (!udp_control_out_queue.empty()) {
+      auto packet = std::move(udp_control_out_queue.front());
+      udp_control_out_queue.pop_front();
+      if (!is_current_udp_client(packet)) {
+        log_stale_udp_client_drop(packet);
+        continue;
+      }
+
+      udp_control_out_send_active = true;
+      udp_socket.async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet](boost::system::error_code ec, std::size_t) mutable {
+        udp_control_out_send_active = false;
+        if (ec && !stopping.load()) {
+          log_udp_stats();
+          BOOST_LOG(warning) << "[gateway] control UDP client send failed: "sv << ec.message();
+        }
+        schedule_udp_client_sends();
+      });
       return;
     }
-
-    auto packet = std::move(udp_control_out_queue.front());
-    udp_control_out_queue.pop_front();
-    udp_control_out_send_active = true;
-    udp_socket.async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet](boost::system::error_code ec, std::size_t) mutable {
-      udp_control_out_send_active = false;
-      if (ec && !stopping.load()) {
-        log_udp_stats();
-        BOOST_LOG(warning) << "[gateway] control UDP client send failed: "sv << ec.message();
-      }
-      schedule_udp_client_sends();
-    });
   }
 
   void gateway_t::send_next_audio_packet() {
@@ -801,22 +870,26 @@ namespace gateway {
       return;
     }
 
-    if (udp_audio_out_queue.empty()) {
+    while (!udp_audio_out_queue.empty()) {
+      auto packet = std::move(udp_audio_out_queue.front());
+      udp_audio_out_bytes -= packet.data->size();
+      udp_audio_out_queue.pop_front();
+      if (!is_current_udp_client(packet)) {
+        log_stale_udp_client_drop(packet);
+        continue;
+      }
+
+      udp_audio_out_send_active = true;
+      udp_socket.async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet](boost::system::error_code ec, std::size_t) mutable {
+        udp_audio_out_send_active = false;
+        if (ec && !stopping.load()) {
+          log_udp_stats();
+          BOOST_LOG(warning) << "[gateway] audio UDP client send failed: "sv << ec.message();
+        }
+        schedule_udp_client_sends();
+      });
       return;
     }
-
-    auto packet = std::move(udp_audio_out_queue.front());
-    udp_audio_out_bytes -= packet.data->size();
-    udp_audio_out_queue.pop_front();
-    udp_audio_out_send_active = true;
-    udp_socket.async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet](boost::system::error_code ec, std::size_t) mutable {
-      udp_audio_out_send_active = false;
-      if (ec && !stopping.load()) {
-        log_udp_stats();
-        BOOST_LOG(warning) << "[gateway] audio UDP client send failed: "sv << ec.message();
-      }
-      schedule_udp_client_sends();
-    });
   }
 
   void gateway_t::send_next_video_packet() {
@@ -834,22 +907,26 @@ namespace gateway {
       return;
     }
 
-    if (udp_video_out_queue.empty()) {
+    while (!udp_video_out_queue.empty()) {
+      auto packet = std::move(udp_video_out_queue.front());
+      udp_video_out_bytes -= packet.data->size();
+      udp_video_out_queue.pop_front();
+      if (!is_current_udp_client(packet)) {
+        log_stale_udp_client_drop(packet);
+        continue;
+      }
+
+      udp_video_out_send_active = true;
+      udp_socket.async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet](boost::system::error_code ec, std::size_t) mutable {
+        udp_video_out_send_active = false;
+        if (ec && !stopping.load()) {
+          log_udp_stats();
+          BOOST_LOG(warning) << "[gateway] video UDP client send failed: "sv << ec.message();
+        }
+        schedule_udp_client_sends();
+      });
       return;
     }
-
-    auto packet = std::move(udp_video_out_queue.front());
-    udp_video_out_bytes -= packet.data->size();
-    udp_video_out_queue.pop_front();
-    udp_video_out_send_active = true;
-    udp_socket.async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet](boost::system::error_code ec, std::size_t) mutable {
-      udp_video_out_send_active = false;
-      if (ec && !stopping.load()) {
-        log_udp_stats();
-        BOOST_LOG(warning) << "[gateway] video UDP client send failed: "sv << ec.message();
-      }
-      schedule_udp_client_sends();
-    });
   }
 
   void gateway_t::send_next_control_internal_packet() {
@@ -911,7 +988,8 @@ namespace gateway {
           }
 
           udp::endpoint client_ep;
-          if (!get_udp_client(STREAM_CONTROL, client_ep)) {
+          std::uint64_t client_generation {};
+          if (!get_udp_client(STREAM_CONTROL, client_ep, client_generation)) {
             BOOST_LOG(info) << "[gateway][udp-out-drop] stream=control reason=no_client len="sv << n;
             (*do_read)();
             return;
@@ -922,7 +1000,7 @@ namespace gateway {
                             << " to="sv << udp_endpoint_to_string(client_ep)
                             << " from_internal="sv << udp_endpoint_to_string(sock->local_endpoint());
           }
-          enqueue_control_client_send(client_ep, buf->data(), n);
+          enqueue_control_client_send(client_ep, client_generation, buf->data(), n);
           (*do_read)();
         });
       };
@@ -960,7 +1038,8 @@ namespace gateway {
         }
 
         udp::endpoint client_ep;
-        if (!get_udp_client(stream_id, client_ep)) {
+        std::uint64_t client_generation {};
+        if (!get_udp_client(stream_id, client_ep, client_generation)) {
           BOOST_LOG(info) << "[gateway][udp-out-drop] stream="sv << udp_stream_name(stream_id)
                           << " reason=no_client len="sv << n;
           (*do_read)();
@@ -974,7 +1053,7 @@ namespace gateway {
                           << " to="sv << udp_endpoint_to_string(client_ep)
                           << " from_internal="sv << udp_endpoint_to_string(out_sock->local_endpoint());
         }
-        enqueue_udp_send(stream_id, client_ep, out_buf->data(), n);
+        enqueue_udp_send(stream_id, client_ep, client_generation, out_buf->data(), n);
         (*do_read)();
       });
     };
@@ -1135,8 +1214,24 @@ namespace gateway {
     std::unique_ptr<gateway_t> impl;
   };
 
+  void clear_udp_clients() {
+    gateway_t *impl {};
+    {
+      std::lock_guard lock {g_client_mutex};
+      impl = g_gateway_impl;
+    }
+
+    if (impl) {
+      impl->clear_udp_clients();
+    }
+  }
+
   [[nodiscard]] std::unique_ptr<platf::deinit_t> start() {
     auto impl = std::make_unique<gateway_t>();
+    {
+      std::lock_guard lock {g_client_mutex};
+      g_gateway_impl = impl.get();
+    }
     impl->run();
     return std::make_unique<deinit_t>(std::move(impl));
   }
