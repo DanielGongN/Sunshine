@@ -2343,6 +2343,7 @@ namespace stream {
 
       input::update_input_time();
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+      middleware::notify_client_connected();
 
       // If this is the first session, invoke the platform callbacks
       if (++running_sessions == 1) {

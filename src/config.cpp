@@ -31,6 +31,7 @@
 
 #ifdef _WIN32
   #include <shellapi.h>
+  #include <shlobj.h>
 #endif
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
@@ -47,6 +48,19 @@ const std::string CERTIFICATE_FILE = std::string(CA_DIR) + "/cacert.pem";
 const std::string APPS_JSON_PATH = platf::appdata().string() + "/apps.json";
 
 namespace config {
+
+  fs::path default_log_file() {
+#ifdef _WIN32
+    PWSTR local_appdata {};
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &local_appdata))) {
+      fs::path log_file {local_appdata};
+      CoTaskMemFree(local_appdata);
+      return log_file / L"WuSuan"sv / L"logs"sv / L"engine.log"sv;
+    }
+#endif
+
+    return platf::appdata() / "engine.log"sv;
+  }
 
   namespace nv {
 
@@ -598,7 +612,7 @@ namespace config {
     41200,  // Base port number (HTTPS entry point)
     "ipv4",  // Address family
     {},  // Bind address
-    platf::appdata().string() + "/engine.log",  // log file
+    default_log_file().string(),  // log file
     false,  // notify_pre_releases
     false,  // system_tray
     {},  // prep commands

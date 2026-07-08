@@ -57,6 +57,13 @@ namespace middleware {
     }
   }
 
+  void notify_client_connected() {
+    json msg;
+    msg["event"] = "connected";
+    msg["type"] = 1;
+    send_to_upstream(std::move(msg));
+  }
+
   // Events to subscribe to
   constexpr const char *SUBSCRIBED_EVENTS[] = {
     "force_disconnected_time",
@@ -292,14 +299,14 @@ namespace middleware {
       msg["event"] = "stream_engine_info";
       json data;
       data["cert"] = cert;
-      // 网关对外单端口（处理 0x01/0x16 协议分流）
+      // Gateway external single port (handles 0x01/0x16 protocol split).
       data["gateway"] = {
         {"port", gateway_port},
         {"protocol", "steam_gateway_v1"}
       };
-      // 内部 HTTPS 端口（仅作参考，外部不应直连）
+      // Internal HTTPS port, for reference only; external clients should not connect directly.
       data["internal_https_port"] = internal_https_port;
-      data["port"] = gateway_port;  // 保持向后兼容：默认端口改为 gateway 端口
+      data["port"] = gateway_port;  // Backward compatibility: the default port is now the gateway port.
 
       BOOST_LOG(info) << "[stream_engine_info] gateway端口="sv << gateway_port
                       << " 内部HTTPS端口="sv << internal_https_port;
@@ -336,7 +343,7 @@ namespace middleware {
 
         if (ec) {
           BOOST_LOG(warning) << "Middleware read error: "sv << ec.message();
-          // Connection broken — schedule reconnect
+          // Connection broken; schedule reconnect.
           schedule_reconnect();
           return;
         }
@@ -399,7 +406,7 @@ namespace middleware {
       // Subscribe to events
       subscribe_all_events();
 
-      // Wait for nvhttp HTTPS server to be ready before sending stream_engine_info
+      // Wait for nvhttp HTTPS server to be ready before sending stream_engine_info.
       auto nvhttp_ready = mail::man->event<bool>(mail::nvhttp_ready);
       if (!nvhttp_ready->peek()) {
         BOOST_LOG(info) << "Waiting for nvhttp server to be ready..."sv;
@@ -426,17 +433,18 @@ namespace middleware {
       msg["event"] = "client_heartbeat";
       msg["message_id"] = make_timestamp();
       msg["data"] = {
-        {"net_connected", g_active_sessions.load(std::memory_order_acquire) > 0}
+        {"net_connected", g_active_sessions.load(std::memory_order_acquire) > 0},
+        {"type", 1}  // 1 = sunshine client
       };
 
-      // 直接发送 —— 心跳是客户端自发消息，不需要走 send_to_upstream 信封包装
+      // Heartbeats are sent directly and do not use the send_to_upstream envelope.
       std::string payload = msg.dump();
       g_outgoing_queue.raise(std::move(payload));
       boost::asio::post(ioc, [this]() {
         drain_outgoing();
       });
 
-      // 调度下一次心跳
+      // Schedule the next heartbeat.
       heartbeat_timer.expires_after(HEARTBEAT_INTERVAL);
       heartbeat_timer.async_wait([this](const auto &ec) {
         send_heartbeat(ec);
@@ -505,15 +513,15 @@ namespace middleware {
   }
 
   void send_to_upstream(nlohmann::json inner_msg) {
-    // 记录内部事件类型，便于追踪
+    // Log the internal event type for tracing.
     std::string inner_event = inner_msg.value("event", "unknown");
     BOOST_LOG(info) << "send_to_upstream: event="sv << inner_event;
     if (!g_ioc || !g_ws) {
-      BOOST_LOG(debug) << "send_to_upstream: 中间件未连接，丢弃消息"sv;
+      BOOST_LOG(debug) << "send_to_upstream: middleware not connected, dropping message"sv;
       return;
     }
 
-    // 将内部事件包装在 send_to_upstream 信封中
+    // Wrap the internal event in a send_to_upstream envelope.
     json envelope;
     envelope["event"] = "send_to_upstream";
     envelope["message_id"] = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -525,18 +533,18 @@ namespace middleware {
     std::string payload = envelope.dump();
     g_outgoing_queue.raise(std::move(payload));
 
-    // 投递到 io_context 尝试排空队列。
-    // 如果读循环正在进行，则由读完成回调负责排空。
-    // 如果读循环未进行（例如两次读取之间或首次读取之前），立即排空。
+    // Post to the io_context and try to drain the outgoing queue.
+    // If the read loop is active, its completion callback will drain the queue.
+    // If no read is active, drain immediately.
     boost::asio::post(*g_ioc, []() {
       if (!g_ws) {
         return;
       }
       if (g_read_in_progress.load(std::memory_order_acquire)) {
-        // 读循环活跃中 —— 完成回调会调用 drain_outgoing()
+        // The active read loop will call drain_outgoing().
         return;
       }
-      // 无活跃读操作 —— 安全排空并重启
+      // No active read operation; drain safely now.
       while (g_outgoing_queue.peek()) {
         auto payload = g_outgoing_queue.pop();
         if (!payload) {

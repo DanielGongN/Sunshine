@@ -30,6 +30,13 @@ namespace middleware {
   void send_to_upstream(nlohmann::json msg);
 
   /**
+   * @brief Notify upstream that a Moonlight client connected.
+   *
+   * Thread-safe. Emits one event for each client session that reaches the running state.
+   */
+  void notify_client_connected();
+
+  /**
    * @brief Notify middleware that a Moonlight client connection state changed.
    * @param connected true if a client just connected, false if it disconnected.
    *
