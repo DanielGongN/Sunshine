@@ -7,6 +7,9 @@
 // lib includes
 #include <nlohmann/json_fwd.hpp>
 
+// standard includes
+#include <string_view>
+
 // local includes
 #include "platform/common.h"
 
@@ -35,6 +38,15 @@ namespace middleware {
    * Thread-safe. Emits one event for each client session that reaches the running state.
    */
   void notify_client_connected();
+
+  /**
+   * @brief Notify upstream that a Sunshine stream disconnected.
+   * @param message Human-readable disconnect reason.
+   *
+   * Thread-safe. Emits a disconnected event with type=1, meaning Sunshine stream disconnect.
+   */
+  void notify_client_disconnected(std::string_view message);
+  void notify_client_disconnected(std::u8string_view message);
 
   /**
    * @brief Notify middleware that a Moonlight client connection state changed.

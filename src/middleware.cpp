@@ -64,6 +64,18 @@ namespace middleware {
     send_to_upstream(std::move(msg));
   }
 
+  void notify_client_disconnected(std::string_view message) {
+    json msg;
+    msg["event"] = "disconnected";
+    msg["message"] = std::string {message};
+    msg["type"] = 1;
+    send_to_upstream(std::move(msg));
+  }
+
+  void notify_client_disconnected(std::u8string_view message) {
+    notify_client_disconnected(std::string_view {reinterpret_cast<const char *>(message.data()), message.size()});
+  }
+
   // Events to subscribe to
   constexpr const char *SUBSCRIBED_EVENTS[] = {
     "force_disconnected_time",

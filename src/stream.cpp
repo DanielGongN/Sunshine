@@ -726,6 +726,7 @@ namespace stream {
                              << " last_payload="sv << last_payload_len
                              << " session_state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
           if (session->state == session::state_e::RUNNING) {
+            middleware::notify_client_disconnected(u8"客户端主动断开连接或网络异常断开连接");
             session::stop(*session);
           }
           break;
@@ -1273,10 +1274,7 @@ namespace stream {
           if (force_event->peek()) {
             BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream"sv;
             force_event->pop();
-            nlohmann::json msg;
-            msg["data"]["event"] = "disconnected";
-            msg["data"]["message"] = "Upstream requested disconnect";
-            middleware::send_to_upstream(msg);
+            middleware::notify_client_disconnected(u8"上游请求断开连接");
             // Stop all running sessions
             for (auto pos2 = std::begin(*server->_sessions); pos2 != std::end(*server->_sessions); ++pos2) {
               auto s = *pos2;
@@ -1299,20 +1297,14 @@ namespace stream {
             auto force_timeout = config::sunshine.middleware.force_disconnected_timeout;
             if (force_timeout > 0 && idle_sec >= force_timeout) {
               BOOST_LOG(warning) << "[control][stop] reason=force_idle_timeout idle_sec="sv << idle_sec;
-              nlohmann::json msg;
-              msg["data"]["event"] = "disconnected";
-              msg["data"]["message"] = u8"长时间挂机，断开连接";
-              middleware::send_to_upstream(msg);
+              middleware::notify_client_disconnected(u8"长时间挂机，断开连接");
               send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "force_idle_timeout"sv);
               session::stop(*session);
             } else {
               auto standby_timeout = config::sunshine.middleware.standby_disconnected_timeout;
               if (standby_timeout > 0 && idle_sec >= standby_timeout) {
                 BOOST_LOG(warning) << "[control][stop] reason=standby_idle_timeout idle_sec="sv << idle_sec;
-                nlohmann::json msg;
-                msg["data"]["event"] = "disconnected";
-                msg["data"]["message"] = u8"长时间无操作，断开连接";
-                middleware::send_to_upstream(msg);
+                middleware::notify_client_disconnected(u8"长时间无操作，断开连接");
                 send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "standby_idle_timeout"sv);
                 session::stop(*session);
               }
@@ -1323,10 +1315,7 @@ namespace stream {
             auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
             BOOST_LOG(warning) << "[control][stop] reason=ping_timeout address="sv << address << " state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
             // Notify upstream of network disconnect
-            nlohmann::json msg;
-            msg["data"]["event"] = "disconnected";
-            msg["data"]["message"] = u8"网络异常断开连接";
-            middleware::send_to_upstream(msg);
+            middleware::notify_client_disconnected(u8"网络异常断开连接");
             session::stop(*session);
           }
 
