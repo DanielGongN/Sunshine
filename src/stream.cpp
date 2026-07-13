@@ -1255,6 +1255,7 @@ namespace stream {
     // termination when we shut down.
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+    auto force_event = mail::man->event<bool>(mail::force_disconnect);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       server->iterate(CONTROL_SERVICE_WAIT);
 
@@ -1262,27 +1263,22 @@ namespace stream {
         auto lg = server->_sessions.lock();
 
         auto now = std::chrono::steady_clock::now();
+        if (force_event->view(CONTROL_SERVICE_DRAIN_TIMEOUT)) {
+          BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream"sv;
+          force_event->pop();
+          middleware::notify_client_disconnected(u8"上游请求断开连接");
+          for (auto s : *server->_sessions) {
+            if (s->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
+              send_termination_msg(s, CONTROL_TERMINATION_GRACEFUL, "force_disconnect_from_upstream"sv);
+              session::stop(*s);
+            }
+          }
+        }
 
         KITTY_WHILE_LOOP(auto pos = std::begin(*server->_sessions), pos != std::end(*server->_sessions), {
           // Don't perform additional session processing if we're shutting down
           if (shutdown_event->peek() || broadcast_shutdown_event->peek()) {
             break;
-          }
-
-          // Check for force disconnect from upstream (via middleware)
-          auto force_event = mail::man->event<bool>(mail::force_disconnect);
-          if (force_event->peek()) {
-            BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream"sv;
-            force_event->pop();
-            middleware::notify_client_disconnected(u8"上游请求断开连接");
-            // Stop all running sessions
-            for (auto pos2 = std::begin(*server->_sessions); pos2 != std::end(*server->_sessions); ++pos2) {
-              auto s = *pos2;
-              if (s->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
-                send_termination_msg(s, CONTROL_TERMINATION_GRACEFUL, "force_disconnect_from_upstream"sv);
-                session::stop(*s);
-              }
-            }
           }
 
           auto session = *pos;

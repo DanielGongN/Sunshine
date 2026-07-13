@@ -5,6 +5,10 @@
 
 // standard includes
 #include <chrono>
+#include <cstdint>
+#include <limits>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -48,6 +52,166 @@ namespace middleware {
   std::atomic<bool> g_read_in_progress {false};
   std::atomic<int> g_active_sessions {0};
   constexpr auto HEARTBEAT_INTERVAL = 30s;
+  constexpr auto CONNECTED_RETRY_INTERVAL = 30s;
+  std::mutex g_connected_ack_mutex;
+  std::optional<std::int64_t> g_pending_connected_message_id;
+  std::optional<json> g_pending_connected_payload;
+  asio::steady_timer *g_connected_retry_timer = nullptr;
+
+  namespace detail {
+    std::int64_t make_timestamp() {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch()
+      )
+        .count();
+    }
+
+    std::optional<std::int64_t> get_int64_field(const json &msg, const char *field) {
+      if (!msg.contains(field)) {
+        return std::nullopt;
+      }
+
+      const auto &value = msg[field];
+      if (value.is_number_unsigned()) {
+        const auto unsigned_value = value.get<std::uint64_t>();
+        if (unsigned_value <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+          return static_cast<std::int64_t>(unsigned_value);
+        }
+      }
+
+      if (value.is_number_integer()) {
+        return value.get<std::int64_t>();
+      }
+
+      return std::nullopt;
+    }
+
+    json make_connected_payload(std::int64_t message_id) {
+      json msg;
+      msg["event"] = "connected";
+      msg["message_id"] = message_id;
+      msg["data"] = {
+        {"type", 1}
+      };
+      return msg;
+    }
+
+    bool is_connected_ack_success(const json &msg, std::int64_t pending_message_id) {
+      if (!msg.contains("event") || !msg["event"].is_string()) {
+        return false;
+      }
+
+      if (msg["event"].get<std::string>() != "consume_record_create_success") {
+        return false;
+      }
+
+      const auto msg_id = get_int64_field(msg, "message_id");
+      if (!msg_id || *msg_id != pending_message_id) {
+        return false;
+      }
+
+      if (!msg.contains("data") || !msg["data"].is_object()) {
+        return false;
+      }
+
+      const auto code = get_int64_field(msg["data"], "code");
+      return code && *code == 0;
+    }
+  }  // namespace detail
+
+  std::optional<std::int64_t> pending_connected_message_id() {
+    std::scoped_lock lock {g_connected_ack_mutex};
+    return g_pending_connected_message_id;
+  }
+
+  void set_pending_connected_payload(json msg) {
+    auto msg_id = detail::get_int64_field(msg, "message_id");
+    if (!msg_id) {
+      return;
+    }
+
+    std::scoped_lock lock {g_connected_ack_mutex};
+    g_pending_connected_message_id = *msg_id;
+    g_pending_connected_payload = std::move(msg);
+  }
+
+  void clear_pending_connected_payload() {
+    std::scoped_lock lock {g_connected_ack_mutex};
+    g_pending_connected_message_id.reset();
+    g_pending_connected_payload.reset();
+  }
+
+  void schedule_connected_retry();
+
+  void cancel_connected_retry() {
+    auto *ioc = g_ioc;
+    auto *timer = g_connected_retry_timer;
+    if (!ioc || !timer) {
+      return;
+    }
+
+    boost::asio::post(*ioc, [timer]() {
+      if (timer != g_connected_retry_timer) {
+        return;
+      }
+
+      timer->cancel();
+    });
+  }
+
+  void retry_pending_connected() {
+    std::optional<json> payload;
+    std::optional<std::int64_t> msg_id;
+    {
+      std::scoped_lock lock {g_connected_ack_mutex};
+      if (!g_pending_connected_message_id || !g_pending_connected_payload) {
+        return;
+      }
+
+      msg_id = g_pending_connected_message_id;
+      payload = g_pending_connected_payload;
+    }
+
+    BOOST_LOG(info) << "Retrying connected event: msg_id="sv << *msg_id;
+    send_to_upstream(std::move(*payload));
+    schedule_connected_retry();
+  }
+
+  void schedule_connected_retry() {
+    auto *ioc = g_ioc;
+    auto *timer = g_connected_retry_timer;
+    if (!ioc || !timer) {
+      return;
+    }
+
+    boost::asio::post(*ioc, [timer]() {
+      if (timer != g_connected_retry_timer) {
+        return;
+      }
+
+      {
+        std::scoped_lock lock {g_connected_ack_mutex};
+        if (!g_pending_connected_message_id || !g_pending_connected_payload) {
+          return;
+        }
+      }
+
+      timer->cancel();
+      timer->expires_after(CONNECTED_RETRY_INTERVAL);
+      timer->async_wait([](const boost::system::error_code &ec) {
+        if (ec == asio::error::operation_aborted) {
+          return;
+        }
+
+        if (ec) {
+          BOOST_LOG(warning) << "connected retry timer error: "sv << ec.message();
+          return;
+        }
+
+        retry_pending_connected();
+      });
+    });
+  }
 
   void notify_client_state(bool connected) {
     if (connected) {
@@ -58,10 +222,10 @@ namespace middleware {
   }
 
   void notify_client_connected() {
-    json msg;
-    msg["event"] = "connected";
-    msg["type"] = 1;
+    auto msg = detail::make_connected_payload(detail::make_timestamp());
+    set_pending_connected_payload(msg);
     send_to_upstream(std::move(msg));
+    schedule_connected_retry();
   }
 
   void notify_client_disconnected(std::string_view message) {
@@ -84,7 +248,8 @@ namespace middleware {
     "click_gamepad",
     "disconnected",
     "client_connect",
-    "client_disconnect"
+    "client_disconnect",
+    "consume_record_create_success"
   };
 
   class middleware_t {
@@ -97,12 +262,15 @@ namespace middleware {
         stopping {false} {
       g_ioc = &ioc;
       g_ws = &ws;
+      g_connected_retry_timer = &connected_retry_timer;
     }
 
     ~middleware_t() {
       stopping.store(true);
       g_ioc = nullptr;
       g_ws = nullptr;
+      g_connected_retry_timer = nullptr;
+      clear_pending_connected_payload();
       beast::error_code ec;
       ws.close(websocket::close_code::normal, ec);  // ignore errors during shutdown
       ioc.stop();
@@ -125,10 +293,7 @@ namespace middleware {
 
   private:
     static std::int64_t make_timestamp() {
-      return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch()
-      )
-        .count();
+      return detail::make_timestamp();
     }
 
     void send_subscribe_msg(const std::string &topic) {
@@ -252,6 +417,17 @@ namespace middleware {
         BOOST_LOG(info) << "Middleware requested client disconnect"sv;
         auto force_event = mail::man->event<bool>(mail::force_disconnect);
         force_event->raise(true);
+      } else if (event_type == "consume_record_create_success") {
+        auto pending_msg_id = pending_connected_message_id();
+        if (!pending_msg_id) {
+          BOOST_LOG(debug) << "consume_record_create_success received with no pending connected event"sv;
+        } else if (detail::is_connected_ack_success(msg, *pending_msg_id)) {
+          BOOST_LOG(info) << "connected event acknowledged: msg_id="sv << *pending_msg_id;
+          clear_pending_connected_payload();
+          cancel_connected_retry();
+        } else {
+          BOOST_LOG(debug) << "consume_record_create_success did not match pending connected event"sv;
+        }
       } else if (event_type == "client_connect") {
         BOOST_LOG(info) << "handling client_connect"sv;
         auto &data = msg["data"];
@@ -498,6 +674,7 @@ namespace middleware {
     websocket::stream<tcp::socket> ws;
     tcp::resolver resolver;
     asio::steady_timer heartbeat_timer {ioc};
+    asio::steady_timer connected_retry_timer {ioc};
     std::thread worker;
     std::chrono::milliseconds reconnect_delay;
     std::atomic<bool> stopping;
@@ -536,10 +713,7 @@ namespace middleware {
     // Wrap the internal event in a send_to_upstream envelope.
     json envelope;
     envelope["event"] = "send_to_upstream";
-    envelope["message_id"] = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::system_clock::now().time_since_epoch()
-    )
-                               .count();
+    envelope["message_id"] = detail::make_timestamp();
     envelope["data"] = std::move(inner_msg);
 
     std::string payload = envelope.dump();
