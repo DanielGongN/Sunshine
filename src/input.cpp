@@ -358,6 +358,16 @@ namespace input {
     free_id(gamepadMask, id);
   }
 
+  bool same_gamepad_state(const platf::gamepad_state_t &lhs, const platf::gamepad_state_t &rhs) {
+    return lhs.buttonFlags == rhs.buttonFlags &&
+           lhs.lt == rhs.lt &&
+           lhs.rt == rhs.rt &&
+           lhs.lsX == rhs.lsX &&
+           lhs.lsY == rhs.lsY &&
+           lhs.rsX == rhs.rsX &&
+           lhs.rsY == rhs.rsY;
+  }
+
   struct gamepad_t {
     gamepad_t():
         gamepad_state {},
@@ -1466,6 +1476,10 @@ namespace input {
         break;
       case button_state_e::NONE:
         break;
+    }
+
+    if (same_gamepad_state(gamepad_state, gamepad.gamepad_state)) {
+      return;
     }
 
     bf = gamepad_state.buttonFlags ^ gamepad.gamepad_state.buttonFlags;

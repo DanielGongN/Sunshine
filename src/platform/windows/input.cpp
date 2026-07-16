@@ -82,8 +82,14 @@ namespace platf {
 
     thread_pool_util::ThreadPool::task_id_t repeat_task {};
     std::chrono::steady_clock::time_point last_report_ts;
+    gamepad_state_t last_gamepad_state {};
+    XUSB_REPORT last_x360_report {};
+    DS4_REPORT_EX last_ds4_report {};
 
     gamepad_feedback_state_t feedback_state;
+    bool has_last_gamepad_state {};
+    bool has_last_x360_report {};
+    bool has_last_ds4_report {};
     bool preinitialized {};
   };
 
@@ -91,6 +97,58 @@ namespace platf {
 
   bool has_gamepad_index(const std::vector<gamepad_context_t> &gamepads, int index) {
     return index >= 0 && static_cast<std::size_t>(index) < gamepads.size();
+  }
+
+  bool same_gamepad_state(const gamepad_state_t &lhs, const gamepad_state_t &rhs) {
+    return lhs.buttonFlags == rhs.buttonFlags &&
+           lhs.lt == rhs.lt &&
+           lhs.rt == rhs.rt &&
+           lhs.lsX == rhs.lsX &&
+           lhs.lsY == rhs.lsY &&
+           lhs.rsX == rhs.rsX &&
+           lhs.rsY == rhs.rsY;
+  }
+
+  bool gamepad_state_has_input(const gamepad_state_t &state) {
+    return state.buttonFlags != 0 ||
+           state.lt != 0 ||
+           state.rt != 0 ||
+           state.lsX != 0 ||
+           state.lsY != 0 ||
+           state.rsX != 0 ||
+           state.rsY != 0;
+  }
+
+  void reset_gamepad_send_cache(gamepad_context_t &gamepad) {
+    gamepad.has_last_gamepad_state = false;
+    gamepad.has_last_x360_report = false;
+    gamepad.has_last_ds4_report = false;
+    gamepad.last_gamepad_state = {};
+    gamepad.last_x360_report = {};
+    gamepad.last_ds4_report = {};
+  }
+
+  bool same_x360_report(const XUSB_REPORT &lhs, const XUSB_REPORT &rhs) {
+    return lhs.wButtons == rhs.wButtons &&
+           lhs.bLeftTrigger == rhs.bLeftTrigger &&
+           lhs.bRightTrigger == rhs.bRightTrigger &&
+           lhs.sThumbLX == rhs.sThumbLX &&
+           lhs.sThumbLY == rhs.sThumbLY &&
+           lhs.sThumbRX == rhs.sThumbRX &&
+           lhs.sThumbRY == rhs.sThumbRY;
+  }
+
+  bool same_ds4_controls(const DS4_REPORT_EX &lhs, const DS4_REPORT_EX &rhs) {
+    const auto &left = lhs.Report;
+    const auto &right = rhs.Report;
+    return left.wButtons == right.wButtons &&
+           left.bSpecial == right.bSpecial &&
+           left.bTriggerL == right.bTriggerL &&
+           left.bTriggerR == right.bTriggerR &&
+           left.bThumbLX == right.bThumbLX &&
+           left.bThumbLY == right.bThumbLY &&
+           left.bThumbRX == right.bThumbRX &&
+           left.bThumbRY == right.bThumbRY;
   }
 
   void log_vigem_update_result(
@@ -360,6 +418,7 @@ namespace platf {
 
       gamepad.client_relative_index = id.clientRelativeIndex;
       gamepad.last_report_ts = std::chrono::steady_clock::now();
+      reset_gamepad_send_cache(gamepad);
 
       if (gamepad.preinitialized && gamepad.gp) {
         gamepad.feedback_queue = std::move(feedback_queue);
@@ -460,6 +519,7 @@ namespace platf {
       gamepad.feedback_queue.reset();
       gamepad.feedback_state = {};
       gamepad.preinitialized = false;
+      reset_gamepad_send_cache(gamepad);
 
       // Disconnect from ViGEm if we just removed the last gamepad
       bool disconnect = true;
@@ -1603,14 +1663,14 @@ namespace platf {
   }
 
   /**
-   * @brief Sends DS4 input with updated timestamps and repeats to keep timestamp updated.
-   * @details Some applications require updated timestamps values to register DS4 input.
+   * @brief Sends the current DS4 report with an updated timestamp.
    * @param vigem The global ViGEm context object.
    * @param nr The global gamepad index.
+   * @param schedule_repeat Whether to schedule a timestamp-only keepalive update.
    */
-  void ds4_update_ts_and_send(vigem_t *vigem, int nr) {
+  bool ds4_update_ts_and_send(vigem_t *vigem, int nr, bool schedule_repeat) {
     if (!vigem || !has_gamepad_index(vigem->gamepads, nr)) {
-      return;
+      return false;
     }
 
     auto &gamepad = vigem->gamepads[nr];
@@ -1643,13 +1703,30 @@ namespace platf {
       auto status = vigem_target_ds4_update_ex(vigem->client.get(), gamepad.gp.get(), gamepad.report.ds4);
       log_vigem_update_result("ds4"sv, nr, status, std::chrono::steady_clock::now() - send_start, gamepad_state);
       if (!VIGEM_SUCCESS(status)) {
-        return;
+        return false;
       }
 
-      // Repeat at least every 100ms to keep the 16-bit timestamp field from overflowing
       gamepad.last_report_ts = now;
-      gamepad.repeat_task = task_pool.pushDelayed(ds4_update_ts_and_send, 100ms, vigem, nr).task_id;
+      gamepad.last_ds4_report = gamepad.report.ds4;
+      gamepad.has_last_ds4_report = true;
+
+      if (schedule_repeat) {
+        // Repeat at least every 100ms to keep the 16-bit timestamp field from overflowing.
+        gamepad.repeat_task = task_pool.pushDelayed([vigem, nr]() {
+                                         ds4_update_ts_and_send(vigem, nr, true);
+                                       },
+                                                    100ms)
+                                .task_id;
+      }
+
+      return true;
     }
+
+    return false;
+  }
+
+  bool ds4_update_ts_and_send(vigem_t *vigem, int nr) {
+    return ds4_update_ts_and_send(vigem, nr, true);
   }
 
   /**
@@ -1677,12 +1754,41 @@ namespace platf {
 
     if (vigem_target_get_type(gamepad.gp.get()) == Xbox360Wired) {
       x360_update_state(gamepad, gamepad_state);
+      if (gamepad.has_last_x360_report && same_x360_report(gamepad.report.x360, gamepad.last_x360_report)) {
+        gamepad.last_gamepad_state = gamepad_state;
+        gamepad.has_last_gamepad_state = true;
+        return;
+      }
+
       auto send_start = std::chrono::steady_clock::now();
       auto status = vigem_target_x360_update(vigem->client.get(), gamepad.gp.get(), gamepad.report.x360);
       log_vigem_update_result("x360"sv, nr, status, std::chrono::steady_clock::now() - send_start, gamepad_state);
+      if (VIGEM_SUCCESS(status)) {
+        gamepad.last_gamepad_state = gamepad_state;
+        gamepad.last_x360_report = gamepad.report.x360;
+        gamepad.has_last_gamepad_state = true;
+        gamepad.has_last_x360_report = true;
+      }
     } else {
+      if (gamepad.has_last_gamepad_state && same_gamepad_state(gamepad_state, gamepad.last_gamepad_state)) {
+        if (gamepad.repeat_task && !gamepad_state_has_input(gamepad_state)) {
+          task_pool.cancel(gamepad.repeat_task);
+          gamepad.repeat_task = nullptr;
+        }
+        return;
+      }
+
       ds4_update_state(gamepad, gamepad_state);
-      ds4_update_ts_and_send(vigem, nr);
+      if (gamepad.has_last_ds4_report && same_ds4_controls(gamepad.report.ds4, gamepad.last_ds4_report)) {
+        gamepad.last_gamepad_state = gamepad_state;
+        gamepad.has_last_gamepad_state = true;
+        return;
+      }
+
+      if (ds4_update_ts_and_send(vigem, nr, false)) {
+        gamepad.last_gamepad_state = gamepad_state;
+        gamepad.has_last_gamepad_state = true;
+      }
     }
   }
 
