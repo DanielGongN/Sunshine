@@ -17,7 +17,6 @@ extern "C" {
 #include <cmath>
 #include <list>
 #include <mutex>
-#include <thread>
 #include <unordered_map>
 
 // lib includes
@@ -126,6 +125,9 @@ namespace input {
   constexpr auto INPUT_STATS_LOG_INTERVAL = std::chrono::seconds(1);
   constexpr auto INPUT_GAMEPAD_LOG_INTERVAL = std::chrono::seconds(1);
   constexpr std::size_t INPUT_QUEUE_WARN_PACKETS = 128;
+  constexpr std::size_t INPUT_DRAIN_MAX_MESSAGES = 64;
+  constexpr auto SYNTHETIC_HOME_HOLD = 100ms;
+  constexpr auto CLICK_GAMEPAD_HOLD = 200ms;
 
   struct input_stats_t {
     std::chrono::steady_clock::time_point last_stats_log;
@@ -372,13 +374,18 @@ namespace input {
     gamepad_t():
         gamepad_state {},
         back_timeout_id {},
+        home_release_id {},
         feedback_queue {},
         id {-1},
         preinitialized {},
-        back_button_state {button_state_e::NONE} {
+        generation {},
+        back_button_state {button_state_e::NONE},
+        synthetic_home_button_down {} {
     }
 
     ~gamepad_t() {
+      task_pool.cancel(back_timeout_id);
+      task_pool.cancel(home_release_id);
       if (id >= 0) {
         task_pool.push([id = this->id, feedback_queue = this->feedback_queue, preinitialized = this->preinitialized]() {
           free_gamepad(platf_input, id, feedback_queue, preinitialized);
@@ -389,6 +396,7 @@ namespace input {
     platf::gamepad_state_t gamepad_state;
 
     thread_pool_util::ThreadPool::task_id_t back_timeout_id;
+    thread_pool_util::ThreadPool::task_id_t home_release_id;
 
     platf::feedback_queue_t feedback_queue;
 
@@ -396,12 +404,17 @@ namespace input {
 
     bool preinitialized;
 
+    std::uint64_t generation;
+
     // When emulating the HOME button, we may need to artificially release the back button.
     // Afterwards, the gamepad state on sunshine won't match the state on Moonlight.
     // To prevent Sunshine from sending erroneous input data to the active application,
     // Sunshine forces the button to be in a specific state until the gamepad state matches that of
     // Moonlight once more.
     button_state_e back_button_state;
+
+    // Keep a synthetic HOME press visible while its delayed release is pending.
+    bool synthetic_home_button_down;
   };
 
   struct input_t {
@@ -421,6 +434,7 @@ namespace input {
         client_context {platf::allocate_client_input_context(platf_input)},
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
+        input_queue_drain_active {},
         mouse_left_button_timeout {},
         touch_port {{0, 0, 0, 0}, 0, 0, 1.0f, 1.0f, 0, 0},
         accumulated_vscroll_delta {},
@@ -438,6 +452,7 @@ namespace input {
 
     std::list<std::vector<uint8_t>> input_queue;
     std::mutex input_queue_lock;
+    bool input_queue_drain_active;
 
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;
 
@@ -446,6 +461,24 @@ namespace input {
     int32_t accumulated_vscroll_delta;
     int32_t accumulated_hscroll_delta;
   };
+
+  bool has_client_gamepad_index(const input_t &input, int id) {
+    return id >= 0 && static_cast<std::size_t>(id) < input.gamepads.size();
+  }
+
+  void cancel_pending_gamepad_timers(gamepad_t &gamepad) {
+    task_pool.cancel(gamepad.back_timeout_id);
+    task_pool.cancel(gamepad.home_release_id);
+    gamepad.back_timeout_id = nullptr;
+    gamepad.home_release_id = nullptr;
+    gamepad.back_button_state = button_state_e::NONE;
+    gamepad.synthetic_home_button_down = false;
+    ++gamepad.generation;
+  }
+
+  bool is_expected_gamepad(const gamepad_t &gamepad, int expected_id, std::uint64_t expected_generation) {
+    return gamepad.id == expected_id && gamepad.generation == expected_generation;
+  }
 
   /**
    * @brief Apply shortcut based on VKEY
@@ -1124,7 +1157,7 @@ namespace input {
       return;
     }
 
-    if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
+    if (!has_client_gamepad_index(*input, packet->controllerNumber)) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
     }
@@ -1149,6 +1182,7 @@ namespace input {
       input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
       input->gamepads[packet->controllerNumber].feedback_queue = input->feedback_queue;
       input->gamepads[packet->controllerNumber].preinitialized = true;
+      ++input->gamepads[packet->controllerNumber].generation;
       return;  // Pre-created gamepads already have metadata from vigem_t::init().
     }
 
@@ -1166,6 +1200,7 @@ namespace input {
     input->gamepads[packet->controllerNumber].id = id;
     input->gamepads[packet->controllerNumber].feedback_queue = input->feedback_queue;
     input->gamepads[packet->controllerNumber].preinitialized = false;
+    ++input->gamepads[packet->controllerNumber].generation;
   }
 
   /**
@@ -1307,7 +1342,7 @@ namespace input {
       return;
     }
 
-    if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
+    if (!has_client_gamepad_index(*input, packet->controllerNumber)) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
     }
@@ -1340,7 +1375,7 @@ namespace input {
       return;
     }
 
-    if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
+    if (!has_client_gamepad_index(*input, packet->controllerNumber)) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
     }
@@ -1372,7 +1407,7 @@ namespace input {
       return;
     }
 
-    if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
+    if (!has_client_gamepad_index(*input, packet->controllerNumber)) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
     }
@@ -1397,7 +1432,7 @@ namespace input {
       return;
     }
 
-    if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
+    if (!has_client_gamepad_index(*input, packet->controllerNumber)) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
 
       return;
@@ -1417,6 +1452,7 @@ namespace input {
         input->gamepads[packet->controllerNumber].id = packet->controllerNumber;
         input->gamepads[packet->controllerNumber].feedback_queue = input->feedback_queue;
         input->gamepads[packet->controllerNumber].preinitialized = true;
+        ++input->gamepads[packet->controllerNumber].generation;
       } else {
         auto id = alloc_id(gamepadMask);
         if (id < 0) {
@@ -1431,9 +1467,11 @@ namespace input {
         gamepad.id = id;
         gamepad.feedback_queue = input->feedback_queue;
         gamepad.preinitialized = false;
+        ++gamepad.generation;
       }
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
+      cancel_pending_gamepad_timers(gamepad);
       free_gamepad(platf_input, gamepad.id, gamepad.feedback_queue, gamepad.preinitialized);
       gamepad.feedback_queue.reset();
       gamepad.preinitialized = false;
@@ -1478,19 +1516,30 @@ namespace input {
         break;
     }
 
+    if (gamepad.synthetic_home_button_down) {
+      gamepad_state.buttonFlags |= platf::HOME;
+    }
+
+    auto button_flags_changed = gamepad_state.buttonFlags ^ gamepad.gamepad_state.buttonFlags;
+    bf_new = gamepad_state.buttonFlags;
+
     if (same_gamepad_state(gamepad_state, gamepad.gamepad_state)) {
       return;
     }
 
-    bf = gamepad_state.buttonFlags ^ gamepad.gamepad_state.buttonFlags;
-    bf_new = gamepad_state.buttonFlags;
-
-    if (platf::BACK & bf) {
+    if (platf::BACK & button_flags_changed) {
       if (platf::BACK & bf_new) {
         // Don't emulate home button if timeout < 0
-        if (config::input.back_button_timeout >= 0ms) {
-          auto f = [input, controller = packet->controllerNumber]() {
+        if (config::input.back_button_timeout >= 0ms && !gamepad.back_timeout_id) {
+          auto f = [input, controller = static_cast<int>(packet->controllerNumber), expected_gamepad_id = gamepad.id, expected_generation = gamepad.generation]() {
+            if (!has_client_gamepad_index(*input, controller)) {
+              return;
+            }
+
             auto &gamepad = input->gamepads[controller];
+            if (!is_expected_gamepad(gamepad, expected_gamepad_id, expected_generation)) {
+              return;
+            }
 
             auto &state = gamepad.gamepad_state;
 
@@ -1501,16 +1550,32 @@ namespace input {
 
             // Press Home button
             state.buttonFlags |= platf::HOME;
-            platf::gamepad_update(platf_input, gamepad.id, state);
-
-            // Sleep for a short time to allow the input to be detected
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            // Release Home button
-            state.buttonFlags &= ~platf::HOME;
+            gamepad.synthetic_home_button_down = true;
             platf::gamepad_update(platf_input, gamepad.id, state);
 
             gamepad.back_timeout_id = nullptr;
+
+            task_pool.cancel(gamepad.home_release_id);
+            gamepad.home_release_id = task_pool.pushDelayed([input, controller, expected_gamepad_id, expected_generation]() {
+                                                 if (!has_client_gamepad_index(*input, controller)) {
+                                                   return;
+                                                 }
+
+                                                 auto &gamepad = input->gamepads[controller];
+                                                 if (!is_expected_gamepad(gamepad, expected_gamepad_id, expected_generation)) {
+                                                   return;
+                                                 }
+
+                                                 // Release Home button
+                                                 auto &state = gamepad.gamepad_state;
+                                                 state.buttonFlags &= ~platf::HOME;
+                                                 gamepad.synthetic_home_button_down = false;
+                                                 platf::gamepad_update(platf_input, gamepad.id, state);
+
+                                                 gamepad.home_release_id = nullptr;
+                                               },
+                                                            SYNTHETIC_HOME_HOLD)
+                                        .task_id;
           };
 
           gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
@@ -1804,10 +1869,11 @@ namespace input {
   }
 
   /**
-   * @brief Called on a thread pool thread to process an input message.
+   * @brief Called on a thread pool thread to process one input message.
    * @param input The input context pointer.
+   * @return `true` if a queued input message was processed.
    */
-  void passthrough_next_message(std::shared_ptr<input_t> input) {
+  bool passthrough_next_message(std::shared_ptr<input_t> input) {
     // 'entry' backs the 'payload' pointer, so they must remain in scope together
     std::vector<uint8_t> entry;
     PNV_INPUT_HEADER payload;
@@ -1822,7 +1888,7 @@ namespace input {
 
       // If all entries have already been processed, nothing to do
       if (input->input_queue.empty()) {
-        return;
+        return false;
       }
 
       // Pop off the first entry, which we will send
@@ -1911,6 +1977,51 @@ namespace input {
       default:
         break;
     }
+
+    return true;
+  }
+
+  /**
+   * @brief Called on a thread pool thread to drain queued input messages.
+   * @param input The input context pointer.
+   */
+  void passthrough_drain_messages(std::shared_ptr<input_t> input) {
+    std::size_t processed_messages = 0;
+    while (processed_messages < INPUT_DRAIN_MAX_MESSAGES) {
+      if (!passthrough_next_message(input)) {
+        bool should_continue = false;
+        {
+          std::lock_guard<std::mutex> lg(input->input_queue_lock);
+          if (input->input_queue.empty()) {
+            input->input_queue_drain_active = false;
+          } else {
+            should_continue = true;
+          }
+        }
+
+        if (!should_continue) {
+          return;
+        }
+
+        continue;
+      }
+
+      ++processed_messages;
+    }
+
+    bool should_reschedule = false;
+    {
+      std::lock_guard<std::mutex> lg(input->input_queue_lock);
+      if (input->input_queue.empty()) {
+        input->input_queue_drain_active = false;
+      } else {
+        should_reschedule = true;
+      }
+    }
+
+    if (should_reschedule) {
+      task_pool.pushDelayed(passthrough_drain_messages, 0ms, input);
+    }
   }
 
   /**
@@ -1924,13 +2035,20 @@ namespace input {
 
     auto input_data_size = input_data.size();
     std::size_t queue_size = 0;
+    bool should_schedule_drain = false;
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
       input->input_queue.push_back(std::move(input_data));
       queue_size = input->input_queue.size();
+      if (!input->input_queue_drain_active) {
+        input->input_queue_drain_active = true;
+        should_schedule_drain = true;
+      }
     }
     note_input_queued(input_data_size, queue_size);
-    task_pool.push(passthrough_next_message, input);
+    if (should_schedule_drain) {
+      task_pool.push(passthrough_drain_messages, input);
+    }
   }
 
   void reset(std::shared_ptr<input_t> &input) {
@@ -2009,6 +2127,12 @@ namespace input {
                     << " button=0x"sv << util::hex(button_flag).to_string_view();
 
     task_pool.push([gamepad_nr, button_flag]() {
+      if (!has_gamepad_index(gamepad_nr) || !gamepadMask[gamepad_nr]) {
+        BOOST_LOG(warning) << "click_gamepad: slot "sv << gamepad_nr << " no longer allocated, dropping button=0x"sv
+                           << util::hex(button_flag).to_string_view();
+        return;
+      }
+
       BOOST_LOG(info) << "click_gamepad: pressing button=0x"sv << util::hex(button_flag).to_string_view()
                       << " on slot "sv << gamepad_nr;
 
@@ -2017,15 +2141,22 @@ namespace input {
 
       // Hold long enough for browser Gamepad API (~60Hz polling) to detect.
       // 200ms = ~12 frames, well above single-frame jitter.
-      std::this_thread::sleep_for(200ms);
+      task_pool.pushDelayed([gamepad_nr, button_flag]() {
+        if (!has_gamepad_index(gamepad_nr) || !gamepadMask[gamepad_nr]) {
+          BOOST_LOG(warning) << "click_gamepad: slot "sv << gamepad_nr << " no longer allocated before release, button=0x"sv
+                             << util::hex(button_flag).to_string_view();
+          return;
+        }
 
-      BOOST_LOG(info) << "click_gamepad: releasing button=0x"sv << util::hex(button_flag).to_string_view()
-                      << " on slot "sv << gamepad_nr;
+        BOOST_LOG(info) << "click_gamepad: releasing button=0x"sv << util::hex(button_flag).to_string_view()
+                        << " on slot "sv << gamepad_nr;
 
-      platf::gamepad_state_t release_state {};
-      platf::gamepad_update(platf_input, gamepad_nr, release_state);
+        platf::gamepad_state_t release_state {};
+        platf::gamepad_update(platf_input, gamepad_nr, release_state);
 
-      BOOST_LOG(info) << "click_gamepad: button sequence complete for slot "sv << gamepad_nr;
+        BOOST_LOG(info) << "click_gamepad: button sequence complete for slot "sv << gamepad_nr;
+      },
+                            CLICK_GAMEPAD_HOLD);
     });
   }
 
