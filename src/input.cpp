@@ -126,6 +126,7 @@ namespace input {
   constexpr auto INPUT_GAMEPAD_LOG_INTERVAL = std::chrono::seconds(1);
   constexpr std::size_t INPUT_QUEUE_WARN_PACKETS = 128;
   constexpr std::size_t INPUT_DRAIN_MAX_MESSAGES = 64;
+  constexpr std::size_t INPUT_LOW_LATENCY_DRAIN_MAX_MESSAGES = 256;
   constexpr auto SYNTHETIC_HOME_HOLD = 100ms;
   constexpr auto CLICK_GAMEPAD_HOLD = 200ms;
 
@@ -902,7 +903,7 @@ namespace input {
      * input->mouse_left_button_timeout can only be nullptr
      * when the last mouse coordinates were absolute
      */
-    if (button == BUTTON_LEFT && release && !input->mouse_left_button_timeout) {
+    if (!config::input.low_latency_input && button == BUTTON_LEFT && release && !input->mouse_left_button_timeout) {
       auto f = [=]() {
         auto left_released = mouse_press[BUTTON_LEFT];
         if (left_released) {
@@ -1608,10 +1609,10 @@ namespace input {
     short deltaY;
 
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->deltaX), util::endian::big(src->deltaX), &deltaX)) {
+    if (__builtin_add_overflow(util::endian::big(dest->deltaX), util::endian::big(src->deltaX), &deltaX)) {
       return batch_result_e::terminate_batch;
     }
-    if (!__builtin_add_overflow(util::endian::big(dest->deltaY), util::endian::big(src->deltaY), &deltaY)) {
+    if (__builtin_add_overflow(util::endian::big(dest->deltaY), util::endian::big(src->deltaY), &deltaY)) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1648,7 +1649,7 @@ namespace input {
     short scrollAmt;
 
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->scrollAmt1), util::endian::big(src->scrollAmt1), &scrollAmt)) {
+    if (__builtin_add_overflow(util::endian::big(dest->scrollAmt1), util::endian::big(src->scrollAmt1), &scrollAmt)) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1668,7 +1669,7 @@ namespace input {
     short scrollAmt;
 
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->scrollAmount), util::endian::big(src->scrollAmount), &scrollAmt)) {
+    if (__builtin_add_overflow(util::endian::big(dest->scrollAmount), util::endian::big(src->scrollAmount), &scrollAmt)) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1899,7 +1900,7 @@ namespace input {
       // Try to batch with remaining items on the queue
       auto i = input->input_queue.begin();
       while (i != input->input_queue.end()) {
-        auto batchable_entry = *i;
+        auto &batchable_entry = *i;
         auto batchable_payload = (PNV_INPUT_HEADER) batchable_entry.data();
 
         auto batch_result = batch(payload, batchable_payload);
@@ -1986,8 +1987,9 @@ namespace input {
    * @param input The input context pointer.
    */
   void passthrough_drain_messages(std::shared_ptr<input_t> input) {
+    auto max_messages = config::input.low_latency_input ? INPUT_LOW_LATENCY_DRAIN_MAX_MESSAGES : INPUT_DRAIN_MAX_MESSAGES;
     std::size_t processed_messages = 0;
-    while (processed_messages < INPUT_DRAIN_MAX_MESSAGES) {
+    while (processed_messages < max_messages) {
       if (!passthrough_next_message(input)) {
         bool should_continue = false;
         {

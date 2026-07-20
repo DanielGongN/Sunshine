@@ -637,6 +637,34 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### low_latency_input
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Prioritizes lower local input latency by draining larger input bursts and disabling the 10 ms
+            absolute-mouse left-button release guard.
+            <br>
+            Enable for games where input latency matters most.
+            <br>
+            Disable if right-click behavior after absolute mouse input is incorrect.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            low_latency_input = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### high_resolution_scrolling
 
 <table>

@@ -1493,10 +1493,11 @@ namespace stream {
             it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
           } else {
             ++unmatched_counts[buf_elem];
-            BOOST_LOG(warning) << "[stream][ping-unmatched] type="sv << type_name
-                               << " mode=v1 from="sv << udp_endpoint_to_string(peer)
-                               << " sessions="sv << peer_to_session.size()
-                               << " unmatched="sv << unmatched_counts[buf_elem];
+            auto &unmatched_logger = peer_to_session.empty() ? debug : warning;
+            BOOST_LOG(unmatched_logger) << "[stream][ping-unmatched] type="sv << type_name
+                                        << " mode=v1 from="sv << udp_endpoint_to_string(peer)
+                                        << " sessions="sv << peer_to_session.size()
+                                        << " unmatched="sv << unmatched_counts[buf_elem];
           }
         } else if (bytes >= sizeof(SS_PING)) {
           auto ping = (PSS_PING) buf[buf_elem].data();
@@ -1513,20 +1514,22 @@ namespace stream {
             it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
           } else {
             ++unmatched_counts[buf_elem];
-            BOOST_LOG(warning) << "[stream][ping-unmatched] type="sv << type_name
-                               << " mode=v2 from="sv << udp_endpoint_to_string(peer)
-                               << " bytes="sv << bytes
-                               << " payload="sv << util::hex_vec(payload)
-                               << " sessions="sv << peer_to_session.size()
-                               << " unmatched="sv << unmatched_counts[buf_elem];
+            auto &unmatched_logger = peer_to_session.empty() ? debug : warning;
+            BOOST_LOG(unmatched_logger) << "[stream][ping-unmatched] type="sv << type_name
+                                        << " mode=v2 from="sv << udp_endpoint_to_string(peer)
+                                        << " bytes="sv << bytes
+                                        << " payload="sv << util::hex_vec(payload)
+                                        << " sessions="sv << peer_to_session.size()
+                                        << " unmatched="sv << unmatched_counts[buf_elem];
           }
         } else {
           ++unmatched_counts[buf_elem];
-          BOOST_LOG(warning) << "[stream][ping-unmatched] type="sv << type_name
-                             << " mode=too_short from="sv << udp_endpoint_to_string(peer)
-                             << " bytes="sv << bytes
-                             << " sessions="sv << peer_to_session.size()
-                             << " unmatched="sv << unmatched_counts[buf_elem];
+          auto &unmatched_logger = peer_to_session.empty() ? debug : warning;
+          BOOST_LOG(unmatched_logger) << "[stream][ping-unmatched] type="sv << type_name
+                                      << " mode=too_short from="sv << udp_endpoint_to_string(peer)
+                                      << " bytes="sv << bytes
+                                      << " sessions="sv << peer_to_session.size()
+                                      << " unmatched="sv << unmatched_counts[buf_elem];
         }
       };
     };

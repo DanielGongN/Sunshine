@@ -222,6 +222,7 @@ namespace config {
 
     bool always_send_scancodes;
 
+    bool low_latency_input;
     bool high_resolution_scrolling;
     bool native_pen_touch;
   };
@@ -290,8 +291,8 @@ namespace config {
       std::string address = "0.0.0.0";
       int port = 40002;
       bool gamepad_preinit = false;
-      int force_disconnected_timeout = 900;   // seconds, default 15 minutes
-      int standby_disconnected_timeout = 900; // seconds, default 15 minutes
+      int force_disconnected_timeout = 900;  // seconds, default 15 minutes
+      int standby_disconnected_timeout = 900;  // seconds, default 15 minutes
     } middleware;
   };
 

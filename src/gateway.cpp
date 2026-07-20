@@ -132,6 +132,15 @@ namespace gateway {
     return count <= UDP_DIAG_SAMPLE_LIMIT || count % UDP_DIAG_SAMPLE_INTERVAL == 0;
   }
 
+  std::uint16_t read_u16_be(std::uint8_t high, std::uint8_t low) {
+    return (static_cast<std::uint16_t>(high) << 8) |
+           static_cast<std::uint16_t>(low);
+  }
+
+  std::uint16_t read_u16_be(char high, char low) {
+    return read_u16_be(static_cast<std::uint8_t>(high), static_cast<std::uint8_t>(low));
+  }
+
   class gateway_t {
   public:
     gateway_t():
@@ -508,8 +517,7 @@ namespace gateway {
         return;
       }
 
-      std::uint16_t payload_len = (static_cast<std::uint16_t>(len_buf->at(0)) << 8) |
-                                  static_cast<std::uint16_t>(len_buf->at(1));
+      std::uint16_t payload_len = read_u16_be(len_buf->at(0), len_buf->at(1));
       if (payload_len == 0) {
         BOOST_LOG(warning) << "[gateway] HTTPS framed tunnel got empty payload"sv;
         close_socket_pair(client, internal);
@@ -594,8 +602,7 @@ namespace gateway {
         return;
       }
 
-      std::uint16_t payload_len = (static_cast<std::uint16_t>(len_buf->at(0)) << 8) |
-                                  static_cast<std::uint16_t>(len_buf->at(1));
+      std::uint16_t payload_len = read_u16_be(len_buf->at(0), len_buf->at(1));
       if (payload_len == 0) {
         BOOST_LOG(warning) << "[gateway] framed TCP got empty payload"sv;
         return;
@@ -1083,8 +1090,7 @@ namespace gateway {
       }
 
       std::uint8_t stream_id = static_cast<std::uint8_t>(buf->at(0));
-      std::uint16_t payload_len = (static_cast<std::uint16_t>(buf->at(1)) << 8) |
-                                  static_cast<std::uint16_t>(buf->at(2));
+      std::uint16_t payload_len = read_u16_be(buf->at(1), buf->at(2));
 
       if (payload_len > n - UDP_GATEWAY_HEADER_SIZE) {
         ++udp_invalid_in_packets;
