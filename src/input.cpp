@@ -1846,8 +1846,14 @@ namespace input {
     // We can only batch certain message types
     switch (util::endian::little(dest->magic)) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
+        if (config::input.low_latency_input) {
+          return batch_result_e::terminate_batch;
+        }
         return batch((PNV_REL_MOUSE_MOVE_PACKET) dest, (PNV_REL_MOUSE_MOVE_PACKET) src);
       case MOUSE_MOVE_ABS_MAGIC:
+        if (config::input.low_latency_input) {
+          return batch_result_e::terminate_batch;
+        }
         return batch((PNV_ABS_MOUSE_MOVE_PACKET) dest, (PNV_ABS_MOUSE_MOVE_PACKET) src);
       case SCROLL_MAGIC_GEN5:
         return batch((PNV_SCROLL_PACKET) dest, (PNV_SCROLL_PACKET) src);
