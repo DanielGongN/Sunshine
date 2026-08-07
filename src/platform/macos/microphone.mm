@@ -120,4 +120,9 @@ namespace platf {
   std::unique_ptr<audio_control_t> audio_control() {
     return std::make_unique<macos_audio_control_t>();
   }
+
+  std::unique_ptr<client_mic_sink_t> client_mic_sink(const std::string &sink, [[maybe_unused]] std::uint32_t sample_rate, [[maybe_unused]] std::uint32_t frame_size, [[maybe_unused]] std::uint32_t channels) {
+    BOOST_LOG(warning) << "Client microphone sink is only implemented on Windows: "sv << sink;
+    return nullptr;
+  }
 }  // namespace platf

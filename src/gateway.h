@@ -10,6 +10,7 @@
 
 #include "platform/common.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -22,9 +23,13 @@ namespace gateway {
   constexpr std::uint8_t STREAM_CONTROL = 0x03;
   constexpr std::uint8_t STREAM_AUDIO = 0x04;
   constexpr std::uint8_t STREAM_RTSP = 0x05;
+  constexpr std::uint8_t STREAM_CLIENT_MIC = 0x06;
 
   // First byte of a TLS ClientHello.
   constexpr std::uint8_t TLS_MAGIC = 0x16;
+
+  // UDP framed packet header: [stream_id:1][length:2 BE].
+  constexpr std::size_t UDP_HEADER_SIZE = 3;
 
   // Internal port offsets used by the gateway.
   constexpr int INTERNAL_HTTPS_OFFSET = 100;

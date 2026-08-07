@@ -5,6 +5,8 @@
 #define INITGUID
 
 // standard includes
+#include <algorithm>
+#include <cstring>
 #include <format>
 
 // platform includes
@@ -37,10 +39,12 @@ DEFINE_PROPERTYKEY(PKEY_DeviceInterface_FriendlyName, 0x026e516e, 0xb814, 0x414b
 namespace {
 
   constexpr auto SAMPLE_RATE = 48000;
+  constexpr auto CLIENT_MIC_BUFFER_PACKETS = 2;
 #ifdef STEAM_DRIVER_SUBDIR
   constexpr auto STEAM_AUDIO_DRIVER_PATH = L"%CommonProgramFiles(x86)%\\Steam\\drivers\\Windows10\\" STEAM_DRIVER_SUBDIR L"\\SteamStreamingSpeakers.inf";
 #endif
 
+  constexpr auto waveformat_mask_mono = SPEAKER_FRONT_CENTER;
   constexpr auto waveformat_mask_stereo = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
 
   constexpr auto waveformat_mask_surround51_with_backspeakers = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT |
@@ -65,7 +69,7 @@ namespace {
     _size,
   };
 
-  constexpr WAVEFORMATEXTENSIBLE create_waveformat(sample_format_e sample_format, WORD channel_count, DWORD channel_mask) {
+  constexpr WAVEFORMATEXTENSIBLE create_waveformat(sample_format_e sample_format, WORD channel_count, DWORD channel_mask, DWORD sample_rate = SAMPLE_RATE) {
     WAVEFORMATEXTENSIBLE waveformat = {};
 
     switch (sample_format) {
@@ -105,7 +109,7 @@ namespace {
 
     waveformat.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
     waveformat.Format.nChannels = channel_count;
-    waveformat.Format.nSamplesPerSec = SAMPLE_RATE;
+    waveformat.Format.nSamplesPerSec = sample_rate;
 
     waveformat.Format.nBlockAlign = waveformat.Format.nChannels * waveformat.Format.wBitsPerSample / 8;
     waveformat.Format.nAvgBytesPerSec = waveformat.Format.nSamplesPerSec * waveformat.Format.nBlockAlign;
@@ -218,6 +222,7 @@ namespace platf::audio {
   using collection_t = util::safe_ptr<IMMDeviceCollection, Release<IMMDeviceCollection>>;
   using audio_client_t = util::safe_ptr<IAudioClient, Release<IAudioClient>>;
   using audio_capture_t = util::safe_ptr<IAudioCaptureClient, Release<IAudioCaptureClient>>;
+  using audio_render_t = util::safe_ptr<IAudioRenderClient, Release<IAudioRenderClient>>;
   using wave_format_t = util::safe_ptr<WAVEFORMATEX, co_task_free<WAVEFORMATEX>>;
   using wstring_t = util::safe_ptr<WCHAR, co_task_free<WCHAR>>;
   using handle_t = util::safe_ptr_v2<void, BOOL, CloseHandle>;
@@ -226,13 +231,26 @@ namespace platf::audio {
 
   class co_init_t: public deinit_t {
   public:
-    co_init_t() {
-      CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_SPEED_OVER_MEMORY);
+    co_init_t():
+        status {CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_SPEED_OVER_MEMORY)} {
     }
 
     ~co_init_t() override {
-      CoUninitialize();
+      if (SUCCEEDED(status)) {
+        CoUninitialize();
+      }
     }
+
+    [[nodiscard]] bool ready() const {
+      return SUCCEEDED(status) || status == RPC_E_CHANGED_MODE;
+    }
+
+    [[nodiscard]] HRESULT result() const {
+      return status;
+    }
+
+  private:
+    HRESULT status;
   };
 
   class prop_var_t {
@@ -303,9 +321,7 @@ namespace platf::audio {
       }
 
       // Prefer the native channel layout of captured audio device when channel counts match
-      if (mixer_waveformat->nChannels == format.channel_count &&
-          mixer_waveformat->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-          mixer_waveformat->cbSize >= 22) {
+      if (mixer_waveformat->nChannels == format.channel_count && mixer_waveformat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixer_waveformat->cbSize >= 22) {
         auto waveformatext_pointer = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(mixer_waveformat.get());
         capture_waveformat.dwChannelMask = waveformatext_pointer->dwChannelMask;
       }
@@ -351,6 +367,17 @@ namespace platf::audio {
     }
 
     return device;
+  }
+
+  DWORD channel_mask_for_client_mic(std::uint32_t channels) {
+    switch (channels) {
+      case 1:
+        return waveformat_mask_mono;
+      case 2:
+        return waveformat_mask_stereo;
+      default:
+        return 0;
+    }
   }
 
   class audio_notification_t: public ::IMMNotificationClient {
@@ -422,6 +449,219 @@ namespace platf::audio {
 
   private:
     std::atomic_bool default_render_device_changed_flag;
+  };
+
+  class client_mic_sink_wasapi_t: public ::platf::client_mic_sink_t {
+  public:
+    int init(device_enum_t &device_enum, const std::wstring &device_id, std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t input_channels) {
+      if (!co_init.ready()) {
+        BOOST_LOG(error) << "Couldn't initialize COM for client microphone sink [0x"sv << util::hex(co_init.result()).to_string_view() << ']';
+        return -1;
+      }
+
+      if (input_channels < 1 || input_channels > 2) {
+        BOOST_LOG(error) << "Unsupported client microphone channel count: "sv << input_channels;
+        return -1;
+      }
+
+      audio_event.reset(CreateEventA(nullptr, FALSE, FALSE, nullptr));
+      if (!audio_event) {
+        BOOST_LOG(error) << "Couldn't create client microphone audio event handle"sv;
+        return -1;
+      }
+
+      HRESULT status = device_enum->GetDevice(device_id.c_str(), &device);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't open client microphone sink device: [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      this->sample_rate = sample_rate;
+      this->frame_size = frame_size;
+      this->input_channels = input_channels;
+
+      if (try_init(input_channels) && (input_channels == 2 || try_init(2))) {
+        return -1;
+      }
+
+      {
+        DWORD task_index = 0;
+        mmcss_task_handle = AvSetMmThreadCharacteristics("Pro Audio", &task_index);
+        if (!mmcss_task_handle) {
+          BOOST_LOG(error) << "Couldn't associate client microphone render thread with Pro Audio MMCSS task [0x" << util::hex(GetLastError()).to_string_view() << ']';
+        }
+      }
+
+      status = audio_client->Start();
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't start client microphone sink rendering [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      return 0;
+    }
+
+    capture_e write(const float *samples, std::size_t frames) override {
+      std::size_t frames_written = 0;
+      while (frames_written < frames) {
+        UINT32 padding = 0;
+        auto status = audio_client->GetCurrentPadding(&padding);
+        if (status == AUDCLNT_E_DEVICE_INVALIDATED) {
+          return capture_e::reinit;
+        }
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Couldn't get client microphone sink padding [0x"sv << util::hex(status).to_string_view() << ']';
+          return capture_e::error;
+        }
+
+        UINT32 available_frames = buffer_frames - padding;
+        if (available_frames == 0) {
+          auto wait_status = WaitForSingleObjectEx(audio_event.get(), default_latency_ms, FALSE);
+          switch (wait_status) {
+            case WAIT_OBJECT_0:
+              continue;
+            case WAIT_TIMEOUT:
+              return capture_e::timeout;
+            default:
+              BOOST_LOG(error) << "Couldn't wait for client microphone sink event: [0x"sv << util::hex(wait_status).to_string_view() << ']';
+              return capture_e::error;
+          }
+        }
+
+        UINT32 frames_to_write = static_cast<UINT32>(std::min<std::size_t>(available_frames, frames - frames_written));
+        BYTE *buffer = nullptr;
+        status = audio_render->GetBuffer(frames_to_write, &buffer);
+        if (status == AUDCLNT_E_DEVICE_INVALIDATED) {
+          return capture_e::reinit;
+        }
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Couldn't acquire client microphone sink buffer [0x"sv << util::hex(status).to_string_view() << ']';
+          return capture_e::error;
+        }
+
+        copy_frames(reinterpret_cast<float *>(buffer), samples + frames_written * input_channels, frames_to_write);
+
+        status = audio_render->ReleaseBuffer(frames_to_write, 0);
+        if (status == AUDCLNT_E_DEVICE_INVALIDATED) {
+          return capture_e::reinit;
+        }
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Couldn't release client microphone sink buffer [0x"sv << util::hex(status).to_string_view() << ']';
+          return capture_e::error;
+        }
+
+        frames_written += frames_to_write;
+      }
+
+      return capture_e::ok;
+    }
+
+    ~client_mic_sink_wasapi_t() override {
+      if (audio_client) {
+        audio_client->Stop();
+      }
+
+      if (mmcss_task_handle) {
+        AvRevertMmThreadCharacteristics(mmcss_task_handle);
+      }
+    }
+
+  private:
+    int try_init(std::uint32_t output_channels) {
+      audio_client.reset();
+      audio_render.reset();
+      this->output_channels = output_channels;
+
+      HRESULT status = device->Activate(
+        IID_IAudioClient,
+        CLSCTX_ALL,
+        nullptr,
+        (void **) &audio_client
+      );
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't activate client microphone sink device: [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      auto channel_mask = channel_mask_for_client_mic(output_channels);
+      auto waveformat = create_waveformat(sample_format_e::f32, static_cast<WORD>(output_channels), channel_mask, sample_rate);
+      REFERENCE_TIME buffer_duration = static_cast<REFERENCE_TIME>(10000000ULL * frame_size * CLIENT_MIC_BUFFER_PACKETS / sample_rate);
+      status = audio_client->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        buffer_duration,
+        0,
+        reinterpret_cast<WAVEFORMATEX *>(&waveformat),
+        nullptr
+      );
+
+      if (FAILED(status)) {
+        BOOST_LOG(debug) << "Couldn't initialize client microphone sink as "sv << output_channels << " channel(s): [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      REFERENCE_TIME default_latency;
+      audio_client->GetDevicePeriod(&default_latency, nullptr);
+      default_latency_ms = static_cast<DWORD>(std::max<REFERENCE_TIME>(1, default_latency / 10000));
+
+      status = audio_client->GetBufferSize(&buffer_frames);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't get client microphone sink buffer size [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      status = audio_client->GetService(IID_IAudioRenderClient, (void **) &audio_render);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't initialize client microphone render client [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      status = audio_client->SetEventHandle(audio_event.get());
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't set client microphone sink event handle [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      BOOST_LOG(info) << "Client microphone sink format is "sv << output_channels << " channel(s), "sv << sample_rate << " Hz, buffer_frames="sv << buffer_frames;
+      return 0;
+    }
+
+    void copy_frames(float *dst, const float *src, UINT32 frames) {
+      if (input_channels == output_channels) {
+        std::memcpy(dst, src, static_cast<std::size_t>(frames) * input_channels * sizeof(float));
+        return;
+      }
+
+      if (input_channels == 1 && output_channels == 2) {
+        for (UINT32 i = 0; i < frames; ++i) {
+          dst[i * 2] = src[i];
+          dst[i * 2 + 1] = src[i];
+        }
+        return;
+      }
+
+      if (input_channels == 2 && output_channels == 1) {
+        for (UINT32 i = 0; i < frames; ++i) {
+          dst[i] = (src[i * 2] + src[i * 2 + 1]) * 0.5f;
+        }
+      }
+    }
+
+  public:
+    co_init_t co_init;
+    handle_t audio_event;
+    device_t device;
+    audio_client_t audio_client;
+    audio_render_t audio_render;
+
+    DWORD default_latency_ms {};
+    UINT32 buffer_frames {};
+    std::uint32_t sample_rate {};
+    std::uint32_t frame_size {};
+    std::uint32_t input_channels {};
+    std::uint32_t output_channels {};
+
+    HANDLE mmcss_task_handle = nullptr;
   };
 
   class mic_wasapi_t: public mic_t {
@@ -613,8 +853,7 @@ namespace platf::audio {
       for (
         status = audio_capture->GetNextPacketSize(&packet_size);
         SUCCEEDED(status) && packet_size > 0;
-        status = audio_capture->GetNextPacketSize(&packet_size)
-      ) {
+        status = audio_capture->GetNextPacketSize(&packet_size)) {
         DWORD buffer_flags;
         status = audio_capture->GetBuffer(
           (BYTE **) &sample_aligned.samples,
@@ -1178,6 +1417,37 @@ namespace platf {
     }
 
     return control;
+  }
+
+  std::unique_ptr<client_mic_sink_t> client_mic_sink(const std::string &sink, std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t channels) {
+    if (sink.empty()) {
+      BOOST_LOG(error) << "Client microphone sink is not configured"sv;
+      return nullptr;
+    }
+
+    audio::co_init_t co_init;
+    if (!co_init.ready()) {
+      BOOST_LOG(error) << "Couldn't initialize COM for client microphone sink discovery [0x"sv << util::hex(co_init.result()).to_string_view() << ']';
+      return nullptr;
+    }
+
+    audio::audio_control_t control;
+    if (control.init()) {
+      return nullptr;
+    }
+
+    auto matched = control.find_device_id(control.match_all_fields(utf_utils::from_utf8(sink)));
+    if (!matched) {
+      BOOST_LOG(error) << "Couldn't find client microphone sink " << sink;
+      return nullptr;
+    }
+
+    auto writer = std::make_unique<audio::client_mic_sink_wasapi_t>();
+    if (writer->init(control.device_enum, matched->second, sample_rate, frame_size, channels)) {
+      return nullptr;
+    }
+
+    return writer;
   }
 
   std::unique_ptr<deinit_t> init() {

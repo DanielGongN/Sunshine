@@ -4,6 +4,7 @@
  */
 
 // standard includes
+#include <cstring>
 #include <fstream>
 #include <future>
 #include <queue>
@@ -150,11 +151,21 @@ namespace stream {
   }
   enum class socket_e : int {
     video,  ///< Video
-    audio  ///< Audio
+    audio,  ///< Audio
+    mic  ///< Client microphone
   };
 
   std::string_view socket_type_name(socket_e type) {
-    return type == socket_e::video ? "video"sv : "audio"sv;
+    switch (type) {
+      case socket_e::video:
+        return "video"sv;
+      case socket_e::audio:
+        return "audio"sv;
+      case socket_e::mic:
+        return "mic"sv;
+    }
+
+    return "unknown"sv;
   }
 
 #pragma pack(push, 1)
@@ -317,6 +328,8 @@ namespace stream {
   using av_session_id_t = std::variant<asio::ip::address, std::string>;  // IP address or SS-Ping-Payload from RTSP handshake
   using message_queue_t = std::shared_ptr<safe::queue_t<std::pair<udp::endpoint, std::string>>>;
   using message_queue_queue_t = std::shared_ptr<safe::queue_t<std::tuple<socket_e, av_session_id_t, message_queue_t>>>;
+  using mic_packet_queue_queue_t = std::shared_ptr<safe::queue_t<std::pair<std::string, client_mic::packet_queue_t>>>;
+  constexpr auto CLIENT_MIC_PACKET_QUEUE_SIZE = 8;
 
   // return bytes written on success
   // return -1 on error
@@ -399,6 +412,7 @@ namespace stream {
 
   struct broadcast_ctx_t {
     message_queue_queue_t message_queue_queue;
+    mic_packet_queue_queue_t mic_packet_queue_queue;
 
     std::thread recv_thread;
     std::thread video_thread;
@@ -409,6 +423,7 @@ namespace stream {
 
     udp::socket video_sock {io_context};
     udp::socket audio_sock {io_context};
+    udp::socket mic_sock {io_context};
 
     control_server_t control_server;
   };
@@ -421,6 +436,7 @@ namespace stream {
     std::shared_ptr<input::input_t> input;
 
     std::thread audioThread;
+    std::thread micThread;
     std::thread videoThread;
 
     std::chrono::steady_clock::time_point pingTimeout;
@@ -460,6 +476,14 @@ namespace stream {
       audio_fec_packet_t fec_packet;
       std::unique_ptr<platf::deinit_t> qos;
     } audio;
+
+    struct {
+      std::string ping_payload;
+      udp::endpoint peer;
+      client_mic::packet_queue_t packets;
+      std::optional<crypto::cipher::gcm_t> cipher;
+      std::unique_ptr<platf::deinit_t> qos;
+    } mic;
 
     struct {
       crypto::cipher::gcm_t cipher;
@@ -1400,22 +1424,26 @@ namespace stream {
   void recvThread(broadcast_ctx_t &ctx) {
     std::map<av_session_id_t, message_queue_t> peer_to_video_session;
     std::map<av_session_id_t, message_queue_t> peer_to_audio_session;
+    std::map<av_session_id_t, message_queue_t> peer_to_mic_session;
+    std::map<std::string, client_mic::packet_queue_t> peer_to_mic_packet_queue;
 
     auto &video_sock = ctx.video_sock;
     auto &audio_sock = ctx.audio_sock;
+    auto &mic_sock = ctx.mic_sock;
 
     auto &message_queue_queue = ctx.message_queue_queue;
+    auto &mic_packet_queue_queue = ctx.mic_packet_queue_queue;
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
 
     auto &io = ctx.io_context;
 
-    std::array<udp::endpoint, 2> peers;
-    std::array<std::uint64_t, 2> recv_counts {};
-    std::array<std::uint64_t, 2> matched_counts {};
-    std::array<std::uint64_t, 2> unmatched_counts {};
+    std::array<udp::endpoint, 3> peers;
+    std::array<std::uint64_t, 3> recv_counts {};
+    std::array<std::uint64_t, 3> matched_counts {};
+    std::array<std::uint64_t, 3> unmatched_counts {};
 
-    std::array<char, 2048> buf[2];
-    std::function<void(const boost::system::error_code, size_t)> recv_func[2];
+    std::array<char, 2048> buf[3];
+    std::function<void(const boost::system::error_code, size_t)> recv_func[3];
 
     platf::set_thread_name("stream::recv");
 
@@ -1439,6 +1467,26 @@ namespace stream {
               peer_to_audio_session.erase(session_id);
             }
             break;
+          case socket_e::mic:
+            if (message_queue) {
+              peer_to_mic_session.emplace(session_id, message_queue);
+            } else {
+              peer_to_mic_session.erase(session_id);
+            }
+            break;
+        }
+      }
+    };
+
+    auto populate_peer_to_mic_packet_queue = [&]() {
+      while (mic_packet_queue_queue->peek()) {
+        auto packet_queue_opt = mic_packet_queue_queue->pop();
+        TUPLE_2D_REF(peer_key, packet_queue, *packet_queue_opt);
+
+        if (packet_queue) {
+          peer_to_mic_packet_queue.emplace(peer_key, packet_queue);
+        } else {
+          peer_to_mic_packet_queue.erase(peer_key);
         }
       }
     };
@@ -1456,6 +1504,7 @@ namespace stream {
         auto type_name = socket_type_name(socket_type);
 
         populate_peer_to_session();
+        populate_peer_to_mic_packet_queue();
 
         // No data, yet no error
         if (ec == boost::system::errc::connection_refused || ec == boost::system::errc::connection_reset) {
@@ -1471,6 +1520,17 @@ namespace stream {
                            << " bytes="sv << bytes
                            << " err="sv << ec.message();
           return;
+        }
+
+        if (socket_type == socket_e::mic && bytes > sizeof(RTP_PACKET)) {
+          auto peer_key = udp_endpoint_to_string(peer);
+          auto packet_queue = peer_to_mic_packet_queue.find(peer_key);
+          if (packet_queue != std::end(peer_to_mic_packet_queue)) {
+            std::vector<std::uint8_t> packet(bytes);
+            std::memcpy(packet.data(), buf[buf_elem].data(), bytes);
+            packet_queue->second->raise(std::move(packet));
+            return;
+          }
         }
 
         auto packet_count = ++recv_counts[buf_elem];
@@ -1536,9 +1596,15 @@ namespace stream {
 
     recv_func_init(video_sock, 0, socket_e::video, peer_to_video_session);
     recv_func_init(audio_sock, 1, socket_e::audio, peer_to_audio_session);
+    if (mic_sock.is_open()) {
+      recv_func_init(mic_sock, 2, socket_e::mic, peer_to_mic_session);
+    }
 
     video_sock.async_receive_from(asio::buffer(buf[0]), peers[0], 0, recv_func[0]);
     audio_sock.async_receive_from(asio::buffer(buf[1]), peers[1], 0, recv_func[1]);
+    if (mic_sock.is_open()) {
+      mic_sock.async_receive_from(asio::buffer(buf[2]), peers[2], 0, recv_func[2]);
+    }
 
     while (!broadcast_shutdown_event->peek()) {
       io.run();
@@ -1989,6 +2055,8 @@ namespace stream {
     auto control_port = net::map_port(CONTROL_PORT);
     auto video_port = net::map_port(VIDEO_STREAM_PORT);
     auto audio_port = net::map_port(AUDIO_STREAM_PORT);
+    auto mic_port = net::map_port(CLIENT_MIC_STREAM_PORT);
+    auto client_mic_available = config::audio.client_mic && !config::audio.client_mic_sink.empty();
 
     if (ctx.control_server.bind(address_family, control_port)) {
       BOOST_LOG(error) << "Couldn't bind Control server to port ["sv << control_port << "], likely another process already bound to the port"sv;
@@ -2039,7 +2107,25 @@ namespace stream {
       return -1;
     }
 
+    if (client_mic_available) {
+      // Client microphone traffic is gateway-only. Keep the internal UDP port on loopback.
+      ctx.mic_sock.open(udp::v4(), ec);
+      if (ec) {
+        BOOST_LOG(fatal) << "Couldn't open socket for Client Microphone server: "sv << ec.message();
+
+        return -1;
+      }
+
+      ctx.mic_sock.bind(udp::endpoint(asio::ip::make_address("127.0.0.1"), mic_port), ec);
+      if (ec) {
+        BOOST_LOG(fatal) << "Couldn't bind Client Microphone server to port ["sv << mic_port << "]: "sv << ec.message();
+
+        return -1;
+      }
+    }
+
     ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>(30);
+    ctx.mic_packet_queue_queue = std::make_shared<mic_packet_queue_queue_t::element_type>(30);
 
     ctx.video_thread = std::thread {videoBroadcastThread, std::ref(ctx.video_sock)};
     ctx.audio_thread = std::thread {audioBroadcastThread, std::ref(ctx.audio_sock)};
@@ -2063,10 +2149,14 @@ namespace stream {
     audio_packets->stop();
 
     ctx.message_queue_queue->stop();
+    ctx.mic_packet_queue_queue->stop();
     ctx.io_context.stop();
 
     ctx.video_sock.close();
     ctx.audio_sock.close();
+    if (ctx.mic_sock.is_open()) {
+      ctx.mic_sock.close();
+    }
 
     video_packets.reset();
     audio_packets.reset();
@@ -2230,6 +2320,45 @@ namespace stream {
     audio::capture(session->mail, session->config.audio, session);
   }
 
+  void micThread(session_t *session) {
+    platf::set_thread_name("session::clientMic");
+    platf::adjust_thread_priority(platf::thread_priority_e::critical);
+    auto fg = util::fail_guard([&]() {
+      session::stop(*session);
+    });
+
+    if (!session->config.client_mic.enabled) {
+      return;
+    }
+
+    while_starting_do_nothing(session->state);
+
+    auto ref = broadcast.ref();
+    auto error = recv_ping(session, ref, socket_e::mic, session->mic.ping_payload, session->mic.peer, config::stream.ping_timeout);
+    if (error < 0) {
+      return;
+    }
+
+    auto address = session->mic.peer.address();
+    session->mic.qos = platf::enable_socket_qos(ref->mic_sock.native_handle(), address, session->mic.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+
+    session->mic.packets = std::make_shared<client_mic::packet_queue_t::element_type>(CLIENT_MIC_PACKET_QUEUE_SIZE);
+    auto peer_key = udp_endpoint_to_string(session->mic.peer);
+    ref->mic_packet_queue_queue->raise(peer_key, session->mic.packets);
+    auto packet_queue_fg = util::fail_guard([&]() {
+      session->mic.packets->stop();
+      ref->mic_packet_queue_queue->raise(peer_key, nullptr);
+    });
+
+    BOOST_LOG(debug) << "Start receiving Client Microphone"sv;
+    client_mic::receive(
+      session->mail,
+      session->config.client_mic,
+      session->mic.packets,
+      session->mic.cipher ? &*session->mic.cipher : nullptr
+    );
+  }
+
   namespace session {
     std::atomic_uint running_sessions;
 
@@ -2271,6 +2400,10 @@ namespace stream {
       session.videoThread.join();
       BOOST_LOG(debug) << "Waiting for audio to end..."sv;
       session.audioThread.join();
+      if (session.micThread.joinable()) {
+        BOOST_LOG(debug) << "Waiting for client microphone to end..."sv;
+        session.micThread.join();
+      }
       BOOST_LOG(debug) << "Waiting for control to end..."sv;
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys
@@ -2323,10 +2456,15 @@ namespace stream {
       session.video.peer.port(0);
       session.audio.peer.address(addr);
       session.audio.peer.port(0);
+      session.mic.peer.address(addr);
+      session.mic.peer.port(0);
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
       session.audioThread = std::thread {audioThread, &session};
+      if (session.config.client_mic.enabled) {
+        session.micThread = std::thread {micThread, &session};
+      }
       session.videoThread = std::thread {videoThread, &session};
 
       input::update_input_time();
@@ -2409,6 +2547,15 @@ namespace stream {
       session->audio.avRiKeyId = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
       session->audio.sequenceNumber = 0;
       session->audio.timestamp = 0;
+
+      session->mic.ping_payload = launch_session.mic_ping_payload.empty() ? launch_session.av_ping_payload : launch_session.mic_ping_payload;
+      if (config.client_mic.encrypted) {
+        BOOST_LOG(info) << "Client microphone encryption enabled"sv;
+        session->mic.cipher = crypto::cipher::gcm_t {
+          launch_session.gcm_key,
+          false
+        };
+      }
 
       session->control.peer = nullptr;
       session->state.store(state_e::STOPPED, std::memory_order_relaxed);

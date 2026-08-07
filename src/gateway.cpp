@@ -40,7 +40,7 @@ namespace gateway {
 
   using socket_ptr = std::shared_ptr<tcp::socket>;
 
-  constexpr std::size_t UDP_GATEWAY_HEADER_SIZE = 3;
+  constexpr std::size_t UDP_GATEWAY_HEADER_SIZE = UDP_HEADER_SIZE;
   constexpr std::size_t UDP_MAX_AUDIO_QUEUE_BYTES = 128 * 1024;
   constexpr std::size_t UDP_MAX_AUDIO_QUEUE_PACKETS = 128;
   constexpr std::size_t UDP_MAX_VIDEO_QUEUE_BYTES = 512 * 1024;
@@ -106,6 +106,8 @@ namespace gateway {
         return net::map_port(stream::CONTROL_PORT);
       case STREAM_AUDIO:
         return net::map_port(stream::AUDIO_STREAM_PORT);
+      case STREAM_CLIENT_MIC:
+        return net::map_port(stream::CLIENT_MIC_STREAM_PORT);
       default:
         return 0;
     }
@@ -119,9 +121,19 @@ namespace gateway {
         return "control"sv;
       case STREAM_AUDIO:
         return "audio"sv;
+      case STREAM_CLIENT_MIC:
+        return "client_mic"sv;
       default:
         return "unknown"sv;
     }
+  }
+
+  bool is_framed_tcp_stream(std::uint8_t stream_id) {
+    return stream_id == STREAM_HTTPS || stream_id == STREAM_RTSP;
+  }
+
+  bool is_client_bound_udp_stream(std::uint8_t stream_id) {
+    return stream_id == STREAM_AUDIO || stream_id == STREAM_VIDEO;
   }
 
   std::string udp_endpoint_to_string(const udp::endpoint &endpoint) {
@@ -273,6 +285,7 @@ namespace gateway {
     std::chrono::steady_clock::time_point udp_last_stats_log {};
     std::uint64_t udp_control_in_packets {};
     std::uint64_t udp_audio_in_packets {};
+    std::uint64_t udp_client_mic_in_packets {};
     std::uint64_t udp_video_in_packets {};
     std::uint64_t udp_invalid_in_packets {};
     std::uint64_t udp_control_out_packets {};
@@ -280,6 +293,7 @@ namespace gateway {
     std::uint64_t udp_video_out_packets {};
     std::uint64_t udp_control_in_bytes {};
     std::uint64_t udp_audio_in_bytes {};
+    std::uint64_t udp_client_mic_in_bytes {};
     std::uint64_t udp_video_in_bytes {};
     std::uint64_t udp_control_out_bytes {};
     std::uint64_t udp_audio_out_payload_bytes {};
@@ -317,6 +331,9 @@ namespace gateway {
     start_udp_forwarder(net::map_port(stream::VIDEO_STREAM_PORT), STREAM_VIDEO);
     start_udp_forwarder(net::map_port(stream::CONTROL_PORT), STREAM_CONTROL);
     start_udp_forwarder(net::map_port(stream::AUDIO_STREAM_PORT), STREAM_AUDIO);
+    if (config::audio.client_mic && !config::audio.client_mic_sink.empty()) {
+      start_udp_forwarder(net::map_port(stream::CLIENT_MIC_STREAM_PORT), STREAM_CLIENT_MIC);
+    }
 
     BOOST_LOG(info) << "Gateway listening on 0.0.0.0:"sv << base_port << " (TCP+UDP)"sv;
   }
@@ -345,11 +362,14 @@ namespace gateway {
 
 #if 0
       BOOST_LOG(info) << "[gateway][udp-idle] public="sv << udp_endpoint_to_string(udp_public_endpoint)
-                      << " clients(video/control/audio)="sv << get_client_port(STREAM_VIDEO) << '/' << get_client_port(STREAM_CONTROL) << '/' << get_client_port(STREAM_AUDIO)
-                      << " in(video/control/audio/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
+                      << " clients(video/control/audio/client_mic)="sv << get_client_port(STREAM_VIDEO) << '/' << get_client_port(STREAM_CONTROL) << '/' << get_client_port(STREAM_AUDIO) << '/'
+                      << get_client_port(STREAM_CLIENT_MIC)
+                      << " in(video/control/audio/client_mic/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
+                      << udp_client_mic_in_packets << '/'
                       << udp_invalid_in_packets
                       << " out(control/audio/video)="sv << udp_control_out_packets << '/' << udp_audio_out_packets << '/' << udp_video_out_packets
-                      << " bytes_in(video/control/audio)="sv << udp_video_in_bytes << '/' << udp_control_in_bytes << '/' << udp_audio_in_bytes;
+                      << " bytes_in(video/control/audio/client_mic)="sv << udp_video_in_bytes << '/' << udp_control_in_bytes << '/' << udp_audio_in_bytes << '/'
+                      << udp_client_mic_in_bytes;
 #endif
 
       schedule_udp_stats_timer();
@@ -385,7 +405,7 @@ namespace gateway {
         BOOST_LOG(info) << "[gateway] TLS passthrough from "sv << remote_ep.address().to_string()
                         << ':' << remote_ep.port() << " to nvhttp"sv;
         start_tls_tunnel(client_ptr, first_byte);
-      } else if (first_byte >= STREAM_HTTPS && first_byte <= STREAM_RTSP) {
+      } else if (is_framed_tcp_stream(first_byte)) {
         BOOST_LOG(info) << "[gateway] framed TCP stream 0x"sv << util::hex(first_byte).to_string_view()
                         << " from "sv << remote_ep.address().to_string();
         start_framed_tcp(client_ptr, first_byte);
@@ -808,15 +828,15 @@ namespace gateway {
     udp_video_out_peak = std::max(udp_video_out_peak, udp_video_out_queue.size());
 #if 0
     auto control_idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - udp_last_control_activity).count();
-    BOOST_LOG(info) << "[gateway][udp-stats] in(video/control/audio/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
-                    << udp_invalid_in_packets
+    BOOST_LOG(info) << "[gateway][udp-stats] in(video/control/audio/client_mic/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
+                    << udp_client_mic_in_packets << '/' << udp_invalid_in_packets
                     << " out(control/audio/video)="sv << udp_control_out_packets << '/' << udp_audio_out_packets << '/' << udp_video_out_packets
                     << " drops(audio/video)="sv << udp_audio_drop_count << '/' << udp_video_drop_count
                     << " q(ctrl_in/ctrl_out/audio/video)="sv << udp_control_in_queue.size() << '/' << udp_control_out_queue.size() << '/'
                     << udp_audio_out_queue.size() << '/' << udp_video_out_queue.size()
                     << " peaks(ctrl_in/ctrl_out/audio/video)="sv << udp_control_in_peak << '/' << udp_control_out_peak << '/'
                     << udp_audio_out_peak << '/' << udp_video_out_peak
-                    << " bytes_in(video/control/audio)="sv << udp_video_in_bytes << '/' << udp_control_in_bytes << '/' << udp_audio_in_bytes
+                    << " bytes_in(video/control/audio/client_mic)="sv << udp_video_in_bytes << '/' << udp_control_in_bytes << '/' << udp_audio_in_bytes << '/' << udp_client_mic_in_bytes
                     << " bytes_out(control/audio/video)="sv << udp_control_out_bytes << '/' << udp_audio_out_payload_bytes << '/' << udp_video_out_payload_bytes
                     << " active(ctrl/audio/video)="sv << udp_control_out_send_active << '/' << udp_audio_out_send_active << '/' << udp_video_out_send_active
                     << " control_idle_ms="sv << control_idle_ms;
@@ -1016,14 +1036,22 @@ namespace gateway {
       return;
     }
 
+    auto in_sock = std::make_shared<udp::socket>(ioc);
+    in_sock->open(udp::v4());
+    in_sock->bind(udp::endpoint {asio::ip::make_address("127.0.0.1"), 0});
+
+    if (!is_client_bound_udp_stream(stream_id)) {
+      BOOST_LOG(info) << "[gateway] UDP forwarder stream=0x"sv << util::hex(stream_id).to_string_view()
+                      << " inbound 127.0.0.1:"sv << in_sock->local_endpoint().port();
+
+      udp_internal_sockets[stream_id] = in_sock;
+      return;
+    }
+
     auto out_sock = std::make_shared<udp::socket>(ioc);
     out_sock->open(udp::v4());
     auto fwd_port = static_cast<std::uint16_t>(target_port + UDP_FWD_OFFSET);
     out_sock->bind(udp::endpoint {asio::ip::make_address("127.0.0.1"), fwd_port});
-
-    auto in_sock = std::make_shared<udp::socket>(ioc);
-    in_sock->open(udp::v4());
-    in_sock->bind(udp::endpoint {asio::ip::make_address("127.0.0.1"), 0});
 
     BOOST_LOG(info) << "[gateway] UDP forwarder stream=0x"sv << util::hex(stream_id).to_string_view()
                     << " outbound 127.0.0.1:"sv << fwd_port
@@ -1148,6 +1176,10 @@ namespace gateway {
         case STREAM_AUDIO:
           inbound_count = ++udp_audio_in_packets;
           udp_audio_in_bytes += payload_len;
+          break;
+        case STREAM_CLIENT_MIC:
+          inbound_count = ++udp_client_mic_in_packets;
+          udp_client_mic_in_bytes += payload_len;
           break;
         case STREAM_VIDEO:
           inbound_count = ++udp_video_in_packets;

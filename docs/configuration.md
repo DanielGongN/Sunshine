@@ -902,6 +902,66 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### client_mic
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Allows compatible clients to send microphone audio to Sunshine.
+            On Windows, Sunshine decodes the client microphone stream and writes it to
+            [client_mic_sink](#client_mic_sink). Use this with a virtual audio device such as
+            Virtual Audio Cable, then select the matching recording endpoint in host applications.
+            Compatible clients should send 48 kHz Opus microphone audio using the advertised
+            10 ms packet duration for low latency. Set the virtual audio device format to
+            48 kHz where possible to avoid extra Windows resampling.
+            @note{This option is only supported on Windows.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            client_mic = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### client_mic_sink
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The Windows playback endpoint that receives client microphone audio.
+            For Virtual Audio Cable, set this to the playback endpoint, usually
+            <code>CABLE Input (VB-Audio Virtual Cable)</code>. Host applications should then use
+            the matching recording endpoint, usually <code>CABLE Output (VB-Audio Virtual Cable)</code>.
+            @tip{Enter the following command in command prompt or PowerShell to find the device name
+            or Device ID.
+            @code{}
+            %ProgramFiles%\Sunshine\tools\audio-info.exe
+            @endcode}
+            @note{This option is only supported on Windows.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">n/a</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            client_mic_sink = CABLE Input (VB-Audio Virtual Cable)
+            @endcode</td>
+    </tr>
+</table>
+
 ### adapter_name
 
 <table>

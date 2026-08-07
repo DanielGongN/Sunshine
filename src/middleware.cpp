@@ -23,6 +23,7 @@
 // local includes
 #include "config.h"
 #include "file_handler.h"
+#include "gateway.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -487,11 +488,23 @@ namespace middleware {
       msg["event"] = "stream_engine_info";
       json data;
       data["cert"] = cert;
+
+      json gateway_streams;
+      gateway_streams["https"] = static_cast<int>(gateway::STREAM_HTTPS);
+      gateway_streams["video"] = static_cast<int>(gateway::STREAM_VIDEO);
+      gateway_streams["control"] = static_cast<int>(gateway::STREAM_CONTROL);
+      gateway_streams["audio"] = static_cast<int>(gateway::STREAM_AUDIO);
+      gateway_streams["rtsp"] = static_cast<int>(gateway::STREAM_RTSP);
+      gateway_streams["client_mic"] = static_cast<int>(gateway::STREAM_CLIENT_MIC);
+
+      json gateway_info;
+      gateway_info["port"] = gateway_port;
+      gateway_info["protocol"] = "steam_gateway_v1";
+      gateway_info["udp_header_bytes"] = gateway::UDP_HEADER_SIZE;
+      gateway_info["streams"] = std::move(gateway_streams);
+
       // Gateway external single port (handles 0x01/0x16 protocol split).
-      data["gateway"] = {
-        {"port", gateway_port},
-        {"protocol", "steam_gateway_v1"}
-      };
+      data["gateway"] = std::move(gateway_info);
       // Internal HTTPS port, for reference only; external clients should not connect directly.
       data["internal_https_port"] = internal_https_port;
       data["port"] = gateway_port;  // Backward compatibility: the default port is now the gateway port.

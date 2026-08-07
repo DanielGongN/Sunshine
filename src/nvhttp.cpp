@@ -446,6 +446,8 @@ namespace nvhttp {
     unsigned char raw_payload[8];
     RAND_bytes(raw_payload, sizeof(raw_payload));
     launch_session->av_ping_payload = util::hex_vec(raw_payload);
+    RAND_bytes(raw_payload, sizeof(raw_payload));
+    launch_session->mic_ping_payload = util::hex_vec(raw_payload);
     RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
 
     // Prepare display and probe encoders
@@ -563,6 +565,8 @@ namespace nvhttp {
     unsigned char raw_payload[8];
     RAND_bytes(raw_payload, sizeof(raw_payload));
     launch_session->av_ping_payload = util::hex_vec(raw_payload);
+    RAND_bytes(raw_payload, sizeof(raw_payload));
+    launch_session->mic_ping_payload = util::hex_vec(raw_payload);
     RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
 
     launch_session->iv.resize(16);

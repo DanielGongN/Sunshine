@@ -23,7 +23,9 @@ extern "C" {
 #include <boost/bind.hpp>
 
 // local includes
+#include "client_mic.h"
 #include "config.h"
+#include "gateway.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -82,6 +84,10 @@ namespace rtsp_stream {
 
   using msg_t = util::safe_ptr<RTSP_MESSAGE, free_msg>;
   using cmd_func_t = std::function<void(rtsp_server_t *server, tcp::socket &, launch_session_t &, msg_t &&)>;
+
+  bool client_mic_supported() {
+    return config::audio.client_mic && !config::audio.client_mic_sink.empty();
+  }
 
   void print_msg(PRTSP_MESSAGE msg);
   void cmd_not_found(tcp::socket &sock, launch_session_t &, msg_t &&req);
@@ -799,6 +805,10 @@ namespace rtsp_stream {
     // Always request new control stream encryption if the client supports it
     uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO;
     uint32_t encryption_flags_requested = SS_ENC_CONTROL_V2;
+    auto client_mic_is_supported = client_mic_supported();
+    if (client_mic_is_supported) {
+      encryption_flags_supported |= client_mic::ENCRYPTION_FLAG;
+    }
 
     // Determine the encryption desired for this remote endpoint
     auto encryption_mode = net::encryption_mode_for_address(sock.remote_endpoint().address());
@@ -810,12 +820,27 @@ namespace rtsp_stream {
       // didn't explicitly opt in, but it otherwise has support.
       if (encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
         encryption_flags_requested |= SS_ENC_VIDEO | SS_ENC_AUDIO;
+        if (client_mic_is_supported) {
+          encryption_flags_requested |= client_mic::ENCRYPTION_FLAG;
+        }
       }
     }
 
     // Report supported and required encryption flags
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
     ss << "a=x-ss-general.encryptionRequested:" << encryption_flags_requested << std::endl;
+
+    if (client_mic_is_supported) {
+      ss << "a=x-ss-mic.supported:1"sv << std::endl;
+      ss << "a=x-ss-mic.sampleRate:"sv << client_mic::SAMPLE_RATE << std::endl;
+      ss << "a=x-ss-mic.channels:"sv << client_mic::DEFAULT_CHANNELS << std::endl;
+      ss << "a=x-ss-mic.maxChannels:"sv << client_mic::MAX_CHANNELS << std::endl;
+      ss << "a=x-ss-mic.packetDuration:"sv << client_mic::DEFAULT_PACKET_DURATION << std::endl;
+      ss << "a=x-ss-mic.rtpPayloadType:"sv << static_cast<int>(client_mic::RTP_PAYLOAD_TYPE) << std::endl;
+      ss << "a=x-ss-mic.encryptionFlag:"sv << client_mic::ENCRYPTION_FLAG << std::endl;
+      ss << "a=x-ss-mic.gatewayStreamId:"sv << static_cast<int>(gateway::STREAM_CLIENT_MIC) << std::endl;
+      ss << "a=x-ss-mic.gatewayUdpHeaderSize:"sv << gateway::UDP_HEADER_SIZE << std::endl;
+    }
 
     if (video::last_encoder_probe_supported_ref_frames_invalidation) {
       ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;
@@ -866,12 +891,14 @@ namespace rtsp_stream {
   }
 
   void cmd_setup(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
-    OPTION_ITEM options[4] {};
+    OPTION_ITEM options[6] {};
 
     auto &seqn = options[0];
     auto &session_option = options[1];
     auto &port_option = options[2];
     auto &payload_option = options[3];
+    auto &gateway_stream_option = options[4];
+    auto &gateway_header_option = options[5];
 
     seqn.option = const_cast<char *>("CSeq");
 
@@ -884,12 +911,20 @@ namespace rtsp_stream {
     std::string_view type {begin, (size_t) std::distance(begin, end)};
 
     std::uint16_t port;
+    auto is_mic = false;
     if (type == "audio"sv) {
       port = net::map_port(stream::AUDIO_STREAM_PORT);
     } else if (type == "video"sv) {
       port = net::map_port(stream::VIDEO_STREAM_PORT);
     } else if (type == "control"sv) {
       port = net::map_port(stream::CONTROL_PORT);
+    } else if (type == "mic"sv || type == "client-mic"sv) {
+      if (!client_mic_supported()) {
+        cmd_not_found(sock, session, std::move(req));
+        return;
+      }
+      port = config::sunshine.port;
+      is_mic = true;
     } else {
       cmd_not_found(sock, session, std::move(req));
 
@@ -915,11 +950,22 @@ namespace rtsp_stream {
       payload_option.option = const_cast<char *>("X-SS-Connect-Data");
       payload_option.content = connect_data.data();
     } else {
+      auto &ping_payload = is_mic ? session.mic_ping_payload : session.av_ping_payload;
       payload_option.option = const_cast<char *>("X-SS-Ping-Payload");
-      payload_option.content = session.av_ping_payload.data();
+      payload_option.content = ping_payload.data();
     }
 
     port_option.next = &payload_option;
+    auto gateway_stream_id = std::to_string(static_cast<int>(gateway::STREAM_CLIENT_MIC));
+    auto gateway_header_size = std::to_string(gateway::UDP_HEADER_SIZE);
+    if (is_mic) {
+      payload_option.next = &gateway_stream_option;
+      gateway_stream_option.option = const_cast<char *>("X-SS-Gateway-Stream-ID");
+      gateway_stream_option.content = gateway_stream_id.data();
+      gateway_stream_option.next = &gateway_header_option;
+      gateway_header_option.option = const_cast<char *>("X-SS-Gateway-UDP-Header-Bytes");
+      gateway_header_option.content = gateway_header_size.data();
+    }
 
     respond(sock, session, &seqn, 200, "OK", req->sequenceNumber, {});
   }
@@ -992,6 +1038,11 @@ namespace rtsp_stream {
     args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
     args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
     args.try_emplace("x-nv-video[0].clientRefreshRateX100"sv, "0"sv);
+    args.try_emplace("x-ss-mic.enabled"sv, "0"sv);
+    args.try_emplace("x-ss-mic.channels"sv, "1"sv);
+    args.try_emplace("x-ss-mic.sampleRate"sv, "48000"sv);
+    args.try_emplace("x-ss-mic.packetDuration"sv, "10"sv);
+    args.try_emplace("x-ss-mic.rtpPayloadType"sv, "110"sv);
 
     stream::config_t config;
 
@@ -1016,6 +1067,21 @@ namespace rtsp_stream {
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
       if (util::from_view(args.at("x-nv-general.featureFlags"sv)) & 0x20) {
         config.encryptionFlagsEnabled |= SS_ENC_AUDIO;
+      }
+
+      config.client_mic.enabled = client_mic_supported() && util::from_view(args.at("x-ss-mic.enabled"sv)) != 0;
+      if (config.client_mic.enabled) {
+        config.client_mic.channels = (int) util::from_view(args.at("x-ss-mic.channels"sv));
+        config.client_mic.sample_rate = (int) util::from_view(args.at("x-ss-mic.sampleRate"sv));
+        config.client_mic.packet_duration = (int) util::from_view(args.at("x-ss-mic.packetDuration"sv));
+        config.client_mic.encrypted = (config.encryptionFlagsEnabled & client_mic::ENCRYPTION_FLAG) != 0;
+
+        auto payload_type = (int) util::from_view(args.at("x-ss-mic.rtpPayloadType"sv));
+        if (payload_type != client_mic::RTP_PAYLOAD_TYPE || !client_mic::validate_config(config.client_mic)) {
+          BOOST_LOG(warning) << "Client requested invalid microphone parameters"sv;
+          respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+          return;
+        }
       }
 
       // Limit the packetsize to avoid fragmentation with clients that cannot configure this value
@@ -1145,9 +1211,14 @@ namespace rtsp_stream {
 
     // Check that any required encryption is enabled
     auto encryption_mode = net::encryption_mode_for_address(sock.remote_endpoint().address());
-    if (encryption_mode == config::ENCRYPTION_MODE_MANDATORY &&
-        (config.encryptionFlagsEnabled & (SS_ENC_VIDEO | SS_ENC_AUDIO)) != (SS_ENC_VIDEO | SS_ENC_AUDIO)) {
+    if (encryption_mode == config::ENCRYPTION_MODE_MANDATORY && (config.encryptionFlagsEnabled & (SS_ENC_VIDEO | SS_ENC_AUDIO)) != (SS_ENC_VIDEO | SS_ENC_AUDIO)) {
       BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
+
+      respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
+      return;
+    }
+    if (encryption_mode == config::ENCRYPTION_MODE_MANDATORY && config.client_mic.enabled && !(config.encryptionFlagsEnabled & client_mic::ENCRYPTION_FLAG)) {
+      BOOST_LOG(error) << "Rejecting client microphone uplink without mandatory encryption"sv;
 
       respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
       return;

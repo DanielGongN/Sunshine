@@ -64,6 +64,25 @@ const config = ref(props.config)
                   v-model="config.install_steam_audio_drivers"
                   default="true"
         ></Checkbox>
+
+        <!-- Client Microphone -->
+        <Checkbox class="mb-3"
+                  id="client_mic"
+                  locale-prefix="config"
+                  v-model="config.client_mic"
+                  default="false"
+        ></Checkbox>
+
+        <!-- Client Microphone Sink -->
+        <div class="mb-3" v-if="config.client_mic === 'enabled'">
+          <label for="client_mic_sink" class="form-label">{{ $t('config.client_mic_sink') }}</label>
+          <input type="text" class="form-control" id="client_mic_sink" :placeholder="$t('config.client_mic_sink_placeholder')"
+                 v-model="config.client_mic_sink" />
+          <div class="form-text">
+            {{ $t('config.client_mic_sink_desc') }}
+            <pre>tools\audio-info.exe</pre>
+          </div>
+        </div>
       </template>
     </PlatformLayout>
 

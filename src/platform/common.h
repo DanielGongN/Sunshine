@@ -572,6 +572,13 @@ namespace platf {
     virtual ~mic_t() = default;
   };
 
+  class client_mic_sink_t {
+  public:
+    virtual capture_e write(const float *samples, std::size_t frames) = 0;
+
+    virtual ~client_mic_sink_t() = default;
+  };
+
   class audio_control_t {
   public:
     virtual int set_sink(const std::string &sink) = 0;
@@ -589,6 +596,8 @@ namespace platf {
 
     virtual ~audio_control_t() = default;
   };
+
+  std::unique_ptr<client_mic_sink_t> client_mic_sink(const std::string &sink, std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t channels);
 
   void freeInput(void *);
 

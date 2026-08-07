@@ -12,6 +12,7 @@
 
 // local includes
 #include "audio.h"
+#include "client_mic.h"
 #include "crypto.h"
 #include "video.h"
 
@@ -19,11 +20,13 @@ namespace stream {
   constexpr auto VIDEO_STREAM_PORT = 14;
   constexpr auto CONTROL_PORT = 15;
   constexpr auto AUDIO_STREAM_PORT = 16;
+  constexpr auto CLIENT_MIC_STREAM_PORT = 17;
 
   struct session_t;
 
   struct config_t {
     audio::config_t audio;
+    client_mic::config_t client_mic;
     video::config_t monitor;
 
     int packetsize;
