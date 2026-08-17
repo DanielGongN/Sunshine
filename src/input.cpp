@@ -44,9 +44,6 @@ namespace input {
   std::atomic<std::chrono::steady_clock::time_point> last_input_time {std::chrono::steady_clock::now()};
 
   constexpr auto MAX_GAMEPADS = std::min((std::size_t) platf::MAX_GAMEPADS, sizeof(std::int16_t) * 8);
-#define DISABLE_LEFT_BUTTON_DELAY ((thread_pool_util::ThreadPool::task_id_t) 0x01)
-#define ENABLE_LEFT_BUTTON_DELAY nullptr
-
   constexpr auto VKEY_SHIFT = 0x10;
   constexpr auto VKEY_LSHIFT = 0xA0;
   constexpr auto VKEY_RSHIFT = 0xA1;
@@ -125,8 +122,7 @@ namespace input {
   constexpr auto INPUT_STATS_LOG_INTERVAL = std::chrono::seconds(1);
   constexpr auto INPUT_GAMEPAD_LOG_INTERVAL = std::chrono::seconds(1);
   constexpr std::size_t INPUT_QUEUE_WARN_PACKETS = 128;
-  constexpr std::size_t INPUT_DRAIN_MAX_MESSAGES = 64;
-  constexpr std::size_t INPUT_LOW_LATENCY_DRAIN_MAX_MESSAGES = 256;
+  constexpr std::size_t INPUT_DRAIN_MAX_MESSAGES = 256;
   constexpr auto SYNTHETIC_HOME_HOLD = 100ms;
   constexpr auto CLICK_GAMEPAD_HOLD = 200ms;
 
@@ -436,7 +432,6 @@ namespace input {
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
         input_queue_drain_active {},
-        mouse_left_button_timeout {},
         touch_port {{0, 0, 0, 0}, 0, 0, 1.0f, 1.0f, 0, 0},
         accumulated_vscroll_delta {},
         accumulated_hscroll_delta {} {
@@ -454,8 +449,6 @@ namespace input {
     std::list<std::vector<uint8_t>> input_queue;
     std::mutex input_queue_lock;
     bool input_queue_drain_active;
-
-    thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;
 
     input::touch_port_t touch_port;
 
@@ -732,7 +725,6 @@ namespace input {
       return;
     }
 
-    input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
@@ -829,10 +821,6 @@ namespace input {
       return;
     }
 
-    if (input->mouse_left_button_timeout == DISABLE_LEFT_BUTTON_DELAY) {
-      input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
-    }
-
     float x = util::endian::big(packet->x);
     float y = util::endian::big(packet->y);
 
@@ -888,48 +876,6 @@ namespace input {
       }
 
       mouse_press[button] = !release;
-    }
-    /**
-     * When Moonlight sends mouse input through absolute coordinates,
-     * it's possible that BUTTON_RIGHT is pressed down immediately after releasing BUTTON_LEFT.
-     * As a result, Sunshine will left-click on hyperlinks in the browser before right-clicking
-     *
-     * This can be solved by delaying BUTTON_LEFT, however, any delay on input is undesirable during gaming
-     * As a compromise, Sunshine will only put delays on BUTTON_LEFT when
-     * absolute mouse coordinates have been sent.
-     *
-     * Try to make sure BUTTON_RIGHT gets called before BUTTON_LEFT is released.
-     *
-     * input->mouse_left_button_timeout can only be nullptr
-     * when the last mouse coordinates were absolute
-     */
-    if (!config::input.low_latency_input && button == BUTTON_LEFT && release && !input->mouse_left_button_timeout) {
-      auto f = [=]() {
-        auto left_released = mouse_press[BUTTON_LEFT];
-        if (left_released) {
-          // Already released left button
-          return;
-        }
-        platf::button_mouse(platf_input, BUTTON_LEFT, release);
-
-        mouse_press[BUTTON_LEFT] = false;
-        input->mouse_left_button_timeout = nullptr;
-      };
-
-      input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms).task_id;
-
-      return;
-    }
-    if (
-      button == BUTTON_RIGHT && !release &&
-      input->mouse_left_button_timeout > DISABLE_LEFT_BUTTON_DELAY
-    ) {
-      platf::button_mouse(platf_input, BUTTON_RIGHT, false);
-      platf::button_mouse(platf_input, BUTTON_RIGHT, true);
-
-      mouse_press[BUTTON_RIGHT] = false;
-
-      return;
     }
 
     platf::button_mouse(platf_input, button, release);
@@ -1846,15 +1792,9 @@ namespace input {
     // We can only batch certain message types
     switch (util::endian::little(dest->magic)) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
-        if (config::input.low_latency_input) {
-          return batch_result_e::terminate_batch;
-        }
-        return batch((PNV_REL_MOUSE_MOVE_PACKET) dest, (PNV_REL_MOUSE_MOVE_PACKET) src);
+        return batch_result_e::terminate_batch;
       case MOUSE_MOVE_ABS_MAGIC:
-        if (config::input.low_latency_input) {
-          return batch_result_e::terminate_batch;
-        }
-        return batch((PNV_ABS_MOUSE_MOVE_PACKET) dest, (PNV_ABS_MOUSE_MOVE_PACKET) src);
+        return batch_result_e::terminate_batch;
       case SCROLL_MAGIC_GEN5:
         return batch((PNV_SCROLL_PACKET) dest, (PNV_SCROLL_PACKET) src);
       case SS_HSCROLL_MAGIC:
@@ -1993,7 +1933,7 @@ namespace input {
    * @param input The input context pointer.
    */
   void passthrough_drain_messages(std::shared_ptr<input_t> input) {
-    auto max_messages = config::input.low_latency_input ? INPUT_LOW_LATENCY_DRAIN_MAX_MESSAGES : INPUT_DRAIN_MAX_MESSAGES;
+    auto max_messages = INPUT_DRAIN_MAX_MESSAGES;
     std::size_t processed_messages = 0;
     while (processed_messages < max_messages) {
       if (!passthrough_next_message(input)) {
@@ -2061,7 +2001,6 @@ namespace input {
 
   void reset(std::shared_ptr<input_t> &input) {
     task_pool.cancel(key_press_repeat_id);
-    task_pool.cancel(input->mouse_left_button_timeout);
 
     // Ensure input is synchronous, by using the task_pool
     task_pool.push([]() {

@@ -164,14 +164,6 @@ const config = ref(props.config)
               default="true"
     ></Checkbox>
 
-    <!-- Low latency input mode -->
-    <Checkbox class="mb-3"
-              id="low_latency_input"
-              locale-prefix="config"
-              v-model="config.low_latency_input"
-              default="false"
-    ></Checkbox>
-
     <!-- High resolution scrolling support -->
     <Checkbox v-if="config.mouse === 'enabled'"
               class="mb-3"

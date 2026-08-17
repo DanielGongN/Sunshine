@@ -269,8 +269,6 @@
     "keybindings": "Keybindings",
     "keyboard": "Enable Keyboard Input",
     "keyboard_desc": "Allows guests to control the host system with the keyboard",
-    "low_latency_input": "Low Latency Input Mode",
-    "low_latency_input_desc": "Prioritizes lower local input latency by draining larger input bursts and disabling the 10 ms absolute-mouse left-button release guard. Enable for games where input latency matters most. Disable if right-click behavior after absolute mouse input is incorrect.",
     "lan_encryption_mode": "LAN Encryption Mode",
     "lan_encryption_mode_1": "Enabled for supported clients",
     "lan_encryption_mode_2": "Required for all clients",

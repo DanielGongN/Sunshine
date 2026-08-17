@@ -597,7 +597,6 @@ namespace config {
     true,  // mouse enabled
     true,  // controller enabled
     true,  // always send scancodes
-    false,  // low latency input
     true,  // high resolution scrolling
     true,  // native pen/touch support
   };
@@ -1344,7 +1343,6 @@ namespace config {
 
     bool_f(vars, "always_send_scancodes", input.always_send_scancodes);
 
-    bool_f(vars, "low_latency_input", input.low_latency_input);
     bool_f(vars, "high_resolution_scrolling", input.high_resolution_scrolling);
     bool_f(vars, "native_pen_touch", input.native_pen_touch);
 

@@ -224,7 +224,6 @@ namespace config {
 
     bool always_send_scancodes;
 
-    bool low_latency_input;
     bool high_resolution_scrolling;
     bool native_pen_touch;
   };
