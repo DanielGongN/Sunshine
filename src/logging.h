@@ -8,6 +8,10 @@
 #include <boost/log/common.hpp>
 #include <boost/log/sinks.hpp>
 
+// standard includes
+#include <memory>
+#include <string>
+
 using text_sink = boost::log::sinks::asynchronous_sink<boost::log::sinks::text_ostream_backend>;
 
 extern boost::log::sources::severity_logger<int> verbose;
@@ -44,6 +48,16 @@ namespace logging {
   void deinit();
 
   void formatter(const boost::log::record_view &view, boost::log::formatting_ostream &os);
+
+  /**
+   * @brief Create a log file path with a startup timestamp inserted before the extension.
+   * @param log_file The base log file path.
+   * @return A timestamped log file path.
+   * @examples
+   * make_timestamped_log_file("sunshine.log");
+   * @examples_end
+   */
+  std::string make_timestamped_log_file(const std::string &log_file);
 
   /**
    * @brief Initialize the logging system.

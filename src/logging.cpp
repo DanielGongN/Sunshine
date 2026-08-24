@@ -4,9 +4,15 @@
  */
 // standard includes
 #include <array>
+#include <chrono>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
+#include <system_error>
 
 // lib includes
 #include <boost/core/null_deleter.hpp>
@@ -35,6 +41,7 @@ extern "C" {
 using namespace std::literals;
 
 namespace bl = boost::log;
+namespace fs = std::filesystem;
 
 boost::shared_ptr<boost::log::sinks::asynchronous_sink<boost::log::sinks::text_ostream_backend>> sink;
 
@@ -51,6 +58,25 @@ bl::sources::severity_logger<int> tests(10);  // Automatic tests output
 BOOST_LOG_ATTRIBUTE_KEYWORD(severity, "Severity", int)
 
 namespace logging {
+  namespace {
+    std::string startup_timestamp_suffix() {
+      const auto now = std::chrono::system_clock::now();
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - std::chrono::time_point_cast<std::chrono::seconds>(now)
+      );
+
+      const auto t = std::chrono::system_clock::to_time_t(now);
+      std::tm lt {};
+      if (const auto local_time = std::localtime(&t)) {
+        lt = *local_time;
+      }
+
+      std::ostringstream suffix;
+      suffix << std::put_time(&lt, "%Y%m%d-%H%M%S-") << std::setw(3) << std::setfill('0') << ms.count();
+      return suffix.str();
+    }
+  }  // namespace
+
   deinit_t::~deinit_t() {
     deinit();
   }
@@ -104,6 +130,30 @@ namespace logging {
 
     os << "["sv << std::put_time(&lt, "%Y-%m-%d %H:%M:%S.") << boost::format("%03u") % ms.count() << "]: "sv
        << log_type << view.attribute_values()[message].extract<std::string>();
+  }
+
+  std::string make_timestamped_log_file(const std::string &log_file) {
+    const fs::path base_path {log_file};
+    const auto parent_path = base_path.parent_path();
+    const auto stem = base_path.stem().empty() ? "sunshine"s : base_path.stem().string();
+    const auto extension = base_path.extension().string();
+    const auto timestamp = startup_timestamp_suffix();
+
+    for (int duplicate = 0; duplicate < 1000; ++duplicate) {
+      auto filename = stem + "-"s + timestamp;
+      if (duplicate > 0) {
+        filename += "-"s + std::to_string(duplicate);
+      }
+      filename += extension;
+
+      const auto candidate = parent_path / filename;
+      std::error_code ec;
+      if (!fs::exists(candidate, ec)) {
+        return candidate.string();
+      }
+    }
+
+    return (parent_path / (stem + "-"s + timestamp + "-"s + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + extension)).string();
   }
 #ifdef __ANDROID__
   namespace sinks = boost::log::sinks;

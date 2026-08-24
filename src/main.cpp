@@ -16,11 +16,11 @@
 // local includes
 #include "display_device.h"
 #include "entry_handler.h"
+#include "gateway.h"
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
 #include "main.h"
-#include "gateway.h"
 #include "middleware.h"
 #include "nvhttp.h"
 #include "process.h"
@@ -168,6 +168,7 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
+  config::sunshine.log_file = logging::make_timestamped_log_file(config::sunshine.log_file);
   auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);
   if (!log_deinit_guard) {
     BOOST_LOG(error) << "Logging failed to initialize"sv;
