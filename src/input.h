@@ -14,6 +14,14 @@
 namespace input {
   struct input_t;
 
+  namespace detail {
+    bool is_changed_active_gamepad_state(
+      bool active,
+      const platf::gamepad_state_t &old_state,
+      const platf::gamepad_state_t &new_state
+    );
+  }  // namespace detail
+
   void print(void *input);
   void reset(std::shared_ptr<input_t> &input);
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data);
@@ -63,13 +71,15 @@ namespace input {
   std::pair<float, float> scale_client_contact_area(const std::pair<float, float> &val, uint16_t rotation, const std::pair<float, float> &scalar);
 
   /**
-   * @brief Update the last user input timestamp (called on any input event).
+   * @brief Update a session's last real user input timestamp.
+   * @param input The session input context.
    */
-  void update_input_time();
+  void update_input_time(const std::shared_ptr<input_t> &input);
 
   /**
-   * @brief Get the time point of the last user input.
+   * @brief Get the time point of a session's last real user input.
+   * @param input The session input context.
    * @return The steady_clock time point of the last input event.
    */
-  std::chrono::steady_clock::time_point get_last_input_time();
+  std::chrono::steady_clock::time_point get_last_input_time(const std::shared_ptr<input_t> &input);
 }  // namespace input

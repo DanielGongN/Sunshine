@@ -5,8 +5,10 @@
 #include "../tests_common.h"
 #include "../tests_log_checker.h"
 
+#include <filesystem>
 #include <format>
 #include <random>
+#include <regex>
 #include <src/logging.h>
 
 namespace {
@@ -44,4 +46,12 @@ TEST_P(LogLevelsTest, PutMessage) {
   BOOST_LOG(logger) << test_message;
 
   ASSERT_TRUE(log_checker::line_contains(log_file, test_message));
+}
+
+TEST(Logging, MakeTimestampedLogFileInsertsTimestampBeforeExtension) {
+  const std::filesystem::path generated_path {logging::make_timestamped_log_file("logs/engine.log")};
+  const std::regex filename_pattern {R"(engine-[0-9]{8}-[0-9]{6}-[0-9]{3}(-[0-9]+)?\.log)"};
+
+  ASSERT_EQ(generated_path.parent_path().generic_string(), "logs");
+  ASSERT_TRUE(std::regex_match(generated_path.filename().string(), filename_pattern));
 }

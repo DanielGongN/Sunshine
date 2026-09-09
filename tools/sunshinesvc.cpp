@@ -92,6 +92,13 @@ LPPROC_THREAD_ATTRIBUTE_LIST AllocateProcThreadAttributeList(DWORD attribute_cou
   return list;
 }
 
+void FreeProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST list) {
+  if (list) {
+    DeleteProcThreadAttributeList(list);
+    HeapFree(GetProcessHeap(), 0, list);
+  }
+}
+
 HANDLE DuplicateTokenForSession(DWORD console_session_id) {
   HANDLE current_token;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE, &current_token)) {
@@ -116,18 +123,50 @@ HANDLE DuplicateTokenForSession(DWORD console_session_id) {
   return new_token;
 }
 
-HANDLE OpenLogFileHandle() {
-  WCHAR log_file_name[MAX_PATH];
+std::wstring StartupTimestampSuffix() {
+  SYSTEMTIME now;
+  GetLocalTime(&now);
 
-  // Create sunshine.log in the Temp folder (usually %SYSTEMROOT%\Temp)
-  GetTempPathW(_countof(log_file_name), log_file_name);
-  wcscat_s(log_file_name, L"sunshine.log");
+  return std::format(
+    L"{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}",
+    now.wYear,
+    now.wMonth,
+    now.wDay,
+    now.wHour,
+    now.wMinute,
+    now.wSecond,
+    now.wMilliseconds
+  );
+}
+
+HANDLE OpenLogFileHandle() {
+  WCHAR temp_path[MAX_PATH];
+
+  // Create a unique sunshine log in the Temp folder (usually %SYSTEMROOT%\Temp)
+  auto temp_path_length = GetTempPathW(_countof(temp_path), temp_path);
+  if (temp_path_length == 0 || temp_path_length >= _countof(temp_path)) {
+    return INVALID_HANDLE_VALUE;
+  }
 
   // The file handle must be inheritable for our child process to use it
   SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), nullptr, TRUE};
 
-  // Overwrite the old sunshine.log
-  return CreateFileW(log_file_name, GENERIC_WRITE, FILE_SHARE_READ, &security_attributes, CREATE_ALWAYS, 0, nullptr);
+  const auto timestamp = StartupTimestampSuffix();
+  for (int duplicate = 0; duplicate < 1000; ++duplicate) {
+    auto log_file_name = std::wstring {temp_path} + L"sunshine-" + timestamp;
+    if (duplicate > 0) {
+      log_file_name += std::format(L"-{}", duplicate);
+    }
+    log_file_name += L".log";
+
+    auto log_file_handle = CreateFileW(log_file_name.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log_file_handle != INVALID_HANDLE_VALUE || GetLastError() != ERROR_FILE_EXISTS) {
+      return log_file_handle;
+    }
+  }
+
+  SetLastError(ERROR_ALREADY_EXISTS);
+  return INVALID_HANDLE_VALUE;
 }
 
 bool RunTerminationHelper(HANDLE console_token, DWORD pid) {
@@ -197,8 +236,12 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
   // Create an auto-reset session change event
   session_change_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
   if (session_change_event == nullptr) {
+    auto err = GetLastError();
+    CloseHandle(stop_event);
+    stop_event = nullptr;
+
     // Tell SCM we failed to start
-    service_status.dwWin32ExitCode = GetLastError();
+    service_status.dwWin32ExitCode = err;
     service_status.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(service_status_handle, &service_status);
     return;
@@ -206,8 +249,14 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
 
   auto log_file_handle = OpenLogFileHandle();
   if (log_file_handle == INVALID_HANDLE_VALUE) {
+    auto err = GetLastError();
+    CloseHandle(session_change_event);
+    session_change_event = nullptr;
+    CloseHandle(stop_event);
+    stop_event = nullptr;
+
     // Tell SCM we failed to start
-    service_status.dwWin32ExitCode = GetLastError();
+    service_status.dwWin32ExitCode = err;
     service_status.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(service_status_handle, &service_status);
     return;
@@ -225,8 +274,15 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
   // Allocate an attribute list with space for 2 entries
   startup_info.lpAttributeList = AllocateProcThreadAttributeList(2);
   if (startup_info.lpAttributeList == nullptr) {
+    auto err = GetLastError();
+    CloseHandle(log_file_handle);
+    CloseHandle(session_change_event);
+    session_change_event = nullptr;
+    CloseHandle(stop_event);
+    stop_event = nullptr;
+
     // Tell SCM we failed to start
-    service_status.dwWin32ExitCode = GetLastError();
+    service_status.dwWin32ExitCode = err;
     service_status.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(service_status_handle, &service_status);
     return;
@@ -285,8 +341,7 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
         case WAIT_OBJECT_0:
           // The service is shutting down, so try to gracefully terminate Sunshine.exe.
           // If it doesn't terminate in 20 seconds, we will forcefully terminate it.
-          if (!RunTerminationHelper(console_token, process_info.dwProcessId) ||
-              WaitForSingleObject(process_info.hProcess, 20000) != WAIT_OBJECT_0) {
+          if (!RunTerminationHelper(console_token, process_info.dwProcessId) || WaitForSingleObject(process_info.hProcess, 20000) != WAIT_OBJECT_0) {
             // If it won't terminate gracefully, kill it now
             TerminateProcess(process_info.hProcess, ERROR_PROCESS_ABORTED);
           }
@@ -313,6 +368,13 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
     CloseHandle(console_token);
     CloseHandle(job_handle);
   }
+
+  FreeProcThreadAttributeList(startup_info.lpAttributeList);
+  CloseHandle(log_file_handle);
+  CloseHandle(session_change_event);
+  session_change_event = nullptr;
+  CloseHandle(stop_event);
+  stop_event = nullptr;
 
   // Let SCM know we've stopped
   service_status.dwCurrentState = SERVICE_STOPPED;

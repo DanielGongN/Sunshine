@@ -93,6 +93,27 @@ namespace stream {
   constexpr std::uint64_t PING_DIAG_SAMPLE_LIMIT = 32;
   constexpr std::uint64_t PING_DIAG_SAMPLE_INTERVAL = 1000;
 
+  namespace detail {
+    timeout_notification_e select_timeout_notification(
+      std::int64_t session_seconds,
+      std::int64_t idle_seconds,
+      int force_timeout,
+      int standby_timeout,
+      bool already_notified
+    ) {
+      if (already_notified) {
+        return timeout_notification_e::none;
+      }
+      if (force_timeout > 0 && session_seconds >= force_timeout) {
+        return timeout_notification_e::force;
+      }
+      if (standby_timeout > 0 && idle_seconds >= standby_timeout) {
+        return timeout_notification_e::standby;
+      }
+      return timeout_notification_e::none;
+    }
+  }  // namespace detail
+
   std::string udp_endpoint_to_string(const udp::endpoint &endpoint) {
     return endpoint.address().to_string() + ':' + std::to_string(endpoint.port());
   }
@@ -440,6 +461,8 @@ namespace stream {
     std::thread videoThread;
 
     std::chrono::steady_clock::time_point pingTimeout;
+    std::chrono::steady_clock::time_point started_at;
+    bool timeout_notification_sent {};
 
     safe::shared_t<broadcast_ctx_t>::ptr_t broadcast_ref;
 
@@ -718,12 +741,10 @@ namespace stream {
             last_type = type;
             last_payload_len = payload.size();
             if (type == packetTypes[IDX_INPUT_DATA]) {
-              input::update_input_time();
               ++input_events;
             } else if (type == packetTypes[IDX_ENCRYPTED]) {
               ++encrypted_events;
             } else if (type == packetTypes[IDX_PERIODIC_PING]) {
-              input::update_input_time();
               ++ping_events;
             } else if (type == packetTypes[IDX_LOSS_STATS]) {
               ++loss_events;
@@ -1124,7 +1145,6 @@ namespace stream {
 
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
-      input::update_input_time();
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
     });
 
@@ -1262,7 +1282,6 @@ namespace stream {
 
       // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
       if (type == packetTypes[IDX_INPUT_DATA]) {
-        input::update_input_time();
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + 4);
         input::passthrough(session->input, std::move(plaintext));
       } else {
@@ -1307,27 +1326,42 @@ namespace stream {
 
           auto session = *pos;
 
-          // Idle/AFK detection starts after the control channel is connected.
+          // Timeout detection starts once the session is running and the control channel is connected.
           if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && session->control.peer) {
+            auto session_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                 now - session->started_at
+            )
+                                 .count();
             auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                              now - input::get_last_input_time()
+                              now - input::get_last_input_time(session->input)
             )
                               .count();
 
-            auto force_timeout = config::sunshine.middleware.force_disconnected_timeout;
-            if (force_timeout > 0 && idle_sec >= force_timeout) {
-              BOOST_LOG(warning) << "[control][stop] reason=force_idle_timeout idle_sec="sv << idle_sec;
-              middleware::notify_client_disconnected(u8"长时间挂机，断开连接");
-              send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "force_idle_timeout"sv);
-              session::stop(*session);
-            } else {
-              auto standby_timeout = config::sunshine.middleware.standby_disconnected_timeout;
-              if (standby_timeout > 0 && idle_sec >= standby_timeout) {
-                BOOST_LOG(warning) << "[control][stop] reason=standby_idle_timeout idle_sec="sv << idle_sec;
-                middleware::notify_client_disconnected(u8"长时间无操作，断开连接");
-                send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "standby_idle_timeout"sv);
-                session::stop(*session);
-              }
+            auto force_timeout = config::sunshine.middleware.force_disconnected_timeout.load(std::memory_order_acquire);
+            auto standby_timeout = config::sunshine.middleware.standby_disconnected_timeout.load(std::memory_order_acquire);
+            auto timeout_notification = detail::select_timeout_notification(
+              session_sec,
+              idle_sec,
+              force_timeout,
+              standby_timeout,
+              session->timeout_notification_sent
+            );
+            if (timeout_notification == detail::timeout_notification_e::force) {
+              session->timeout_notification_sent = true;
+              BOOST_LOG(warning) << "[control][timeout] reason=force_timeout session_sec="sv << session_sec
+                                 << " action=notify_upstream"sv;
+              middleware::notify_client_disconnected(
+                u8"长时间挂机，等待上游断开连接",
+                middleware::disconnect_notification_type_e::force_timeout
+              );
+            } else if (timeout_notification == detail::timeout_notification_e::standby) {
+              session->timeout_notification_sent = true;
+              BOOST_LOG(warning) << "[control][timeout] reason=standby_timeout idle_sec="sv << idle_sec
+                                 << " action=notify_upstream"sv;
+              middleware::notify_client_disconnected(
+                u8"长时间无操作，等待上游断开连接",
+                middleware::disconnect_notification_type_e::standby_timeout
+              );
             }
           }
 
@@ -2467,8 +2501,10 @@ namespace stream {
       }
       session.videoThread = std::thread {videoThread, &session};
 
-      input::update_input_time();
-      session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+      session.started_at = std::chrono::steady_clock::now();
+      session.timeout_notification_sent = false;
+      input::update_input_time(session.input);
+      session.state.store(state_e::RUNNING, std::memory_order_release);
       middleware::notify_client_connected();
 
       // If this is the first session, invoke the platform callbacks

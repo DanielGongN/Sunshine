@@ -276,7 +276,7 @@
     "locale": "Locale",
     "locale_desc": "The locale used for Sunshine's user interface.",
     "log_path": "Logfile Path",
-    "log_path_desc": "The file where the current logs of Sunshine are stored.",
+    "log_path_desc": "The base file where Sunshine logs are stored. A startup timestamp is inserted before the extension.",
     "max_bitrate": "Maximum Bitrate",
     "max_bitrate_desc": "The maximum bitrate (in Kbps) that Sunshine will encode the stream at. If set to 0, it will always use the bitrate requested by Moonlight.",
     "minimum_fps_target": "Minimum FPS Target",

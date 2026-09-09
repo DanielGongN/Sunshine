@@ -15,6 +15,12 @@
 
 namespace middleware {
 
+  enum class disconnect_notification_type_e : int {
+    other = 0,
+    force_timeout = 1,
+    standby_timeout = 2,
+  };
+
   /**
    * @brief Start the middle-platform WebSocket connection.
    * @return A deinit guard that stops the connection on destruction.
@@ -42,11 +48,12 @@ namespace middleware {
   /**
    * @brief Notify upstream that a Sunshine stream disconnected.
    * @param message Human-readable disconnect reason.
+   * @param type Machine-readable disconnect reason type.
    *
-   * Thread-safe. Emits a disconnected event with type=1, meaning Sunshine stream disconnect.
+   * Thread-safe. Emits a disconnected event with the reason type in data.type.
    */
-  void notify_client_disconnected(std::string_view message);
-  void notify_client_disconnected(std::u8string_view message);
+  void notify_client_disconnected(std::string_view message, disconnect_notification_type_e type = disconnect_notification_type_e::other);
+  void notify_client_disconnected(std::u8string_view message, disconnect_notification_type_e type = disconnect_notification_type_e::other);
 
   /**
    * @brief Notify middleware that a Moonlight client connection state changed.

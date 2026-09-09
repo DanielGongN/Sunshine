@@ -97,6 +97,16 @@ namespace middleware {
       return msg;
     }
 
+    json make_disconnected_payload(std::string_view message, disconnect_notification_type_e type) {
+      json msg;
+      msg["event"] = "disconnected";
+      msg["message"] = std::string {message};
+      msg["data"] = {
+        {"type", static_cast<int>(type)}
+      };
+      return msg;
+    }
+
     bool is_connected_ack_success(const json &msg, std::int64_t pending_message_id) {
       if (!msg.contains("event") || !msg["event"].is_string()) {
         return false;
@@ -229,16 +239,12 @@ namespace middleware {
     schedule_connected_retry();
   }
 
-  void notify_client_disconnected(std::string_view message) {
-    json msg;
-    msg["event"] = "disconnected";
-    msg["message"] = std::string {message};
-    msg["type"] = 1;
-    send_to_upstream(std::move(msg));
+  void notify_client_disconnected(std::string_view message, disconnect_notification_type_e type) {
+    send_to_upstream(detail::make_disconnected_payload(message, type));
   }
 
-  void notify_client_disconnected(std::u8string_view message) {
-    notify_client_disconnected(std::string_view {reinterpret_cast<const char *>(message.data()), message.size()});
+  void notify_client_disconnected(std::u8string_view message, disconnect_notification_type_e type) {
+    notify_client_disconnected(std::string_view {reinterpret_cast<const char *>(message.data()), message.size()}, type);
   }
 
   // Events to subscribe to
@@ -341,32 +347,38 @@ namespace middleware {
         BOOST_LOG(info) << "handling force_disconnected_time"sv;
         // Store AFK timeout (seconds) for use by stream idle detection
         // data can be a number directly, or an object with a "timeout" key
-        int timeout = 0;
+        std::optional<int> timeout;
         if (msg.contains("data")) {
           if (msg["data"].is_number()) {
             timeout = msg["data"].get<int>();
           } else if (msg["data"].is_object()) {
-            timeout = msg["data"].value("timeout", 0);
+            const auto &data = msg["data"];
+            if (data.contains("timeout") && data["timeout"].is_number()) {
+              timeout = data["timeout"].get<int>();
+            }
           }
         }
-        if (timeout > 0) {
-          config::sunshine.middleware.force_disconnected_timeout = timeout;
-          BOOST_LOG(info) << "force_disconnected_time: timeout="sv << timeout;
+        if (timeout && *timeout >= 0) {
+          config::sunshine.middleware.force_disconnected_timeout.store(*timeout, std::memory_order_release);
+          BOOST_LOG(info) << "force_disconnected_time: timeout="sv << *timeout;
         }
       } else if (event_type == "standby_disconnected_time") {
         BOOST_LOG(info) << "handling standby_disconnected_time"sv;
         // data can be a number directly, or an object with a "timeout" key
-        int timeout = 0;
+        std::optional<int> timeout;
         if (msg.contains("data")) {
           if (msg["data"].is_number()) {
             timeout = msg["data"].get<int>();
           } else if (msg["data"].is_object()) {
-            timeout = msg["data"].value("timeout", 0);
+            const auto &data = msg["data"];
+            if (data.contains("timeout") && data["timeout"].is_number()) {
+              timeout = data["timeout"].get<int>();
+            }
           }
         }
-        if (timeout > 0) {
-          config::sunshine.middleware.standby_disconnected_timeout = timeout;
-          BOOST_LOG(info) << "standby_disconnected_time: timeout="sv << timeout;
+        if (timeout && *timeout >= 0) {
+          config::sunshine.middleware.standby_disconnected_timeout.store(*timeout, std::memory_order_release);
+          BOOST_LOG(info) << "standby_disconnected_time: timeout="sv << *timeout;
         }
       } else if (event_type == "display_config") {
         BOOST_LOG(info) << "handling display_config"sv;

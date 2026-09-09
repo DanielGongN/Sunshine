@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <atomic>
 #include <bitset>
 #include <chrono>
 #include <optional>
@@ -292,8 +293,8 @@ namespace config {
       std::string address = "0.0.0.0";
       int port = 40002;
       bool gamepad_preinit = false;
-      int force_disconnected_timeout = 900;  // seconds, default 15 minutes
-      int standby_disconnected_timeout = 900;  // seconds, default 15 minutes
+      std::atomic<int> force_disconnected_timeout {900};  // seconds, default 15 minutes
+      std::atomic<int> standby_disconnected_timeout {900};  // seconds, default 15 minutes
     } middleware;
   };
 

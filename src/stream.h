@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <utility>
 
 // lib includes
@@ -23,6 +24,22 @@ namespace stream {
   constexpr auto CLIENT_MIC_STREAM_PORT = 17;
 
   struct session_t;
+
+  namespace detail {
+    enum class timeout_notification_e {
+      none,
+      force,
+      standby,
+    };
+
+    timeout_notification_e select_timeout_notification(
+      std::int64_t session_seconds,
+      std::int64_t idle_seconds,
+      int force_timeout,
+      int standby_timeout,
+      bool already_notified
+    );
+  }  // namespace detail
 
   struct config_t {
     audio::config_t audio;

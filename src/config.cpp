@@ -1210,8 +1210,16 @@ namespace config {
     string_f(vars, "middleware_address", sunshine.middleware.address);
     int_f(vars, "middleware_port", sunshine.middleware.port);
     bool_f(vars, "middleware_gamepad_preinit", sunshine.middleware.gamepad_preinit);
-    int_f(vars, "force_disconnected_timeout", sunshine.middleware.force_disconnected_timeout);
-    int_f(vars, "standby_disconnected_timeout", sunshine.middleware.standby_disconnected_timeout);
+    {
+      auto timeout = sunshine.middleware.force_disconnected_timeout.load(std::memory_order_acquire);
+      int_f(vars, "force_disconnected_timeout", timeout);
+      sunshine.middleware.force_disconnected_timeout.store(timeout, std::memory_order_release);
+    }
+    {
+      auto timeout = sunshine.middleware.standby_disconnected_timeout.load(std::memory_order_acquire);
+      int_f(vars, "standby_disconnected_timeout", timeout);
+      sunshine.middleware.standby_disconnected_timeout.store(timeout, std::memory_order_release);
+    }
     generic_f(vars, "dd_mode_remapping", video.dd.mode_remapping, dd::mode_remapping_from_view);
     {
       int value = 0;

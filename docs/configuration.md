@@ -1929,7 +1929,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            The path where the Sunshine log is stored.
+            The base path where the Sunshine log is stored. A startup timestamp is inserted before the file extension for the actual log file.
         </td>
     </tr>
     <tr>
@@ -1942,6 +1942,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Example</td>
         <td colspan="2">@code{}
             log_path = sunshine.log
+            # writes to sunshine-YYYYMMDD-HHMMSS-mmm.log on startup
             @endcode</td>
     </tr>
 </table>

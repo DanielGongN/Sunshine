@@ -40,9 +40,6 @@ using namespace std::literals;
 
 namespace input {
 
-  // Track last user input time for idle/afk detection
-  std::atomic<std::chrono::steady_clock::time_point> last_input_time {std::chrono::steady_clock::now()};
-
   constexpr auto MAX_GAMEPADS = std::min((std::size_t) platf::MAX_GAMEPADS, sizeof(std::int16_t) * 8);
   constexpr auto VKEY_SHIFT = 0x10;
   constexpr auto VKEY_LSHIFT = 0xA0;
@@ -367,6 +364,14 @@ namespace input {
            lhs.rsY == rhs.rsY;
   }
 
+  bool detail::is_changed_active_gamepad_state(
+    bool active,
+    const platf::gamepad_state_t &old_state,
+    const platf::gamepad_state_t &new_state
+  ) {
+    return active && !same_gamepad_state(old_state, new_state);
+  }
+
   struct gamepad_t {
     gamepad_t():
         gamepad_state {},
@@ -432,6 +437,7 @@ namespace input {
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
         input_queue_drain_active {},
+        last_input_time {std::chrono::steady_clock::now()},
         touch_port {{0, 0, 0, 0}, 0, 0, 1.0f, 1.0f, 0, 0},
         accumulated_vscroll_delta {},
         accumulated_hscroll_delta {} {
@@ -449,6 +455,8 @@ namespace input {
     std::list<std::vector<uint8_t>> input_queue;
     std::mutex input_queue_lock;
     bool input_queue_drain_active;
+
+    std::atomic<std::chrono::steady_clock::time_point> last_input_time;
 
     input::touch_port_t touch_port;
 
@@ -725,7 +733,13 @@ namespace input {
       return;
     }
 
-    platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
+    auto delta_x = util::endian::big(packet->deltaX);
+    auto delta_y = util::endian::big(packet->deltaY);
+    if (delta_x != 0 || delta_y != 0) {
+      update_input_time(input);
+    }
+
+    platf::move_mouse(platf_input, delta_x, delta_y);
   }
 
   /**
@@ -859,6 +873,7 @@ namespace input {
       touch_port_dim_y
     };
 
+    update_input_time(input);
     platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
   }
 
@@ -878,6 +893,7 @@ namespace input {
       mouse_press[button] = !release;
     }
 
+    update_input_time(input);
     platf::button_mouse(platf_input, button, release);
   }
 
@@ -1013,6 +1029,7 @@ namespace input {
         // A new key has been pressed down, we need to check for key combo's
         // If a key-combo has been pressed down, don't pass it through
         if (input->shortcutFlags == input_t::SHORTCUT && apply_shortcut(keyCode) > 0) {
+          update_input_time(input);
           return;
         }
 
@@ -1034,6 +1051,7 @@ namespace input {
 
     pressed = !release;
 
+    update_input_time(input);
     send_key_and_modifiers(keyCode, release, packet->flags, synthetic_modifiers);
 
     update_shortcutFlags(&input->shortcutFlags, map_keycode(keyCode), release);
@@ -1049,10 +1067,15 @@ namespace input {
       return;
     }
 
+    auto scroll_amount = util::endian::big(packet->scrollAmt1);
+    if (scroll_amount != 0) {
+      update_input_time(input);
+    }
+
     if (config::input.high_resolution_scrolling) {
-      platf::scroll(platf_input, util::endian::big(packet->scrollAmt1));
+      platf::scroll(platf_input, scroll_amount);
     } else {
-      input->accumulated_vscroll_delta += util::endian::big(packet->scrollAmt1);
+      input->accumulated_vscroll_delta += scroll_amount;
       auto full_ticks = input->accumulated_vscroll_delta / WHEEL_DELTA;
       if (full_ticks) {
         // Send any full ticks that have accumulated and store the rest
@@ -1072,10 +1095,15 @@ namespace input {
       return;
     }
 
+    auto scroll_amount = util::endian::big(packet->scrollAmount);
+    if (scroll_amount != 0) {
+      update_input_time(input);
+    }
+
     if (config::input.high_resolution_scrolling) {
-      platf::hscroll(platf_input, util::endian::big(packet->scrollAmount));
+      platf::hscroll(platf_input, scroll_amount);
     } else {
-      input->accumulated_hscroll_delta += util::endian::big(packet->scrollAmount);
+      input->accumulated_hscroll_delta += scroll_amount;
       auto full_ticks = input->accumulated_hscroll_delta / WHEEL_DELTA;
       if (full_ticks) {
         // Send any full ticks that have accumulated and store the rest
@@ -1085,12 +1113,17 @@ namespace input {
     }
   }
 
-  void passthrough(PNV_UNICODE_PACKET packet) {
+  void passthrough(std::shared_ptr<input_t> &input, PNV_UNICODE_PACKET packet) {
     if (!config::input.keyboard) {
       return;
     }
 
     int size = util::endian::big(packet->header.size) - sizeof(packet->header.magic);
+    if (size <= 0) {
+      return;
+    }
+
+    update_input_time(input);
     platf::unicode(platf_input, packet->text, size);
   }
 
@@ -1223,6 +1256,7 @@ namespace input {
       contact_area.second,
     };
 
+    update_input_time(input);
     platf::touch_update(input->client_context.get(), *abs_port, touch);
   }
 
@@ -1276,6 +1310,7 @@ namespace input {
       contact_area.second,
     };
 
+    update_input_time(input);
     platf::pen_update(input->client_context.get(), *abs_port, pen);
   }
 
@@ -1309,6 +1344,7 @@ namespace input {
       from_clamped_netfloat(packet->pressure, 0.0f, 1.0f),
     };
 
+    update_input_time(input);
     platf::gamepad_touch(platf_input, touch);
   }
 
@@ -1470,9 +1506,12 @@ namespace input {
     auto button_flags_changed = gamepad_state.buttonFlags ^ gamepad.gamepad_state.buttonFlags;
     bf_new = gamepad_state.buttonFlags;
 
-    if (same_gamepad_state(gamepad_state, gamepad.gamepad_state)) {
+    auto active = (packet->activeGamepadMask & (1 << packet->controllerNumber)) != 0;
+    if (!detail::is_changed_active_gamepad_state(active, gamepad.gamepad_state, gamepad_state)) {
       return;
     }
+
+    update_input_time(input);
 
     if (platf::BACK & button_flags_changed) {
       if (platf::BACK & bf_new) {
@@ -1898,7 +1937,7 @@ namespace input {
         passthrough(input, (PNV_KEYBOARD_PACKET) payload);
         break;
       case UTF8_TEXT_EVENT_MAGIC:
-        passthrough((PNV_UNICODE_PACKET) payload);
+        passthrough(input, (PNV_UNICODE_PACKET) payload);
         break;
       case MULTI_CONTROLLER_MAGIC_GEN5:
         passthrough(input, (PNV_MULTI_CONTROLLER_PACKET) payload);
@@ -1978,9 +2017,6 @@ namespace input {
    * @param input_data The input message.
    */
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data) {
-    // Update last input time for idle/afk detection
-    update_input_time();
-
     auto input_data_size = input_data.size();
     std::size_t queue_size = 0;
     bool should_schedule_drain = false;
@@ -2107,11 +2143,11 @@ namespace input {
     });
   }
 
-  void update_input_time() {
-    last_input_time.store(std::chrono::steady_clock::now(), std::memory_order_release);
+  void update_input_time(const std::shared_ptr<input_t> &input) {
+    input->last_input_time.store(std::chrono::steady_clock::now(), std::memory_order_release);
   }
 
-  std::chrono::steady_clock::time_point get_last_input_time() {
-    return last_input_time.load(std::memory_order_acquire);
+  std::chrono::steady_clock::time_point get_last_input_time(const std::shared_ptr<input_t> &input) {
+    return input->last_input_time.load(std::memory_order_acquire);
   }
 }  // namespace input
