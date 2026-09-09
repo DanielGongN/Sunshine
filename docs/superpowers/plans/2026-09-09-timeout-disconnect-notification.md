@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Separate the absolute force timeout from per-session idle detection and report exactly one typed `disconnected` event to the upstream service without stopping Moonlight locally.
+**Goal:** Detect a stable keyboard, mouse-button, or gamepad hold for `force_disconnected_time`, detect true inactivity for `standby_disconnected_time`, and send one typed upstream notification without locally disconnecting Moonlight.
 
-**Architecture:** Keep middleware payload construction in `middleware`, per-session user-activity timestamps in each `input_t`, and timeout selection in a small pure helper under `stream::detail`. The control loop asks the helper for one notification reason, latches the session after the first report, and leaves the session running until the existing upstream `disconnected` command terminates it.
+**Architecture:** Keep all hold and activity state inside each `input_t`. Input handlers update a synchronized timeout snapshot through a small, testable state machine; the stream control loop selects force only while a held signature is active and standby only while it is inactive. Existing middleware payload types and the later upstream-driven Moonlight termination path remain unchanged.
 
 **Tech Stack:** C++23, Boost.Asio/Beast, nlohmann JSON, GoogleTest, CMake/Ninja, MSYS2 UCRT64.
 
@@ -14,443 +14,422 @@
 
 - Prefix Windows build and test commands with `E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c`.
 - Use build directories prefixed with `cmake-build-`.
-- Run `cmake-build-codex-tests/tests/test_sunshine.exe` for GoogleTest verification.
-- Format all changed C/C++ code according to `.clang-format`.
-- Do not update localization files other than `en`; this change requires no localization edits.
-- Preserve all pre-existing user modifications in the dirty working tree.
-- Do not commit implementation files automatically because every target source file already contains user changes that predate this plan.
-- Interpret both timeout values as seconds; a numeric zero disables the corresponding timeout.
+- The GoogleTest executable is `cmake-build-codex-tests/tests/test_sunshine.exe`.
+- Format changed C/C++ code according to `.clang-format`.
+- Do not update localization files other than `en`; this correction requires no localization changes.
+- `force_disconnected_time` measures one unchanged, non-empty held-control signature; it is not session duration.
+- A held signature pauses standby even when force timeout is disabled.
 - Timeout notification does not call `send_termination_msg()` or `session::stop()`.
+- `data.type` remains `0` for other reasons, `1` for force hold, and `2` for standby.
+- Codex does not run compilation or tests for this implementation; the user runs the listed verification commands.
 
 ---
 
-### Task 1: Typed Middleware Disconnect Payloads
+### Task 1: Force-Hold State Machine and Stable Gamepad Classification
 
 **Files:**
-- Modify: `src/middleware.h`
-- Modify: `src/middleware.cpp:232-242`
-- Modify: `tests/unit/test_middleware.cpp`
+- Modify: `src/input.h`
+- Modify: `src/input.cpp`
+- Modify: `tests/unit/test_input_activity.cpp`
 
 **Interfaces:**
-- Produces: `middleware::disconnect_notification_type_e` with `other=0`, `force_timeout=1`, and `standby_timeout=2`.
-- Produces: `middleware::detail::make_disconnected_payload(std::string_view, disconnect_notification_type_e) -> nlohmann::json`.
-- Produces: typed overloads of `notify_client_disconnected()` whose default type is `other`.
+- Produces: `input::timeout_state_t { bool force_hold_active; steady_clock::time_point force_hold_started_at; steady_clock::time_point last_input_time; }`.
+- Produces: `input::detail::force_axis_e { negative, neutral, positive }`.
+- Produces: `input::detail::gamepad_force_state_t` containing digital buttons, trigger classifications, and four axis classifications.
+- Produces: `input::detail::update_force_axis(force_axis_e, std::int16_t) -> force_axis_e`.
+- Produces: `input::detail::update_force_trigger(bool, std::uint8_t) -> bool`.
+- Produces: `input::detail::update_gamepad_force_state(gamepad_force_state_t&, bool, const platf::gamepad_state_t&) -> bool`.
+- Produces: `input::detail::apply_force_signature_change(timeout_state_t&, bool, steady_clock::time_point)`.
 
-- [ ] **Step 1: Write failing payload tests**
+- [ ] **Step 1: Replace the old gamepad-activity tests with failing force-state tests**
 
-Add declarations and tests that exercise all fixed protocol values:
+Add deterministic tests using fixed `steady_clock::time_point` values:
 
 ```cpp
-namespace middleware {
-  enum class disconnect_notification_type_e : int;
+TEST(InputForceStateTests, NonEmptySignatureStartsForceTiming) {
+  input::timeout_state_t state {};
+  auto now = std::chrono::steady_clock::time_point {10s};
 
-  namespace detail {
-    nlohmann::json make_disconnected_payload(std::string_view message, disconnect_notification_type_e type);
-  }
+  input::detail::apply_force_signature_change(state, true, now);
+
+  EXPECT_TRUE(state.force_hold_active);
+  EXPECT_EQ(state.force_hold_started_at, now);
+  EXPECT_EQ(state.last_input_time, now);
 }
 
-TEST(MiddlewareDisconnectTests, BuildsOtherDisconnectPayload) {
-  auto msg = middleware::detail::make_disconnected_payload(
-    "network disconnect",
-    middleware::disconnect_notification_type_e::other
-  );
-  EXPECT_EQ(msg.at("event"), "disconnected");
-  EXPECT_EQ(msg.at("message"), "network disconnect");
-  EXPECT_EQ(msg.at("type"), 0);
+TEST(InputForceStateTests, ChangedSignatureRestartsForceTiming) {
+  input::timeout_state_t state {true, std::chrono::steady_clock::time_point {10s}, {}};
+  auto changed_at = std::chrono::steady_clock::time_point {20s};
+
+  input::detail::apply_force_signature_change(state, true, changed_at);
+
+  EXPECT_EQ(state.force_hold_started_at, changed_at);
 }
 
-TEST(MiddlewareDisconnectTests, BuildsForceTimeoutPayload) {
-  auto msg = middleware::detail::make_disconnected_payload(
-    "force timeout",
-    middleware::disconnect_notification_type_e::force_timeout
-  );
-  EXPECT_EQ(msg.at("type"), 1);
-}
+TEST(InputForceStateTests, EmptySignatureStopsForceAndRestartsStandby) {
+  input::timeout_state_t state {true, std::chrono::steady_clock::time_point {10s}, {}};
+  auto released_at = std::chrono::steady_clock::time_point {20s};
 
-TEST(MiddlewareDisconnectTests, BuildsStandbyTimeoutPayload) {
-  auto msg = middleware::detail::make_disconnected_payload(
-    "standby timeout",
-    middleware::disconnect_notification_type_e::standby_timeout
-  );
-  EXPECT_EQ(msg.at("type"), 2);
+  input::detail::apply_force_signature_change(state, false, released_at);
+
+  EXPECT_FALSE(state.force_hold_active);
+  EXPECT_EQ(state.last_input_time, released_at);
 }
 ```
 
-- [ ] **Step 2: Run the focused tests and verify failure**
+Add gamepad hysteresis tests:
 
-Run:
+```cpp
+TEST(InputForceStateTests, StickHysteresisIgnoresSmallFluctuations) {
+  using input::detail::force_axis_e;
+  EXPECT_EQ(input::detail::update_force_axis(force_axis_e::neutral, 7999), force_axis_e::neutral);
+  EXPECT_EQ(input::detail::update_force_axis(force_axis_e::neutral, 8000), force_axis_e::positive);
+  EXPECT_EQ(input::detail::update_force_axis(force_axis_e::positive, 7000), force_axis_e::positive);
+  EXPECT_EQ(input::detail::update_force_axis(force_axis_e::positive, 6000), force_axis_e::neutral);
+  EXPECT_EQ(input::detail::update_force_axis(force_axis_e::positive, -8000), force_axis_e::negative);
+}
+
+TEST(InputForceStateTests, TriggerHysteresisIgnoresSmallFluctuations) {
+  EXPECT_FALSE(input::detail::update_force_trigger(false, 29));
+  EXPECT_TRUE(input::detail::update_force_trigger(false, 30));
+  EXPECT_TRUE(input::detail::update_force_trigger(true, 21));
+  EXPECT_FALSE(input::detail::update_force_trigger(true, 20));
+}
+```
+
+Cover digital button changes, inactive-controller clearing, unchanged stable states returning `false`, and changed direction returning `true` through `update_gamepad_force_state()`.
+
+- [ ] **Step 2: User runs the focused test to observe the expected failure**
 
 ```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=MiddlewareDisconnectTests.*"
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=InputForceStateTests.*"
 ```
 
-Expected: compilation fails because the enum and payload helper do not exist.
+Expected: compilation fails because the new timeout-state and classifier interfaces do not exist.
 
-- [ ] **Step 3: Add the enum and payload helper**
+- [ ] **Step 3: Add the timeout-state and classifier types**
 
-Declare the enum and typed public API in `middleware.h`:
+Declare in `input.h`:
 
 ```cpp
-enum class disconnect_notification_type_e : int {
-  other = 0,
-  force_timeout = 1,
-  standby_timeout = 2,
+struct timeout_state_t {
+  bool force_hold_active {};
+  std::chrono::steady_clock::time_point force_hold_started_at {};
+  std::chrono::steady_clock::time_point last_input_time {};
 };
 
-void notify_client_disconnected(
-  std::string_view message,
-  disconnect_notification_type_e type = disconnect_notification_type_e::other
-);
-void notify_client_disconnected(
-  std::u8string_view message,
-  disconnect_notification_type_e type = disconnect_notification_type_e::other
-);
-```
+namespace detail {
+  enum class force_axis_e : std::int8_t {
+    negative = -1,
+    neutral = 0,
+    positive = 1,
+  };
 
-Implement payload construction once in `middleware.cpp`:
+  struct gamepad_force_state_t {
+    std::uint32_t buttons {};
+    bool left_trigger {};
+    bool right_trigger {};
+    force_axis_e left_x {force_axis_e::neutral};
+    force_axis_e left_y {force_axis_e::neutral};
+    force_axis_e right_x {force_axis_e::neutral};
+    force_axis_e right_y {force_axis_e::neutral};
 
-```cpp
-nlohmann::json detail::make_disconnected_payload(
-  std::string_view message,
-  disconnect_notification_type_e type
-) {
-  json msg;
-  msg["event"] = "disconnected";
-  msg["message"] = std::string {message};
-  msg["type"] = static_cast<int>(type);
-  return msg;
+    bool has_held_control() const;
+  };
 }
 ```
 
-Make both notification overloads pass the selected type to this helper. Existing call sites omit the argument and therefore become `type=0`.
+Use constants `STICK_ACTIVATE_THRESHOLD=8000`, `STICK_RELEASE_THRESHOLD=6000`, `TRIGGER_ACTIVATE_THRESHOLD=30`, and `TRIGGER_RELEASE_THRESHOLD=20`. Implement axis and trigger hysteresis exactly as specified, including direct positive-to-negative transitions at the activation threshold.
 
-- [ ] **Step 4: Format and run the focused tests**
+- [ ] **Step 4: Implement force signature transitions**
 
-Run:
+Implement:
 
-```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "clang-format -i src/middleware.h src/middleware.cpp tests/unit/test_middleware.cpp"
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=MiddlewareDisconnectTests.*"
+```cpp
+void detail::apply_force_signature_change(
+  timeout_state_t &state,
+  bool force_hold_active,
+  std::chrono::steady_clock::time_point now
+) {
+  state.force_hold_active = force_hold_active;
+  state.last_input_time = now;
+  if (force_hold_active) {
+    state.force_hold_started_at = now;
+  }
+}
 ```
 
-Expected: all `MiddlewareDisconnectTests` pass.
+`update_gamepad_force_state()` must build a classified next state, compare every field with the prior classified state, assign it, and return whether the stable signature changed. An inactive controller produces an empty classified state.
 
-### Task 2: Per-Session Real User Activity Time
+- [ ] **Step 5: User runs the focused tests and expects them to pass**
+
+Use the Step 2 command. Expected: all `InputForceStateTests` pass.
+
+### Task 2: Wire Per-Session Keyboard, Mouse, and Gamepad Hold State
 
 **Files:**
-- Modify: `src/input.h:65-74`
-- Modify: `src/input.cpp:41-44, 360-457, 1818-1897, 2132-2137`
-- Create: `tests/unit/test_input_activity.cpp`
+- Modify: `src/input.h`
+- Modify: `src/input.cpp`
+- Modify: `tests/unit/test_input_activity.cpp`
 
 **Interfaces:**
-- Produces: `input::update_input_time(const std::shared_ptr<input_t>&)`.
-- Produces: `input::get_last_input_time(const std::shared_ptr<input_t>&) -> std::chrono::steady_clock::time_point`.
-- Produces: `input::detail::is_direct_user_activity_packet(void*) -> bool` for deterministic packet classification tests.
-- Produces: `input::detail::is_changed_active_gamepad_state(bool, const platf::gamepad_state_t&, const platf::gamepad_state_t&) -> bool`.
+- Consumes: the Task 1 force-state helpers.
+- Produces: `input::reset_timeout_state(const std::shared_ptr<input_t>&)`.
+- Produces: `input::get_timeout_state(const std::shared_ptr<input_t>&) -> timeout_state_t`.
+- Retains: `input::update_input_time(const std::shared_ptr<input_t>&)` for accepted non-hold activity.
+- Produces: `input::detail::update_digital_force_state(std::unordered_set<std::uint32_t>&, std::uint32_t, bool) -> bool`.
 
-- [ ] **Step 1: Write failing input classification tests**
+- [ ] **Step 1: Add failing digital held-set tests**
 
-Create packet-based tests using `third-party/moonlight-common-c/src/Input.h`:
+Test press, repeated press, release, and repeated release without platform injection:
 
 ```cpp
-TEST(InputActivityTests, ZeroRelativeMouseMovementIsNotActivity) {
-  NV_REL_MOUSE_MOVE_PACKET packet {};
-  packet.header.magic = util::endian::big<std::uint32_t>(MOUSE_MOVE_REL_MAGIC_GEN5);
-  EXPECT_FALSE(input::detail::is_direct_user_activity_packet(&packet));
-}
+TEST(InputForceStateTests, DigitalHeldSetChangesOnlyOnTransitions) {
+  std::unordered_set<std::uint32_t> held;
 
-TEST(InputActivityTests, NonZeroRelativeMouseMovementIsActivity) {
-  NV_REL_MOUSE_MOVE_PACKET packet {};
-  packet.header.magic = util::endian::big<std::uint32_t>(MOUSE_MOVE_REL_MAGIC_GEN5);
-  packet.deltaX = util::endian::big<std::int16_t>(1);
-  EXPECT_TRUE(input::detail::is_direct_user_activity_packet(&packet));
-}
-
-TEST(InputActivityTests, ControllerMotionIsNotActivity) {
-  SS_CONTROLLER_MOTION_PACKET packet {};
-  packet.header.magic = util::endian::big<std::uint32_t>(SS_CONTROLLER_MOTION_MAGIC);
-  EXPECT_FALSE(input::detail::is_direct_user_activity_packet(&packet));
-}
-
-TEST(InputActivityTests, RepeatedGamepadStateIsNotActivity) {
-  platf::gamepad_state_t state {platf::A, 0, 0, 0, 0, 0, 0};
-  EXPECT_FALSE(input::detail::is_changed_active_gamepad_state(true, state, state));
-}
-
-TEST(InputActivityTests, ChangedActiveGamepadStateIsActivity) {
-  platf::gamepad_state_t old_state {};
-  platf::gamepad_state_t new_state {platf::A, 0, 0, 0, 0, 0, 0};
-  EXPECT_TRUE(input::detail::is_changed_active_gamepad_state(true, old_state, new_state));
-  EXPECT_FALSE(input::detail::is_changed_active_gamepad_state(false, old_state, new_state));
+  EXPECT_TRUE(input::detail::update_digital_force_state(held, 42, true));
+  EXPECT_FALSE(input::detail::update_digital_force_state(held, 42, true));
+  EXPECT_TRUE(input::detail::update_digital_force_state(held, 42, false));
+  EXPECT_FALSE(input::detail::update_digital_force_state(held, 42, false));
+  EXPECT_TRUE(held.empty());
 }
 ```
 
-Also cover zero/non-zero vertical and horizontal scrolling, keyboard, unicode, mouse buttons, touch, pen, controller touch, controller arrival, and controller battery packets.
+Expected before implementation: compilation fails because
+`update_digital_force_state()` does not exist.
 
-- [ ] **Step 2: Run the focused tests and verify failure**
-
-Run:
+- [ ] **Step 2: User runs the digital held-set test to observe the expected failure**
 
 ```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=InputActivityTests.*"
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=InputForceStateTests.DigitalHeldSetChangesOnlyOnTransitions"
 ```
 
-Expected: compilation fails because the detail helpers do not exist.
+- [ ] **Step 3: Add synchronized state and held-control collections to `input_t`**
 
-- [ ] **Step 3: Move the timestamp into `input_t`**
-
-Delete the process-global `last_input_time` and add this member to `input_t`, initialized in its constructor:
+Add these per-session members and initialize their time points together:
 
 ```cpp
-std::atomic<std::chrono::steady_clock::time_point> last_input_time;
+std::mutex timeout_state_mutex;
+timeout_state_t timeout_state;
+std::unordered_set<key_press_id_t> force_held_keys;
+std::unordered_set<std::uint32_t> force_held_mouse_buttons;
+std::vector<detail::gamepad_force_state_t> force_gamepads;
 ```
 
-Change the public functions to require an input context:
+Add `<unordered_set>` to `input.h` because the detail test seam uses it, and
+use the same type in `input.cpp`. Do not use the existing process-global
+`key_press` or `mouse_press` collections for timeout decisions.
+
+- [ ] **Step 4: Add synchronized timeout-state accessors**
+
+Implement `reset_timeout_state()`, `update_input_time()`, and `get_timeout_state()` under `timeout_state_mutex`. `reset_timeout_state()` sets force inactive and both timestamps to one captured `now`. `update_input_time()` only updates `last_input_time`. `get_timeout_state()` returns a value snapshot.
+
+Treat `timeout_state` and every `force_held_*` collection as one synchronized
+unit protected by `timeout_state_mutex`. Add internal helpers that require this
+mutex to be held:
 
 ```cpp
-void update_input_time(const std::shared_ptr<input_t> &input) {
-  input->last_input_time.store(std::chrono::steady_clock::now(), std::memory_order_release);
+bool has_force_held_control_locked(const input_t &input);
+void apply_current_force_signature_locked(input_t &input) {
+  auto now = std::chrono::steady_clock::now();
+  detail::apply_force_signature_change(input.timeout_state, has_force_held_control_locked(input), now);
 }
-
-std::chrono::steady_clock::time_point get_last_input_time(const std::shared_ptr<input_t> &input) {
-  return input->last_input_time.load(std::memory_order_acquire);
-}
 ```
 
-- [ ] **Step 4: Implement direct input classification**
+`reset_timeout_state()` captures one `now`, determines whether a signature is
+already held under the same mutex, and initializes force from `now` when it is
+non-empty; otherwise it initializes standby from `now`. This safely handles
+input received immediately before the session publishes `RUNNING`.
 
-Replace the magic-only activity helper with `is_direct_user_activity_packet(void*)`. It returns true for keyboard, non-empty unicode, mouse buttons, non-zero relative mouse movement, absolute mouse movement, non-zero scroll, touch, pen, and controller touch. It returns false for controller state, controller motion, controller arrival, controller battery, and unknown packets.
+Call `apply_current_force_signature_locked()` only after a stable held signature
+actually changes.
 
-Keep controller state separate so it can compare against the session's previous state:
+- [ ] **Step 5: Wire keyboard and mouse-button changes**
+
+First implement the tested collection transition helper:
 
 ```cpp
-bool detail::is_changed_active_gamepad_state(
-  bool active,
-  const platf::gamepad_state_t &old_state,
-  const platf::gamepad_state_t &new_state
+bool detail::update_digital_force_state(
+  std::unordered_set<std::uint32_t> &held,
+  std::uint32_t id,
+  bool pressed
 ) {
-  return active && !same_gamepad_state(old_state, new_state);
+  return pressed ? held.emplace(id).second : held.erase(id) != 0;
 }
 ```
 
-Remove the timestamp update from `passthrough_next_message()`. Invoke the
-classifier from the corresponding typed `passthrough()` overload only after
-that overload's configuration and packet validation checks have succeeded.
-For keyboard input, update only after duplicate key-down/key-up suppression.
-Change the unicode overload to accept the session input context so it can
-update the correct timestamp. In the multi-controller overload, update only
-after validation and only when the active gamepad state changed. Do not update
-for controller arrival/removal or synthetic middleware clicks.
+After configuration and packet validation, lock `timeout_state_mutex` and update
+the per-session held set before process-global platform duplicate suppression:
 
-- [ ] **Step 5: Format and run focused tests**
-
-Run:
-
-```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "clang-format -i src/input.h src/input.cpp tests/unit/test_input_activity.cpp"
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=InputActivityTests.*"
+```cpp
+auto changed = detail::update_digital_force_state(input->force_held_keys, key_id, !release);
+if (changed) {
+  apply_current_force_signature_locked(*input);
+}
 ```
 
-Expected: all `InputActivityTests` pass.
+Use equivalent explicit insert/erase logic for mouse buttons greater than zero. Repeated down/down or up/up packets do not change the signature. Keyboard shortcuts still count as real held input even when Sunshine consumes the shortcut rather than injecting it into the OS.
 
-### Task 3: Independent Timeout Decision and Notification-Only Control Flow
+- [ ] **Step 6: Wire gamepad classified state changes and controller removal**
+
+Construct the raw client gamepad state before Sunshine's synthetic BACK/HOME
+transformations. Under `timeout_state_mutex`, pass it with the packet's active
+bit to `update_gamepad_force_state()` for that controller. If the stable
+classified state changes, call `apply_current_force_signature_locked()`.
+
+When a controller is removed, clear its classified state before returning and apply the resulting signature transition. Arrival, battery, motion, controller touch, and middleware synthetic clicks do not create held state.
+
+- [ ] **Step 7: Preserve standby real-activity rules**
+
+Keep non-zero mouse motion, valid absolute mouse motion, non-zero scroll, text, touch, pen, and controller touch calling `update_input_time()`. Digital press/release and stable gamepad-signature changes update last activity through `apply_force_signature_change()`.
+
+Do not update either timeout state for periodic ping, loss, repeated input states, gamepad motion, battery, arrival, or synthetic clicks. Standby pausing is implemented by the stream selector in Task 3, so `update_input_time()` does not need to inspect force state.
+
+- [ ] **Step 8: User runs input tests**
+
+```powershell
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=InputForceStateTests.*:InputActivityTests.*"
+```
+
+Expected: all input timeout tests pass.
+
+### Task 3: Select Force Hold or Standby in the Stream Control Loop
 
 **Files:**
 - Modify: `src/stream.h`
-- Modify: `src/stream.cpp:431-442, 1278-1327, 2433-2468`
+- Modify: `src/stream.cpp`
 - Modify: `tests/unit/test_stream.cpp`
 
 **Interfaces:**
-- Consumes: typed middleware disconnect notifications from Task 1.
-- Consumes: per-session `input::get_last_input_time(session.input)` from Task 2.
-- Produces: `stream::detail::timeout_notification_e {none, force, standby}`.
-- Produces: `stream::detail::select_timeout_notification(std::int64_t session_seconds, std::int64_t idle_seconds, int force_timeout, int standby_timeout, bool already_notified) -> timeout_notification_e`.
+- Consumes: `input::get_timeout_state(session.input)` from Task 2.
+- Produces: `stream::detail::select_timeout_notification(bool force_hold_active, std::int64_t force_hold_seconds, std::int64_t idle_seconds, int force_timeout, int standby_timeout, bool already_notified) -> timeout_notification_e`.
 
-- [ ] **Step 1: Write failing timeout decision tests**
-
-Add table-driven tests:
+- [ ] **Step 1: Replace session-duration tests with failing mutual-exclusion tests**
 
 ```cpp
-TEST(TimeoutNotificationTests, ForceUsesSessionElapsedTime) {
+TEST(StreamTimeoutNotificationTests, ActiveHoldSelectsForceAtDeadline) {
   EXPECT_EQ(
-    stream::detail::select_timeout_notification(900, 1, 900, 900, false),
+    stream::detail::select_timeout_notification(true, 1800, 9999, 1800, 1, false),
     stream::detail::timeout_notification_e::force
   );
 }
 
-TEST(TimeoutNotificationTests, StandbyUsesIdleElapsedTime) {
+TEST(StreamTimeoutNotificationTests, ActiveHoldPausesStandby) {
   EXPECT_EQ(
-    stream::detail::select_timeout_notification(100, 300, 900, 300, false),
+    stream::detail::select_timeout_notification(true, 10, 9999, 1800, 1, false),
+    stream::detail::timeout_notification_e::none
+  );
+}
+
+TEST(StreamTimeoutNotificationTests, EmptyHoldSelectsStandbyAtDeadline) {
+  EXPECT_EQ(
+    stream::detail::select_timeout_notification(false, 9999, 1800, 1, 1800, false),
     stream::detail::timeout_notification_e::standby
   );
 }
 
-TEST(TimeoutNotificationTests, ForceWinsEqualExpiredDeadlines) {
+TEST(StreamTimeoutNotificationTests, EmptyHoldCannotSelectForce) {
   EXPECT_EQ(
-    stream::detail::select_timeout_notification(900, 900, 900, 900, false),
-    stream::detail::timeout_notification_e::force
-  );
-}
-
-TEST(TimeoutNotificationTests, AlreadyNotifiedSuppressesAllLaterReports) {
-  EXPECT_EQ(
-    stream::detail::select_timeout_notification(1800, 1800, 900, 900, true),
-    stream::detail::timeout_notification_e::none
-  );
-}
-
-TEST(TimeoutNotificationTests, ZeroDisablesEachTimeout) {
-  EXPECT_EQ(
-    stream::detail::select_timeout_notification(900, 900, 0, 0, false),
+    stream::detail::select_timeout_notification(false, 9999, 1, 1, 1800, false),
     stream::detail::timeout_notification_e::none
   );
 }
 ```
 
-Also cover non-expired values, a shorter force value, a shorter standby value, and negative values being treated as disabled by the selector.
+Retain tests for `already_notified` and zero timeout values. Add the case where force is disabled but an active hold still pauses standby.
 
-- [ ] **Step 2: Run the focused tests and verify failure**
-
-Run:
+- [ ] **Step 2: User runs the focused test to observe the expected failure**
 
 ```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=TimeoutNotificationTests.*"
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=StreamTimeoutNotificationTests.*"
 ```
 
-Expected: compilation fails because the selector does not exist.
+Expected: tests fail because the existing selector treats force as session duration.
 
-- [ ] **Step 3: Implement the pure selector**
+- [ ] **Step 3: Implement the mutually exclusive selector**
 
-Add the detail enum and function declaration to `stream.h` and implement this priority in `stream.cpp`:
+Replace the selector signature and logic:
 
 ```cpp
 if (already_notified) {
   return timeout_notification_e::none;
 }
-if (force_timeout > 0 && session_seconds >= force_timeout) {
-  return timeout_notification_e::force;
+if (force_hold_active) {
+  return force_timeout > 0 && force_hold_seconds >= force_timeout ? timeout_notification_e::force
+                                                                  : timeout_notification_e::none;
 }
-if (standby_timeout > 0 && idle_seconds >= standby_timeout) {
-  return timeout_notification_e::standby;
-}
-return timeout_notification_e::none;
+return standby_timeout > 0 && idle_seconds >= standby_timeout ? timeout_notification_e::standby
+                                                               : timeout_notification_e::none;
 ```
 
-- [ ] **Step 4: Add per-session timing and latch state**
+- [ ] **Step 4: Replace session-duration calculation with the input timeout snapshot**
 
-Add to `session_t`:
-
-```cpp
-std::chrono::steady_clock::time_point started_at;
-bool timeout_notification_sent {};
-```
-
-Immediately before setting the session state to `RUNNING`, initialize both clocks:
+Remove `session_t::started_at`. Initialize the input snapshot immediately before publishing `RUNNING`:
 
 ```cpp
-session.started_at = std::chrono::steady_clock::now();
-input::update_input_time(session.input);
+input::reset_timeout_state(session.input);
 session.timeout_notification_sent = false;
+session.state.store(state_e::RUNNING, std::memory_order_release);
 ```
 
-- [ ] **Step 5: Replace the idle-only stop block**
-
-For each running session with a connected control peer, calculate both elapsed values and call the selector. On force, set the latch and send:
+In the control loop, get one snapshot and calculate eligible elapsed values:
 
 ```cpp
-middleware::notify_client_disconnected(
-  u8"长时间挂机，等待上游断开连接",
-  middleware::disconnect_notification_type_e::force_timeout
-);
+auto timeout_state = input::get_timeout_state(session->input);
+auto force_hold_sec = timeout_state.force_hold_active
+                        ? std::chrono::duration_cast<std::chrono::seconds>(now - timeout_state.force_hold_started_at).count()
+                        : 0;
+auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(now - timeout_state.last_input_time).count();
 ```
 
-On standby, set the latch and send:
+Pass these values and `force_hold_active` to the selector. Log `force_hold_sec` for force and `idle_sec` for standby.
 
-```cpp
-middleware::notify_client_disconnected(
-  u8"长时间无操作，等待上游断开连接",
-  middleware::disconnect_notification_type_e::standby_timeout
-);
-```
+- [ ] **Step 5: Preserve notification-only behavior**
 
-Log `session_sec`, `idle_sec`, and the selected reason. Do not call `send_termination_msg()` or `session::stop()` in either timeout branch. Preserve the existing upstream `mail::force_disconnect` path, which still sends `0x80030023` and stops all running sessions.
+Force sends message `长时间挂机，等待上游断开连接` with `force_timeout` type 1. Standby sends `长时间无操作，等待上游断开连接` with `standby_timeout` type 2. Both set `timeout_notification_sent` before enqueueing and neither sends a termination message nor stops the session.
 
-- [ ] **Step 6: Format and run focused tests**
+Do not modify the existing upstream `mail::force_disconnect` path; it still sends Moonlight graceful termination `0x80030023` and stops running sessions.
 
-Run:
+- [ ] **Step 6: User runs stream timeout tests**
 
-```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "clang-format -i src/stream.h src/stream.cpp tests/unit/test_stream.cpp"
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2 && ./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=TimeoutNotificationTests.*"
-```
+Use the Step 2 command. Expected: all `StreamTimeoutNotificationTests` pass.
 
-Expected: all `TimeoutNotificationTests` pass.
-
-### Task 4: Integrated Verification
+### Task 4: Formatting, Static Review, and User Verification
 
 **Files:**
-- Verify: `src/middleware.h`
-- Verify: `src/middleware.cpp`
 - Verify: `src/input.h`
 - Verify: `src/input.cpp`
 - Verify: `src/stream.h`
 - Verify: `src/stream.cpp`
-- Verify: `tests/unit/test_middleware.cpp`
+- Verify: `src/middleware.h`
+- Verify: `src/middleware.cpp`
 - Verify: `tests/unit/test_input_activity.cpp`
 - Verify: `tests/unit/test_stream.cpp`
+- Verify: `tests/unit/test_middleware.cpp`
 
 **Interfaces:**
 - Consumes: all interfaces from Tasks 1-3.
-- Produces: a buildable implementation with regression coverage and no duplicate timeout reports.
+- Produces: formatted source plus a user-executable verification sequence.
 
-- [ ] **Step 1: Run whitespace and formatting checks**
-
-Run:
+- [ ] **Step 1: Format changed C++ files**
 
 ```powershell
-git diff --check -- src/middleware.h src/middleware.cpp src/input.h src/input.cpp src/stream.h src/stream.cpp tests/unit/test_middleware.cpp tests/unit/test_input_activity.cpp tests/unit/test_stream.cpp
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "clang-format --dry-run --Werror src/middleware.h src/middleware.cpp src/input.h src/input.cpp src/stream.h src/stream.cpp tests/unit/test_middleware.cpp tests/unit/test_input_activity.cpp tests/unit/test_stream.cpp"
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "/e/WorkComp/LLVM/bin/clang-format.exe -i src/input.h src/input.cpp src/stream.h src/stream.cpp tests/unit/test_input_activity.cpp tests/unit/test_stream.cpp"
 ```
 
-Expected: both commands succeed without diagnostics.
-
-- [ ] **Step 2: Build the complete test executable**
-
-Run:
+- [ ] **Step 2: Codex performs non-building static checks**
 
 ```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2"
+git diff --check -- src/input.h src/input.cpp src/stream.h src/stream.cpp tests/unit/test_input_activity.cpp tests/unit/test_stream.cpp
 ```
 
-Expected: `cmake-build-codex-tests/tests/test_sunshine.exe` links successfully.
-
-- [ ] **Step 3: Run all feature tests together**
-
-Run:
-
-```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=MiddlewareDisconnectTests.*:InputActivityTests.*:TimeoutNotificationTests.*"
-```
-
-Expected: all feature tests pass.
-
-- [ ] **Step 4: Run the full GoogleTest suite**
-
-Run:
-
-```powershell
-E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no"
-```
-
-Expected: no new failures. The pre-existing `ConfigConsistencyTest.AllConfigOptionsExistInAllFiles` failure may remain until the middleware configuration documentation/UI work is completed separately.
-
-- [ ] **Step 5: Review the final diff against the specification**
-
-Confirm all of the following in the diff and test output:
+Confirm directly from the diff:
 
 ```text
-force elapsed source       = session.started_at
-standby elapsed source     = session.input.last_input_time
+force elapsed source       = current per-session held signature start
+standby eligibility        = no held signature active
+standby elapsed source     = current session last real input/release time
+session-duration force     = absent
 timeout local stop         = absent
 timeout termination packet = absent
 timeout notification latch = one per session
@@ -460,4 +439,30 @@ all other payload types    = 0
 upstream disconnect path   = unchanged and still stops Moonlight
 ```
 
-Because target source files contained pre-existing user modifications before this implementation, leave the implementation uncommitted for user review.
+- [ ] **Step 3: User builds the complete test executable**
+
+```powershell
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "cmake --build cmake-build-codex-tests --target test_sunshine -j2"
+```
+
+Expected: `cmake-build-codex-tests/tests/test_sunshine.exe` links successfully.
+
+- [ ] **Step 4: User runs all feature tests**
+
+```powershell
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no --gtest_filter=MiddlewareDisconnectTests.*:InputForceStateTests.*:InputActivityTests.*:StreamTimeoutNotificationTests.*"
+```
+
+Expected: every selected test passes.
+
+- [ ] **Step 5: User runs the full suite**
+
+```powershell
+E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "./cmake-build-codex-tests/tests/test_sunshine.exe --gtest_color=no"
+```
+
+Expected: no new failures. Report any baseline failure separately from this feature.
+
+- [ ] **Step 6: Leave implementation changes for user review**
+
+Do not automatically commit production code. Report changed files, the static-review result, and the exact tests the user still needs to run.
