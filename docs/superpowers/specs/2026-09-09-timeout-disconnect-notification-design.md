@@ -2,8 +2,14 @@
 
 ## Goal
 
-Separate the maximum session duration from user-idle detection and report the
-result to the upstream middleware without immediately disconnecting Moonlight.
+Detect two different inactivity scenarios per streaming session and notify the
+upstream middleware without immediately disconnecting Moonlight:
+
+- `force_disconnected_time`: a keyboard key, mouse button, or stable gamepad
+  control combination has remained held for too long.
+- `standby_disconnected_time`: no real user operation is active or received for
+  too long.
+
 The upstream service remains responsible for sending the existing
 `disconnected` command that causes Sunshine to terminate the client session.
 
@@ -11,42 +17,130 @@ The upstream service remains responsible for sending the existing
 
 ### Force disconnect time
 
-`force_disconnected_time` is an absolute session-duration limit:
+`force_disconnected_time` is a continuous-hold limit, expressed in seconds:
 
-- Interpret the configured value as seconds.
-- Start measuring when the stream session enters `RUNNING`.
-- Do not reset the deadline when user input is received.
+- Start measuring when the current held-control combination changes from empty
+  to non-empty.
+- Restart the timer whenever that combination changes.
+- Stop the timer when every tracked control returns to its released or neutral
+  state.
 - A value of `0` disables the timeout.
-- When the deadline is reached, report a `disconnected` event with `type=1`.
+- When the limit is reached, report a `disconnected` event with `type=1`.
+
+The held-control combination includes real client input from:
+
+- Keyboard keys.
+- Mouse buttons.
+- Gamepad digital buttons, triggers, and stick directions, separated by client
+  controller number.
+
+Keyboard auto-repeat packets and repeated unchanged controller packets do not
+change the combination or restart the timer. Synthetic server-generated input,
+including middleware gamepad clicks, is excluded.
 
 ### Standby disconnect time
 
-`standby_disconnected_time` is a per-session idle limit:
+`standby_disconnected_time` is a per-session idle limit, expressed in seconds:
 
-- Interpret the configured value as seconds.
 - Initialize the last-activity time when the stream session enters `RUNNING`.
-- Reset it only after a real user action is processed for that session.
+- Reset it when a real user action is processed for that session.
+- Pause standby detection while any tracked control is held, even when force
+  detection is disabled.
+- When all tracked controls are released, restart standby timing from the
+  release time.
 - A value of `0` disables the timeout.
 - When the idle limit is reached, report a `disconnected` event with `type=2`.
 
-If both timeouts become due during the same control-loop iteration, the force
-timeout takes priority and only the force notification is sent.
+Force and standby are mutually exclusive at any instant: a non-empty held
+combination is eligible only for force detection, while an empty combination is
+eligible only for standby detection.
+
+## Stable Gamepad Classification
+
+Raw gamepad analog values are not compared exactly because hardware noise would
+continually restart the force timer. Each session instead maintains a stable
+classification for every controller:
+
+- Digital button flags are tracked exactly.
+- A trigger enters the held state at value `30` and returns to released at value
+  `20` or below. Values in between retain the previous classification.
+- Each stick axis enters a positive or negative held direction at absolute value
+  `8000` and returns to neutral at absolute value `6000` or below. Values in
+  between retain the previous classification.
+- Crossing between positive, neutral, and negative changes the held-control
+  combination and restarts force timing.
+
+This hysteresis makes small stick and trigger fluctuations irrelevant while
+still treating a deliberate direction change or release as a new combination.
+
+## Per-Session State and Data Flow
+
+Each `input_t` owns:
+
+- Its current keyboard-key set.
+- Its current mouse-button set.
+- Stable control classifications for its gamepads.
+- A held-control signature derived from those sets and classifications.
+- Whether force hold detection is active and when the current signature began.
+- The timestamp of the last real user activity used by standby detection.
+
+The per-session input queue processes accepted input changes in order. After
+packet validation it updates the corresponding held-control state, rebuilds the
+signature, and performs one of these transitions:
+
+1. Empty to non-empty: activate force timing at the current time.
+2. Non-empty to a different non-empty signature: restart force timing.
+3. Non-empty to empty: deactivate force timing and restart standby timing.
+4. Unchanged signature: preserve the original force start time.
+
+Mouse movement, scrolling, text, touch, pen, and controller touch update the
+standby activity timestamp but do not enter the held-control signature. While a
+held signature exists, these events do not restart force timing.
+
+The control thread reads a consistent `active + held_since + last_activity`
+snapshot under synchronization. State must not use process-global key or mouse
+collections for timeout decisions, because activity from one session must not
+affect another session.
+
+## Real User Activity
+
+The following reset standby when no tracked control is held:
+
+- Accepted keyboard press and release changes.
+- Text input.
+- Accepted mouse button press and release changes.
+- Non-zero relative mouse movement and valid absolute mouse movement.
+- Non-zero vertical or horizontal scrolling.
+- Touchscreen and pen interaction.
+- Controller touch interaction.
+- Changed controller button, trigger, or stick state while the controller is
+  active.
+
+The following do not reset standby or create a force-held signature:
+
+- Periodic control pings and loss statistics.
+- Repeated keyboard, mouse-button, or controller state packets.
+- Controller arrival by itself. Controller removal clears that controller's
+  tracked held state and follows the normal combination-change transition.
+- Controller battery reports.
+- Controller accelerometer and gyroscope reports.
+- Synthetic server-generated input.
 
 ## Notification Types
 
-The `type` field in the inner `disconnected` event describes the reason:
+The inner `data.type` field describes the reason:
 
 | Value | Meaning |
 | --- | --- |
 | `0` | Other disconnect reason |
-| `1` | `force_disconnected_time` reached |
-| `2` | `standby_disconnected_time` reached |
+| `1` | `force_disconnected_time` continuous-hold limit reached |
+| `2` | `standby_disconnected_time` idle limit reached |
 
 All existing non-timeout reports use `type=0`, including client-initiated
 disconnects, network failures, ping timeouts, and upstream-requested
 disconnects.
 
-The timeout notification is wrapped using the existing middleware envelope:
+The force notification is wrapped using the existing middleware envelope:
 
 ```json
 {
@@ -55,16 +149,17 @@ The timeout notification is wrapped using the existing middleware envelope:
   "data": {
     "event": "disconnected",
     "message": "长时间挂机，等待上游断开连接",
-    "type": 1
+    "data": {
+      "type": 1
+    }
   }
 }
 ```
 
 The standby form uses `type=2` and the message
-`长时间无操作，等待上游断开连接`. Existing messages for non-timeout
-disconnect reports remain unchanged.
+`长时间无操作，等待上游断开连接`.
 
-## Timeout Notification Lifecycle
+## Notification Lifecycle
 
 Each session stores whether a timeout notification has already been sent.
 After the first force or standby notification:
@@ -74,10 +169,6 @@ After the first force or standby notification:
 - Do not call `session::stop()`.
 - Leave the stream running while waiting for the upstream response.
 
-This latch is required because the control loop runs approximately every
-millisecond. Without it, an expired session would continuously enqueue the same
-notification.
-
 When the upstream service subsequently sends the existing `disconnected`
 command, Sunshine follows the current force-disconnect path:
 
@@ -85,86 +176,42 @@ command, Sunshine follows the current force-disconnect path:
 2. Send the standard Moonlight graceful termination code `0x80030023`.
 3. Stop and remove the running session.
 
-The previously considered custom Moonlight termination codes are outside this
-design. The timeout reason is communicated only through the upstream
-notification's `type` field. Moonlight receives a generic graceful termination
-when the upstream service orders the disconnect.
-
-## Per-Session Timing State
-
-The session owns its start timestamp and timeout-notification latch. The input
-context owns its last-real-user-activity timestamp. This avoids the current
-process-global input timestamp, where activity from one client can keep another
-client session alive.
+## Runtime Configuration and Failure Behavior
 
 Timeout values remain atomically readable because middleware events can update
-them while sessions are running. If an update lowers a timeout below elapsed
-time, the next control-loop iteration reports it immediately. Increasing or
-disabling a timeout affects subsequent checks, unless the session has already
-sent its one timeout notification.
+them while sessions are running. A numeric zero disables the corresponding
+timeout; malformed or negative values leave the current value unchanged.
 
-## Real User Activity
+When a runtime update lowers a timeout below the current eligible elapsed time,
+the next control-loop iteration reports it. Increasing or disabling a timeout
+affects subsequent checks unless the session has already sent its one timeout
+notification.
 
-Only input that represents an effective user action resets the standby timer:
-
-- Keyboard presses and releases.
-- Text input.
-- Mouse button events.
-- Non-zero mouse movement.
-- Non-zero vertical or horizontal scrolling.
-- Touchscreen and pen interaction.
-- Controller touch interaction.
-- Controller button, trigger, or stick state changes while the controller is
-  active.
-
-The following do not reset the standby timer:
-
-- Periodic control pings and loss statistics.
-- Repeated controller packets whose button, trigger, and stick state is
-  unchanged.
-- Controller arrival or removal by itself.
-- Controller battery reports.
-- Controller accelerometer and gyroscope reports, because sensor noise can
-  otherwise keep a session active indefinitely.
-- Synthetic server-generated input such as middleware gamepad clicks.
-
-The real-activity check occurs in the per-session input pipeline after packet
-validation and before updating that session's last-activity timestamp.
-
-## Failure and Retry Behavior
-
-The session latch is set when Sunshine attempts the first timeout notification,
-and Sunshine does not retry it. The existing middleware queue and heartbeat
-drain behavior remains responsible for delivering an accepted message. If the
-middleware is disconnected and the existing send path drops the notification,
-the session remains running and the notification is not retried. Improving
-middleware delivery guarantees is a separate concern and is not part of this
-change.
-
-Malformed or negative timeout events leave the current value unchanged. A
-numeric zero disables the corresponding timeout, matching the current event
-parsing behavior.
+The session latch is set when Sunshine attempts the first notification. The
+notification is not retried if the middleware is disconnected; improving
+middleware delivery guarantees remains outside this change.
 
 ## Testing
 
 Automated tests cover:
 
-- Force time is measured from session start and is not reset by input.
-- Standby time is measured from the last real input for the same session.
-- Input in one session does not reset another session's standby time.
-- Equal deadlines produce one force notification with `type=1`.
-- A shorter standby deadline produces one standby notification with `type=2`.
-- Repeated control-loop checks do not emit duplicate timeout notifications.
-- Timeout notification leaves the Moonlight session in `RUNNING` state.
-- The later upstream `disconnected` command still terminates the Moonlight
-  session through the standard graceful termination path.
+- Keyboard keys, mouse buttons, gamepad buttons, triggers, and stick directions
+  can each form a force-held signature.
+- An unchanged non-empty signature reaches the force timeout and reports
+  `type=1`.
+- Adding, removing, or changing a held control restarts force timing.
+- Releasing every held control stops force timing and restarts standby timing.
+- Standby cannot fire while a force-held signature is active.
+- Analog noise inside the hysteresis bands does not restart force timing.
+- Deliberate analog direction changes and releases do restart timing.
+- Ordinary real input restarts standby without being accumulated as force.
+- Periodic, sensor, battery, arrival, synthetic, and repeated unchanged events
+  do not count as real activity.
+- Timeout state is isolated between sessions.
+- A timeout notification leaves Moonlight in `RUNNING` and is emitted only once.
+- A later upstream `disconnected` command still terminates Moonlight.
 - Non-timeout disconnect reports use `type=0`.
-- Zero timeout values disable their checks.
-- Runtime timeout reductions take effect on the next check.
-- Repeated unchanged controller packets and controller motion reports do not
-  reset standby time.
-- Actual keyboard, mouse, touch, pen, and changed controller state do reset
-  standby time.
+- Zero timeout values disable their respective checks.
 
 ## Out of Scope
 
