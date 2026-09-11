@@ -5,7 +5,10 @@
 #pragma once
 
 // standard includes
+#include <chrono>
+#include <cstdint>
 #include <functional>
+#include <unordered_set>
 
 // local includes
 #include "platform/common.h"
@@ -14,11 +17,48 @@
 namespace input {
   struct input_t;
 
+  struct timeout_state_t {
+    bool force_hold_active {};
+    std::chrono::steady_clock::time_point force_hold_started_at {};
+    std::chrono::steady_clock::time_point last_input_time {};
+  };
+
   namespace detail {
-    bool is_changed_active_gamepad_state(
+    enum class force_axis_e : std::int8_t {
+      negative = -1,
+      neutral = 0,
+      positive = 1,
+    };
+
+    struct gamepad_force_state_t {
+      std::uint32_t buttons {};
+      bool left_trigger {};
+      bool right_trigger {};
+      force_axis_e left_x {force_axis_e::neutral};
+      force_axis_e left_y {force_axis_e::neutral};
+      force_axis_e right_x {force_axis_e::neutral};
+      force_axis_e right_y {force_axis_e::neutral};
+
+      bool has_held_control() const;
+      bool operator==(const gamepad_force_state_t &) const = default;
+    };
+
+    force_axis_e update_force_axis(force_axis_e previous, std::int16_t value);
+    bool update_force_trigger(bool previous, std::uint8_t value);
+    bool update_gamepad_force_state(
+      gamepad_force_state_t &state,
       bool active,
-      const platf::gamepad_state_t &old_state,
-      const platf::gamepad_state_t &new_state
+      const platf::gamepad_state_t &gamepad_state
+    );
+    bool update_digital_force_state(
+      std::unordered_set<std::uint32_t> &held,
+      std::uint32_t id,
+      bool pressed
+    );
+    void apply_force_signature_change(
+      timeout_state_t &state,
+      bool force_hold_active,
+      std::chrono::steady_clock::time_point now
     );
   }  // namespace detail
 
@@ -77,9 +117,15 @@ namespace input {
   void update_input_time(const std::shared_ptr<input_t> &input);
 
   /**
-   * @brief Get the time point of a session's last real user input.
+   * @brief Reset a session's force-hold and standby timing state.
    * @param input The session input context.
-   * @return The steady_clock time point of the last input event.
    */
-  std::chrono::steady_clock::time_point get_last_input_time(const std::shared_ptr<input_t> &input);
+  void reset_timeout_state(const std::shared_ptr<input_t> &input);
+
+  /**
+   * @brief Get a consistent snapshot of a session's timeout state.
+   * @param input The session input context.
+   * @return The force-hold and standby timing state.
+   */
+  timeout_state_t get_timeout_state(const std::shared_ptr<input_t> &input);
 }  // namespace input

@@ -6,6 +6,7 @@
 
 // standard includes
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 // lib includes
@@ -33,11 +34,17 @@ namespace stream {
     };
 
     timeout_notification_e select_timeout_notification(
-      std::int64_t session_seconds,
+      bool force_hold_active,
+      std::int64_t force_hold_seconds,
       std::int64_t idle_seconds,
       int force_timeout,
       int standby_timeout,
       bool already_notified
+    );
+
+    boost::asio::ip::address select_video_source_address(
+      const boost::asio::ip::address &peer_address,
+      const std::optional<boost::asio::ip::address> &routed_source_address
     );
   }  // namespace detail
 

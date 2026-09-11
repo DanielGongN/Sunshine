@@ -95,7 +95,8 @@ namespace stream {
 
   namespace detail {
     timeout_notification_e select_timeout_notification(
-      std::int64_t session_seconds,
+      bool force_hold_active,
+      std::int64_t force_hold_seconds,
       std::int64_t idle_seconds,
       int force_timeout,
       int standby_timeout,
@@ -104,18 +105,76 @@ namespace stream {
       if (already_notified) {
         return timeout_notification_e::none;
       }
-      if (force_timeout > 0 && session_seconds >= force_timeout) {
-        return timeout_notification_e::force;
+      if (force_hold_active) {
+        return force_timeout > 0 && force_hold_seconds >= force_timeout ? timeout_notification_e::force : timeout_notification_e::none;
       }
-      if (standby_timeout > 0 && idle_seconds >= standby_timeout) {
-        return timeout_notification_e::standby;
+      return standby_timeout > 0 && idle_seconds >= standby_timeout ? timeout_notification_e::standby : timeout_notification_e::none;
+    }
+
+    boost::asio::ip::address select_video_source_address(
+      const boost::asio::ip::address &peer_address,
+      const std::optional<boost::asio::ip::address> &routed_source_address
+    ) {
+      if (peer_address.is_loopback()) {
+        return peer_address;
       }
-      return timeout_notification_e::none;
+
+      if (routed_source_address &&
+          routed_source_address->is_v4() == peer_address.is_v4() &&
+          !routed_source_address->is_loopback() &&
+          !routed_source_address->is_unspecified()) {
+        return *routed_source_address;
+      }
+
+      return peer_address.is_v4() ?
+               boost::asio::ip::address {boost::asio::ip::address_v4::any()} :
+               boost::asio::ip::address {boost::asio::ip::address_v6::any()};
     }
   }  // namespace detail
 
   std::string udp_endpoint_to_string(const udp::endpoint &endpoint) {
     return endpoint.address().to_string() + ':' + std::to_string(endpoint.port());
+  }
+
+  boost::asio::ip::address resolve_video_source_address(
+    const udp::endpoint &peer,
+    const boost::asio::ip::address &bound_address
+  ) {
+    if (peer.address().is_loopback()) {
+      return detail::select_video_source_address(peer.address(), peer.address());
+    }
+
+    asio::io_context route_ioc;
+    udp::socket route_socket {route_ioc};
+    boost::system::error_code ec;
+    std::optional<boost::asio::ip::address> routed_source_address;
+
+    if (!bound_address.is_unspecified()) {
+      routed_source_address = bound_address;
+    } else {
+      route_socket.open(peer.protocol(), ec);
+      if (!ec) {
+        route_socket.connect(peer, ec);
+      }
+      if (!ec) {
+        auto local_endpoint = route_socket.local_endpoint(ec);
+        if (!ec) {
+          routed_source_address = local_endpoint.address();
+        }
+      }
+    }
+
+    auto source_address = detail::select_video_source_address(peer.address(), routed_source_address);
+    if (source_address.is_unspecified()) {
+      BOOST_LOG(warning) << "[stream][video-route] failed peer="sv << udp_endpoint_to_string(peer)
+                         << " error="sv << (ec ? ec.message() : "invalid routed source")
+                         << " fallback="sv << source_address.to_string();
+    } else {
+      BOOST_LOG(info) << "[stream][video-route] peer="sv << udp_endpoint_to_string(peer)
+                      << " source="sv << source_address.to_string();
+    }
+
+    return source_address;
   }
 
   bool should_log_ping_sample(std::uint64_t count) {
@@ -461,7 +520,6 @@ namespace stream {
     std::thread videoThread;
 
     std::chrono::steady_clock::time_point pingTimeout;
-    std::chrono::steady_clock::time_point started_at;
     bool timeout_notification_sent {};
 
     safe::shared_t<broadcast_ctx_t>::ptr_t broadcast_ref;
@@ -473,6 +531,7 @@ namespace stream {
 
       int lowseq;
       udp::endpoint peer;
+      boost::asio::ip::address source_address;
 
       std::optional<crypto::cipher::gcm_t> cipher;
       std::uint64_t gcm_iv_counter;
@@ -1328,19 +1387,20 @@ namespace stream {
 
           // Timeout detection starts once the session is running and the control channel is connected.
           if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && session->control.peer) {
-            auto session_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                                 now - session->started_at
-            )
-                                 .count();
+            auto timeout_state = input::get_timeout_state(session->input);
+            auto force_hold_sec = timeout_state.force_hold_active ?
+                                    std::chrono::duration_cast<std::chrono::seconds>(now - timeout_state.force_hold_started_at).count() :
+                                    0;
             auto idle_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                              now - input::get_last_input_time(session->input)
+                              now - timeout_state.last_input_time
             )
                               .count();
 
             auto force_timeout = config::sunshine.middleware.force_disconnected_timeout.load(std::memory_order_acquire);
             auto standby_timeout = config::sunshine.middleware.standby_disconnected_timeout.load(std::memory_order_acquire);
             auto timeout_notification = detail::select_timeout_notification(
-              session_sec,
+              timeout_state.force_hold_active,
+              force_hold_sec,
               idle_sec,
               force_timeout,
               standby_timeout,
@@ -1348,7 +1408,7 @@ namespace stream {
             );
             if (timeout_notification == detail::timeout_notification_e::force) {
               session->timeout_notification_sent = true;
-              BOOST_LOG(warning) << "[control][timeout] reason=force_timeout session_sec="sv << session_sec
+              BOOST_LOG(warning) << "[control][timeout] reason=force_timeout force_hold_sec="sv << force_hold_sec
                                  << " action=notify_upstream"sv;
               middleware::notify_client_disconnected(
                 u8"长时间挂机，等待上游断开连接",
@@ -1845,7 +1905,7 @@ namespace stream {
             (uintptr_t) sock.native_handle(),
             peer_address,
             session->video.peer.port(),
-            session->localAddress,
+            session->video.source_address,
           };
 
           size_t next_shard_to_send = 0;
@@ -1932,7 +1992,7 @@ namespace stream {
                     (uintptr_t) sock.native_handle(),
                     peer_address,
                     session->video.peer.port(),
-                    session->localAddress,
+                    session->video.source_address,
                   };
 
                   platf::send(send_info);
@@ -2315,6 +2375,15 @@ namespace stream {
                       << gateway_port;
     }
 
+    boost::system::error_code local_endpoint_ec;
+    auto video_local_endpoint = ref->video_sock.local_endpoint(local_endpoint_ec);
+    auto video_bound_address = local_endpoint_ec ?
+                                 (session->video.peer.address().is_v4() ?
+                                    boost::asio::ip::address {boost::asio::ip::address_v4::any()} :
+                                    boost::asio::ip::address {boost::asio::ip::address_v6::any()}) :
+                                 video_local_endpoint.address();
+    session->video.source_address = resolve_video_source_address(session->video.peer, video_bound_address);
+
     // Enable local prioritization and QoS tagging on video traffic if requested by the client
     auto address = session->video.peer.address();
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
@@ -2501,9 +2570,8 @@ namespace stream {
       }
       session.videoThread = std::thread {videoThread, &session};
 
-      session.started_at = std::chrono::steady_clock::now();
       session.timeout_notification_sent = false;
-      input::update_input_time(session.input);
+      input::reset_timeout_state(session.input);
       session.state.store(state_e::RUNNING, std::memory_order_release);
       middleware::notify_client_connected();
 

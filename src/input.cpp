@@ -18,6 +18,7 @@ extern "C" {
 #include <list>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 // lib includes
 #include <boost/endian/buffers.hpp>
@@ -50,6 +51,10 @@ namespace input {
   constexpr auto VKEY_MENU = 0x12;
   constexpr auto VKEY_LMENU = 0xA4;
   constexpr auto VKEY_RMENU = 0xA5;
+  constexpr std::int16_t STICK_ACTIVATE_THRESHOLD = 8000;
+  constexpr std::int16_t STICK_RELEASE_THRESHOLD = 6000;
+  constexpr std::uint8_t TRIGGER_ACTIVATE_THRESHOLD = 30;
+  constexpr std::uint8_t TRIGGER_RELEASE_THRESHOLD = 20;
 
   enum class button_state_e {
     NONE,  ///< No button state
@@ -364,12 +369,80 @@ namespace input {
            lhs.rsY == rhs.rsY;
   }
 
-  bool detail::is_changed_active_gamepad_state(
+  bool detail::gamepad_force_state_t::has_held_control() const {
+    return buttons != 0 ||
+           left_trigger ||
+           right_trigger ||
+           left_x != force_axis_e::neutral ||
+           left_y != force_axis_e::neutral ||
+           right_x != force_axis_e::neutral ||
+           right_y != force_axis_e::neutral;
+  }
+
+  detail::force_axis_e detail::update_force_axis(force_axis_e previous, std::int16_t value) {
+    if (value >= STICK_ACTIVATE_THRESHOLD) {
+      return force_axis_e::positive;
+    }
+    if (value <= -STICK_ACTIVATE_THRESHOLD) {
+      return force_axis_e::negative;
+    }
+    if (value >= -STICK_RELEASE_THRESHOLD && value <= STICK_RELEASE_THRESHOLD) {
+      return force_axis_e::neutral;
+    }
+    return previous;
+  }
+
+  bool detail::update_force_trigger(bool previous, std::uint8_t value) {
+    if (value >= TRIGGER_ACTIVATE_THRESHOLD) {
+      return true;
+    }
+    if (value <= TRIGGER_RELEASE_THRESHOLD) {
+      return false;
+    }
+    return previous;
+  }
+
+  bool detail::update_gamepad_force_state(
+    gamepad_force_state_t &state,
     bool active,
-    const platf::gamepad_state_t &old_state,
-    const platf::gamepad_state_t &new_state
+    const platf::gamepad_state_t &gamepad_state
   ) {
-    return active && !same_gamepad_state(old_state, new_state);
+    gamepad_force_state_t next = state;
+    if (!active) {
+      next = {};
+    } else {
+      next.buttons = gamepad_state.buttonFlags;
+      next.left_trigger = update_force_trigger(state.left_trigger, gamepad_state.lt);
+      next.right_trigger = update_force_trigger(state.right_trigger, gamepad_state.rt);
+      next.left_x = update_force_axis(state.left_x, gamepad_state.lsX);
+      next.left_y = update_force_axis(state.left_y, gamepad_state.lsY);
+      next.right_x = update_force_axis(state.right_x, gamepad_state.rsX);
+      next.right_y = update_force_axis(state.right_y, gamepad_state.rsY);
+    }
+
+    auto changed = next != state;
+    state = next;
+    return changed;
+  }
+
+  bool detail::update_digital_force_state(
+    std::unordered_set<std::uint32_t> &held,
+    std::uint32_t id,
+    bool pressed
+  ) {
+    return pressed ? held.emplace(id).second : held.erase(id) != 0;
+  }
+
+  void detail::apply_force_signature_change(
+    timeout_state_t &state,
+    bool force_hold_active,
+    std::chrono::steady_clock::time_point now
+  ) {
+    state.force_hold_active = force_hold_active;
+    state.last_input_time = now;
+    if (force_hold_active) {
+      state.force_hold_started_at = now;
+    }
   }
 
   struct gamepad_t {
@@ -437,7 +510,12 @@ namespace input {
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
         input_queue_drain_active {},
-        last_input_time {std::chrono::steady_clock::now()},
+        timeout_state {
+          false,
+          std::chrono::steady_clock::now(),
+          std::chrono::steady_clock::now()
+        },
+        force_gamepads(MAX_GAMEPADS),
         touch_port {{0, 0, 0, 0}, 0, 0, 1.0f, 1.0f, 0, 0},
         accumulated_vscroll_delta {},
         accumulated_hscroll_delta {} {
@@ -456,7 +534,11 @@ namespace input {
     std::mutex input_queue_lock;
     bool input_queue_drain_active;
 
-    std::atomic<std::chrono::steady_clock::time_point> last_input_time;
+    std::mutex timeout_state_mutex;
+    timeout_state_t timeout_state;
+    std::unordered_set<std::uint32_t> force_held_keys;
+    std::unordered_set<std::uint32_t> force_held_mouse_buttons;
+    std::vector<detail::gamepad_force_state_t> force_gamepads;
 
     input::touch_port_t touch_port;
 
@@ -466,6 +548,28 @@ namespace input {
 
   bool has_client_gamepad_index(const input_t &input, int id) {
     return id >= 0 && static_cast<std::size_t>(id) < input.gamepads.size();
+  }
+
+  bool has_force_held_control_locked(const input_t &input) {
+    if (!input.force_held_keys.empty() || !input.force_held_mouse_buttons.empty()) {
+      return true;
+    }
+
+    return std::any_of(
+      input.force_gamepads.begin(),
+      input.force_gamepads.end(),
+      [](const detail::gamepad_force_state_t &state) {
+        return state.has_held_control();
+      }
+    );
+  }
+
+  void apply_current_force_signature_locked(input_t &input) {
+    detail::apply_force_signature_change(
+      input.timeout_state,
+      has_force_held_control_locked(input),
+      std::chrono::steady_clock::now()
+    );
   }
 
   void cancel_pending_gamepad_timers(gamepad_t &gamepad) {
@@ -884,6 +988,13 @@ namespace input {
 
     auto release = util::endian::little(packet->header.magic) == MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5;
     auto button = util::endian::big(packet->button);
+    if (button > 0) {
+      std::scoped_lock lock {input->timeout_state_mutex};
+      if (detail::update_digital_force_state(input->force_held_mouse_buttons, button, !release)) {
+        apply_current_force_signature_locked(*input);
+      }
+    }
+
     if (button > 0 && button < mouse_press.size()) {
       if (mouse_press[button] != release) {
         // button state is already what we want
@@ -893,7 +1004,6 @@ namespace input {
       mouse_press[button] = !release;
     }
 
-    update_input_time(input);
     platf::button_mouse(platf_input, button, release);
   }
 
@@ -1007,6 +1117,13 @@ namespace input {
 
     auto release = util::endian::little(packet->header.magic) == KEY_UP_EVENT_MAGIC;
     auto keyCode = packet->keyCode & 0x00FF;
+    auto key_id = make_kpid(keyCode, packet->flags);
+    {
+      std::scoped_lock lock {input->timeout_state_mutex};
+      if (detail::update_digital_force_state(input->force_held_keys, key_id, !release)) {
+        apply_current_force_signature_locked(*input);
+      }
+    }
 
     // Set synthetic modifier flags if the keyboard packet is requesting modifier
     // keys that are not current pressed.
@@ -1023,13 +1140,12 @@ namespace input {
       }
     }
 
-    auto &pressed = key_press[make_kpid(keyCode, packet->flags)];
+    auto &pressed = key_press[key_id];
     if (!pressed) {
       if (!release) {
         // A new key has been pressed down, we need to check for key combo's
         // If a key-combo has been pressed down, don't pass it through
         if (input->shortcutFlags == input_t::SHORTCUT && apply_shortcut(keyCode) > 0) {
-          update_input_time(input);
           return;
         }
 
@@ -1051,7 +1167,6 @@ namespace input {
 
     pressed = !release;
 
-    update_input_time(input);
     send_key_and_modifiers(keyCode, release, packet->flags, synthetic_modifiers);
 
     update_shortcutFlags(&input->shortcutFlags, map_keycode(keyCode), release);
@@ -1454,6 +1569,12 @@ namespace input {
       }
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
+      {
+        std::scoped_lock lock {input->timeout_state_mutex};
+        if (detail::update_gamepad_force_state(input->force_gamepads[packet->controllerNumber], false, {})) {
+          apply_current_force_signature_locked(*input);
+        }
+      }
       cancel_pending_gamepad_timers(gamepad);
       free_gamepad(platf_input, gamepad.id, gamepad.feedback_queue, gamepad.preinitialized);
       gamepad.feedback_queue.reset();
@@ -1471,7 +1592,7 @@ namespace input {
 
     std::uint16_t bf = packet->buttonFlags;
     std::uint32_t bf2 = packet->buttonFlags2;
-    platf::gamepad_state_t gamepad_state {
+    platf::gamepad_state_t client_gamepad_state {
       bf | (bf2 << 16),
       packet->leftTrigger,
       packet->rightTrigger,
@@ -1480,6 +1601,14 @@ namespace input {
       packet->rightStickX,
       packet->rightStickY
     };
+    {
+      std::scoped_lock lock {input->timeout_state_mutex};
+      if (detail::update_gamepad_force_state(input->force_gamepads[packet->controllerNumber], true, client_gamepad_state)) {
+        apply_current_force_signature_locked(*input);
+      }
+    }
+
+    auto gamepad_state = client_gamepad_state;
 
     auto bf_new = gamepad_state.buttonFlags;
     switch (gamepad.back_button_state) {
@@ -1506,12 +1635,9 @@ namespace input {
     auto button_flags_changed = gamepad_state.buttonFlags ^ gamepad.gamepad_state.buttonFlags;
     bf_new = gamepad_state.buttonFlags;
 
-    auto active = (packet->activeGamepadMask & (1 << packet->controllerNumber)) != 0;
-    if (!detail::is_changed_active_gamepad_state(active, gamepad.gamepad_state, gamepad_state)) {
+    if (same_gamepad_state(gamepad_state, gamepad.gamepad_state)) {
       return;
     }
-
-    update_input_time(input);
 
     if (platf::BACK & button_flags_changed) {
       if (platf::BACK & bf_new) {
@@ -2144,10 +2270,23 @@ namespace input {
   }
 
   void update_input_time(const std::shared_ptr<input_t> &input) {
-    input->last_input_time.store(std::chrono::steady_clock::now(), std::memory_order_release);
+    std::scoped_lock lock {input->timeout_state_mutex};
+    input->timeout_state.last_input_time = std::chrono::steady_clock::now();
   }
 
-  std::chrono::steady_clock::time_point get_last_input_time(const std::shared_ptr<input_t> &input) {
-    return input->last_input_time.load(std::memory_order_acquire);
+  void reset_timeout_state(const std::shared_ptr<input_t> &input) {
+    auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock {input->timeout_state_mutex};
+    auto force_hold_active = has_force_held_control_locked(*input);
+    input->timeout_state = {
+      force_hold_active,
+      now,
+      now
+    };
+  }
+
+  timeout_state_t get_timeout_state(const std::shared_ptr<input_t> &input) {
+    std::scoped_lock lock {input->timeout_state_mutex};
+    return input->timeout_state;
   }
 }  // namespace input
