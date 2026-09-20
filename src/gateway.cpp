@@ -38,6 +38,20 @@ using udp = asio::ip::udp;
 
 namespace gateway {
 
+  bool detail::control_send_admission_t::try_acquire() {
+    if (in_flight >= CONTROL_MAX_IN_FLIGHT) {
+      return false;
+    }
+    ++in_flight;
+    return true;
+  }
+
+  void detail::control_send_admission_t::release() {
+    if (in_flight != 0) {
+      --in_flight;
+    }
+  }
+
   using socket_ptr = std::shared_ptr<tcp::socket>;
 
   constexpr std::size_t UDP_GATEWAY_HEADER_SIZE = UDP_HEADER_SIZE;
@@ -45,7 +59,6 @@ namespace gateway {
   constexpr std::size_t UDP_MAX_AUDIO_QUEUE_PACKETS = 128;
   constexpr std::size_t UDP_MAX_VIDEO_QUEUE_BYTES = 512 * 1024;
   constexpr std::size_t UDP_MAX_VIDEO_QUEUE_PACKETS = 384;
-  constexpr std::size_t UDP_CONTROL_WARN_QUEUE_PACKETS = 512;
   constexpr std::uint64_t UDP_DIAG_SAMPLE_LIMIT = 32;
   constexpr std::uint64_t UDP_DIAG_SAMPLE_INTERVAL = 1000;
   constexpr auto UDP_IDLE_STATS_INTERVAL = std::chrono::seconds(1);
@@ -55,13 +68,6 @@ namespace gateway {
     udp::endpoint endpoint;
     std::shared_ptr<std::vector<std::uint8_t>> data;
     std::uint64_t client_generation;
-  };
-
-  struct udp_raw_packet_t {
-    std::uint8_t stream_id;
-    std::shared_ptr<udp::socket> socket;
-    udp::endpoint endpoint;
-    std::shared_ptr<std::vector<char>> data;
   };
 
   void close_socket_pair(const socket_ptr &a, const socket_ptr &b) {
@@ -156,10 +162,11 @@ namespace gateway {
   class gateway_t {
   public:
     gateway_t():
-        ioc {},
-        acceptor {ioc},
-        udp_socket {ioc},
-        udp_stats_timer {ioc},
+        tcp_ioc {},
+        udp_ioc {},
+        acceptor {tcp_ioc},
+        udp_socket {udp_ioc},
+        udp_stats_timer {udp_ioc},
         udp_public_endpoint {},
         stopping {false} {}
 
@@ -181,20 +188,38 @@ namespace gateway {
           ec.clear();
         }
       }
-      ioc.stop();
-      if (worker.joinable()) {
-        worker.join();
+      tcp_ioc.stop();
+      udp_ioc.stop();
+      if (tcp_worker.joinable()) {
+        tcp_worker.join();
+      }
+      if (udp_worker.joinable()) {
+        udp_worker.join();
       }
     }
 
     void run() {
-      worker = std::thread([this]() {
-        platf::set_thread_name("gateway");
+      try {
+        start_listeners();
+      } catch (const std::exception &e) {
+        BOOST_LOG(fatal) << "Gateway failed to initialize: "sv << e.what();
+        return;
+      }
+
+      tcp_worker = std::thread([this]() {
+        platf::set_thread_name("gateway-tcp");
         try {
-          start_listeners();
-          ioc.run();
+          tcp_ioc.run();
         } catch (const std::exception &e) {
-          BOOST_LOG(fatal) << "Gateway terminated: "sv << e.what();
+          BOOST_LOG(fatal) << "Gateway TCP worker terminated: "sv << e.what();
+        }
+      });
+      udp_worker = std::thread([this]() {
+        platf::set_thread_name("gateway-udp");
+        try {
+          udp_ioc.run();
+        } catch (const std::exception &e) {
+          BOOST_LOG(fatal) << "Gateway UDP worker terminated: "sv << e.what();
         }
       });
     }
@@ -215,7 +240,7 @@ namespace gateway {
       }
 
       BOOST_LOG(info) << "[gateway][udp-clear] clients="sv << client_count;
-      asio::post(ioc, [this]() {
+      asio::post(udp_ioc, [this]() {
         schedule_udp_client_sends();
       });
     }
@@ -251,20 +276,19 @@ namespace gateway {
     void log_stale_udp_client_drop(const udp_queued_packet_t &packet);
     void mark_control_activity();
     void log_udp_stats();
-    bool has_pending_control_out() const;
     bool has_pending_audio_out() const;
     void schedule_udp_client_sends();
-    void send_next_control_client_packet();
     void send_next_audio_packet();
     void send_next_video_packet();
-    void send_next_control_internal_packet();
 
-    asio::io_context ioc;
+    asio::io_context tcp_ioc;
+    asio::io_context udp_ioc;
     tcp::acceptor acceptor;
     udp::socket udp_socket;
     asio::steady_timer udp_stats_timer;
     udp::endpoint udp_public_endpoint;
-    std::thread worker;
+    std::thread tcp_worker;
+    std::thread udp_worker;
     std::atomic<bool> stopping;
 
     std::map<std::uint8_t, udp::endpoint> udp_clients;
@@ -273,10 +297,8 @@ namespace gateway {
 
     std::map<std::uint8_t, std::shared_ptr<udp::socket>> udp_internal_sockets;
 
-    std::deque<udp_queued_packet_t> udp_control_out_queue;
     std::deque<udp_queued_packet_t> udp_audio_out_queue;
     std::deque<udp_queued_packet_t> udp_video_out_queue;
-    std::deque<udp_raw_packet_t> udp_control_in_queue;
     std::size_t udp_audio_out_bytes {};
     std::size_t udp_video_out_bytes {};
     std::uint64_t udp_audio_drop_count {};
@@ -298,14 +320,18 @@ namespace gateway {
     std::uint64_t udp_control_out_bytes {};
     std::uint64_t udp_audio_out_payload_bytes {};
     std::uint64_t udp_video_out_payload_bytes {};
-    std::size_t udp_control_in_peak {};
-    std::size_t udp_control_out_peak {};
     std::size_t udp_audio_out_peak {};
     std::size_t udp_video_out_peak {};
-    bool udp_control_out_send_active {};
     bool udp_audio_out_send_active {};
     bool udp_video_out_send_active {};
-    bool udp_control_in_send_active {};
+    detail::control_send_admission_t udp_control_out_admission {};
+    detail::control_send_admission_t udp_control_in_admission {};
+    std::uint64_t udp_control_out_drop_count {};
+    std::uint64_t udp_control_in_drop_count {};
+    std::uint64_t udp_control_in_submit_max_us {};
+    std::uint64_t udp_control_out_submit_max_us {};
+    std::uint64_t udp_control_in_complete_max_us {};
+    std::uint64_t udp_control_out_complete_max_us {};
   };
 
   void gateway_t::start_listeners() {
@@ -360,18 +386,7 @@ namespace gateway {
         return;
       }
 
-#if 0
-      BOOST_LOG(info) << "[gateway][udp-idle] public="sv << udp_endpoint_to_string(udp_public_endpoint)
-                      << " clients(video/control/audio/client_mic)="sv << get_client_port(STREAM_VIDEO) << '/' << get_client_port(STREAM_CONTROL) << '/' << get_client_port(STREAM_AUDIO) << '/'
-                      << get_client_port(STREAM_CLIENT_MIC)
-                      << " in(video/control/audio/client_mic/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
-                      << udp_client_mic_in_packets << '/'
-                      << udp_invalid_in_packets
-                      << " out(control/audio/video)="sv << udp_control_out_packets << '/' << udp_audio_out_packets << '/' << udp_video_out_packets
-                      << " bytes_in(video/control/audio/client_mic)="sv << udp_video_in_bytes << '/' << udp_control_in_bytes << '/' << udp_audio_in_bytes << '/'
-                      << udp_client_mic_in_bytes;
-#endif
-
+      log_udp_stats();
       schedule_udp_stats_timer();
     });
   }
@@ -417,7 +432,7 @@ namespace gateway {
   }
 
   void gateway_t::start_tls_tunnel(socket_ptr client, std::uint8_t first_byte) {
-    auto internal = std::make_shared<tcp::socket>(ioc);
+    auto internal = std::make_shared<tcp::socket>(tcp_ioc);
     auto remote_ep = client->remote_endpoint();
     auto internal_port = static_cast<std::uint16_t>(config::sunshine.port + INTERNAL_HTTPS_OFFSET);
 
@@ -491,7 +506,7 @@ namespace gateway {
   }
 
   void gateway_t::start_https_framed_tunnel(socket_ptr client, std::uint16_t target_port) {
-    auto internal = std::make_shared<tcp::socket>(ioc);
+    auto internal = std::make_shared<tcp::socket>(tcp_ioc);
     internal->async_connect(
       tcp::endpoint {asio::ip::make_address("127.0.0.1"), target_port},
       [this, client, internal](boost::system::error_code ec) {
@@ -640,7 +655,7 @@ namespace gateway {
   }
 
   void gateway_t::forward_to_internal(socket_ptr client, std::uint8_t stream_id, std::uint16_t target_port, std::vector<std::uint8_t> payload) {
-    auto internal = std::make_shared<tcp::socket>(ioc);
+    auto internal = std::make_shared<tcp::socket>(tcp_ioc);
     auto payload_ptr = std::make_shared<std::vector<std::uint8_t>>(std::move(payload));
     internal->async_connect(
       tcp::endpoint {asio::ip::make_address("127.0.0.1"), target_port},
@@ -727,6 +742,7 @@ namespace gateway {
   }
 
   void gateway_t::enqueue_control_client_send(const udp::endpoint &client_ep, std::uint64_t client_generation, const char *payload, std::size_t payload_len) {
+    const auto started_at = std::chrono::steady_clock::now();
     if (payload_len == 0 || payload_len > 0xFFFF) {
       return;
     }
@@ -738,34 +754,68 @@ namespace gateway {
     data->push_back(static_cast<std::uint8_t>(payload_len & 0xFF));
     data->insert(data->end(), payload, payload + payload_len);
 
-    mark_control_activity();
-    ++udp_control_out_packets;
-    udp_control_out_bytes += payload_len;
-    udp_control_out_queue.emplace_back(udp_queued_packet_t {STREAM_CONTROL, client_ep, std::move(data), client_generation});
-    udp_control_out_peak = std::max(udp_control_out_peak, udp_control_out_queue.size());
-    log_udp_stats();
-    if (udp_control_out_queue.size() == UDP_CONTROL_WARN_QUEUE_PACKETS) {
-      BOOST_LOG(warning) << "[gateway] control UDP client queue reached "sv << udp_control_out_queue.size() << " packets"sv;
+    udp_queued_packet_t packet {STREAM_CONTROL, client_ep, data, client_generation};
+    if (!is_current_udp_client(packet)) {
+      log_stale_udp_client_drop(packet);
+      return;
     }
-
-    schedule_udp_client_sends();
-  }
-
-  void gateway_t::enqueue_control_internal_send(const std::shared_ptr<udp::socket> &socket, const udp::endpoint &internal_ep, const char *payload, std::size_t payload_len) {
-    if (payload_len == 0) {
+    if (!udp_control_out_admission.try_acquire()) {
+      ++udp_control_out_drop_count;
+      BOOST_LOG(warning) << "[gateway] dropping control UDP client packet at in-flight limit"sv;
       return;
     }
 
     mark_control_activity();
-    auto data = std::make_shared<std::vector<char>>(payload, payload + payload_len);
-    udp_control_in_queue.emplace_back(udp_raw_packet_t {STREAM_CONTROL, socket, internal_ep, std::move(data)});
-    udp_control_in_peak = std::max(udp_control_in_peak, udp_control_in_queue.size());
+    ++udp_control_out_packets;
+    udp_control_out_bytes += payload_len;
+    udp_socket.async_send_to(asio::buffer(*data), client_ep, [this, data, started_at](boost::system::error_code ec, std::size_t) {
+      udp_control_out_admission.release();
+      const auto elapsed_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count());
+      udp_control_out_complete_max_us = std::max(udp_control_out_complete_max_us, elapsed_us);
+      if (ec && !stopping.load()) {
+        log_udp_stats();
+        BOOST_LOG(warning) << "[gateway] control UDP client send failed: "sv << ec.message();
+      }
+    });
+    const auto submit_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count());
+    udp_control_out_submit_max_us = std::max(udp_control_out_submit_max_us, submit_us);
     log_udp_stats();
-    if (udp_control_in_queue.size() == UDP_CONTROL_WARN_QUEUE_PACKETS) {
-      BOOST_LOG(warning) << "[gateway] control UDP internal queue reached "sv << udp_control_in_queue.size() << " packets"sv;
+  }
+
+  void gateway_t::enqueue_control_internal_send(const std::shared_ptr<udp::socket> &socket, const udp::endpoint &internal_ep, const char *payload, std::size_t payload_len) {
+    const auto started_at = std::chrono::steady_clock::now();
+    if (payload_len == 0) {
+      return;
     }
 
-    send_next_control_internal_packet();
+    auto data = std::make_shared<std::vector<char>>(payload, payload + payload_len);
+    if (!udp_control_in_admission.try_acquire()) {
+      ++udp_control_in_drop_count;
+      BOOST_LOG(warning) << "[gateway] dropping control UDP internal packet at in-flight limit"sv;
+      return;
+    }
+
+    mark_control_activity();
+    const auto local_ep = socket->local_endpoint();
+    socket->async_send_to(asio::buffer(*data), internal_ep, [this, data, socket, internal_ep, local_ep, started_at](boost::system::error_code ec, std::size_t bytes_sent) {
+      udp_control_in_admission.release();
+      const auto elapsed_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count());
+      udp_control_in_complete_max_us = std::max(udp_control_in_complete_max_us, elapsed_us);
+      if (ec && !stopping.load()) {
+        log_udp_stats();
+        BOOST_LOG(warning) << "[gateway][udp-in-forward] failed stream=control payload="sv << data->size()
+                           << " to="sv << udp_endpoint_to_string(internal_ep)
+                           << " via="sv << udp_endpoint_to_string(local_ep)
+                           << " err="sv << ec.message();
+      } else if (should_log_udp_sample(udp_control_in_packets)) {
+        BOOST_LOG(info) << "[gateway][udp-in-forward] ok stream=control sent="sv << bytes_sent
+                        << " to="sv << udp_endpoint_to_string(internal_ep)
+                        << " via="sv << udp_endpoint_to_string(local_ep);
+      }
+    });
+    const auto submit_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at).count());
+    udp_control_in_submit_max_us = std::max(udp_control_in_submit_max_us, submit_us);
+    log_udp_stats();
   }
 
   void gateway_t::enqueue_udp_send(std::uint8_t stream_id, const udp::endpoint &client_ep, std::uint64_t client_generation, const char *payload, std::size_t payload_len) {
@@ -826,29 +876,16 @@ namespace gateway {
 
     udp_audio_out_peak = std::max(udp_audio_out_peak, udp_audio_out_queue.size());
     udp_video_out_peak = std::max(udp_video_out_peak, udp_video_out_queue.size());
-#if 0
-    auto control_idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - udp_last_control_activity).count();
-    BOOST_LOG(info) << "[gateway][udp-stats] in(video/control/audio/client_mic/invalid)="sv << udp_video_in_packets << '/' << udp_control_in_packets << '/' << udp_audio_in_packets << '/'
-                    << udp_client_mic_in_packets << '/' << udp_invalid_in_packets
-                    << " out(control/audio/video)="sv << udp_control_out_packets << '/' << udp_audio_out_packets << '/' << udp_video_out_packets
-                    << " drops(audio/video)="sv << udp_audio_drop_count << '/' << udp_video_drop_count
-                    << " q(ctrl_in/ctrl_out/audio/video)="sv << udp_control_in_queue.size() << '/' << udp_control_out_queue.size() << '/'
-                    << udp_audio_out_queue.size() << '/' << udp_video_out_queue.size()
-                    << " peaks(ctrl_in/ctrl_out/audio/video)="sv << udp_control_in_peak << '/' << udp_control_out_peak << '/'
-                    << udp_audio_out_peak << '/' << udp_video_out_peak
-                    << " bytes_in(video/control/audio/client_mic)="sv << udp_video_in_bytes << '/' << udp_control_in_bytes << '/' << udp_audio_in_bytes << '/' << udp_client_mic_in_bytes
-                    << " bytes_out(control/audio/video)="sv << udp_control_out_bytes << '/' << udp_audio_out_payload_bytes << '/' << udp_video_out_payload_bytes
-                    << " active(ctrl/audio/video)="sv << udp_control_out_send_active << '/' << udp_audio_out_send_active << '/' << udp_video_out_send_active
-                    << " control_idle_ms="sv << control_idle_ms;
-#endif
+    BOOST_LOG(info) << "[gateway][control-fast] in_packets="sv << udp_control_in_packets
+                    << " out_packets="sv << udp_control_out_packets
+                    << " in_flight="sv << udp_control_in_admission.in_flight << '/' << udp_control_out_admission.in_flight
+                    << " submit_max_us="sv << udp_control_in_submit_max_us << '/' << udp_control_out_submit_max_us
+                    << " complete_max_us="sv << udp_control_in_complete_max_us << '/' << udp_control_out_complete_max_us
+                    << " drops="sv << udp_control_in_drop_count << '/' << udp_control_out_drop_count;
   }
 
   void gateway_t::mark_control_activity() {
     udp_last_control_activity = std::chrono::steady_clock::now();
-  }
-
-  bool gateway_t::has_pending_control_out() const {
-    return udp_control_out_send_active || !udp_control_out_queue.empty();
   }
 
   bool gateway_t::has_pending_audio_out() const {
@@ -856,44 +893,12 @@ namespace gateway {
   }
 
   void gateway_t::schedule_udp_client_sends() {
-    send_next_control_client_packet();
     send_next_audio_packet();
     send_next_video_packet();
   }
 
-  void gateway_t::send_next_control_client_packet() {
-    if (udp_control_out_send_active || stopping.load()) {
-      return;
-    }
-
-    while (!udp_control_out_queue.empty()) {
-      auto packet = std::move(udp_control_out_queue.front());
-      udp_control_out_queue.pop_front();
-      if (!is_current_udp_client(packet)) {
-        log_stale_udp_client_drop(packet);
-        continue;
-      }
-
-      udp_control_out_send_active = true;
-      udp_socket.async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet](boost::system::error_code ec, std::size_t) mutable {
-        udp_control_out_send_active = false;
-        if (ec && !stopping.load()) {
-          log_udp_stats();
-          BOOST_LOG(warning) << "[gateway] control UDP client send failed: "sv << ec.message();
-        }
-        schedule_udp_client_sends();
-      });
-      return;
-    }
-  }
-
   void gateway_t::send_next_audio_packet() {
     if (udp_audio_out_send_active || stopping.load()) {
-      return;
-    }
-
-    if (has_pending_control_out()) {
-      send_next_control_client_packet();
       return;
     }
 
@@ -924,11 +929,6 @@ namespace gateway {
       return;
     }
 
-    if (has_pending_control_out()) {
-      send_next_control_client_packet();
-      return;
-    }
-
     if (has_pending_audio_out()) {
       send_next_audio_packet();
       return;
@@ -956,44 +956,10 @@ namespace gateway {
     }
   }
 
-  void gateway_t::send_next_control_internal_packet() {
-    if (udp_control_in_send_active || stopping.load()) {
-      return;
-    }
-
-    if (udp_control_in_queue.empty()) {
-      return;
-    }
-
-    auto packet = std::move(udp_control_in_queue.front());
-    udp_control_in_queue.pop_front();
-    udp_control_in_send_active = true;
-    auto packet_count = udp_control_in_packets;
-    if (should_log_udp_sample(packet_count)) {
-      BOOST_LOG(info) << "[gateway][udp-in-forward] queued stream=control payload="sv << packet.data->size()
-                      << " to="sv << udp_endpoint_to_string(packet.endpoint)
-                      << " via="sv << udp_endpoint_to_string(packet.socket->local_endpoint());
-    }
-    packet.socket->async_send_to(asio::buffer(*packet.data), packet.endpoint, [this, packet, packet_count](boost::system::error_code ec, std::size_t bytes_sent) mutable {
-      udp_control_in_send_active = false;
-      if (ec && !stopping.load()) {
-        log_udp_stats();
-        BOOST_LOG(warning) << "[gateway][udp-in-forward] failed stream=control payload="sv << packet.data->size()
-                           << " to="sv << udp_endpoint_to_string(packet.endpoint)
-                           << " via="sv << udp_endpoint_to_string(packet.socket->local_endpoint())
-                           << " err="sv << ec.message();
-      } else if (should_log_udp_sample(packet_count)) {
-        BOOST_LOG(info) << "[gateway][udp-in-forward] ok stream=control sent="sv << bytes_sent
-                        << " to="sv << udp_endpoint_to_string(packet.endpoint)
-                        << " via="sv << udp_endpoint_to_string(packet.socket->local_endpoint());
-      }
-      send_next_control_internal_packet();
-    });
-  }
 
   void gateway_t::start_udp_forwarder(std::uint16_t target_port, std::uint8_t stream_id) {
     if (stream_id == STREAM_CONTROL) {
-      auto sock = std::make_shared<udp::socket>(ioc);
+      auto sock = std::make_shared<udp::socket>(udp_ioc);
       sock->open(udp::v4());
       sock->bind(udp::endpoint {asio::ip::make_address("127.0.0.1"), 0});
 
@@ -1036,7 +1002,7 @@ namespace gateway {
       return;
     }
 
-    auto in_sock = std::make_shared<udp::socket>(ioc);
+    auto in_sock = std::make_shared<udp::socket>(udp_ioc);
     in_sock->open(udp::v4());
     in_sock->bind(udp::endpoint {asio::ip::make_address("127.0.0.1"), 0});
 
@@ -1048,7 +1014,7 @@ namespace gateway {
       return;
     }
 
-    auto out_sock = std::make_shared<udp::socket>(ioc);
+    auto out_sock = std::make_shared<udp::socket>(udp_ioc);
     out_sock->open(udp::v4());
     auto fwd_port = static_cast<std::uint16_t>(target_port + UDP_FWD_OFFSET);
     out_sock->bind(udp::endpoint {asio::ip::make_address("127.0.0.1"), fwd_port});

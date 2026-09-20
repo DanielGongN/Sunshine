@@ -24,6 +24,15 @@ namespace input {
   };
 
   namespace detail {
+    struct relative_mouse_delta_t {
+      std::int16_t x {};
+      std::int16_t y {};
+
+      bool operator==(const relative_mouse_delta_t &) const = default;
+    };
+
+    bool batch_relative_mouse(relative_mouse_delta_t &dest, const relative_mouse_delta_t &src);
+
     enum class force_axis_e : std::int8_t {
       negative = -1,
       neutral = 0,

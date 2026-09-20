@@ -17,6 +17,17 @@
 
 namespace gateway {
 
+  namespace detail {
+    constexpr std::size_t CONTROL_MAX_IN_FLIGHT = 512;
+
+    struct control_send_admission_t {
+      std::size_t in_flight {};
+
+      bool try_acquire();
+      void release();
+    };
+  }  // namespace detail
+
   // Gateway protocol stream IDs.
   constexpr std::uint8_t STREAM_HTTPS = 0x01;
   constexpr std::uint8_t STREAM_VIDEO = 0x02;

@@ -7,7 +7,24 @@
 #include "src/input.h"
 
 #include <chrono>
+#include <cstdint>
 #include <unordered_set>
+
+TEST(InputMouseBatchTests, AccumulatesRelativeMotionWithoutOverflow) {
+  input::detail::relative_mouse_delta_t dest {100, -50};
+  const input::detail::relative_mouse_delta_t src {25, 20};
+
+  EXPECT_TRUE(input::detail::batch_relative_mouse(dest, src));
+  EXPECT_EQ(dest, (input::detail::relative_mouse_delta_t {125, -30}));
+}
+
+TEST(InputMouseBatchTests, RejectsRelativeMotionOverflow) {
+  input::detail::relative_mouse_delta_t dest {INT16_MAX, 0};
+  const input::detail::relative_mouse_delta_t src {1, 0};
+
+  EXPECT_FALSE(input::detail::batch_relative_mouse(dest, src));
+  EXPECT_EQ(dest, (input::detail::relative_mouse_delta_t {INT16_MAX, 0}));
+}
 
 TEST(InputForceStateTests, NonEmptySignatureStartsForceTiming) {
   input::timeout_state_t state {};

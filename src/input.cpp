@@ -16,6 +16,7 @@ extern "C" {
 #include <chrono>
 #include <cmath>
 #include <list>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -77,6 +78,18 @@ namespace input {
   template<std::size_t N>
   void free_id(std::bitset<N> &gamepad_mask, int id) {
     gamepad_mask[id] = false;
+  }
+
+  bool detail::batch_relative_mouse(relative_mouse_delta_t &dest, const relative_mouse_delta_t &src) {
+    const auto x = static_cast<std::int32_t>(dest.x) + static_cast<std::int32_t>(src.x);
+    const auto y = static_cast<std::int32_t>(dest.y) + static_cast<std::int32_t>(src.y);
+    if (x < std::numeric_limits<std::int16_t>::min() || x > std::numeric_limits<std::int16_t>::max() || y < std::numeric_limits<std::int16_t>::min() || y > std::numeric_limits<std::int16_t>::max()) {
+      return false;
+    }
+
+    dest.x = static_cast<std::int16_t>(x);
+    dest.y = static_cast<std::int16_t>(y);
+    return true;
   }
 
   typedef uint32_t key_press_id_t;
@@ -1716,20 +1729,22 @@ namespace input {
    * @return The status of the batching operation.
    */
   batch_result_e batch(PNV_REL_MOUSE_MOVE_PACKET dest, PNV_REL_MOUSE_MOVE_PACKET src) {
-    short deltaX;
-    short deltaY;
+    detail::relative_mouse_delta_t delta {
+      util::endian::big(dest->deltaX),
+      util::endian::big(dest->deltaY)
+    };
+    const detail::relative_mouse_delta_t source {
+      util::endian::big(src->deltaX),
+      util::endian::big(src->deltaY)
+    };
 
-    // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (__builtin_add_overflow(util::endian::big(dest->deltaX), util::endian::big(src->deltaX), &deltaX)) {
-      return batch_result_e::terminate_batch;
-    }
-    if (__builtin_add_overflow(util::endian::big(dest->deltaY), util::endian::big(src->deltaY), &deltaY)) {
+    if (!detail::batch_relative_mouse(delta, source)) {
       return batch_result_e::terminate_batch;
     }
 
     // Take the sum of deltas
-    dest->deltaX = util::endian::big(deltaX);
-    dest->deltaY = util::endian::big(deltaY);
+    dest->deltaX = util::endian::big(delta.x);
+    dest->deltaY = util::endian::big(delta.y);
     return batch_result_e::batched;
   }
 
@@ -1957,9 +1972,9 @@ namespace input {
     // We can only batch certain message types
     switch (util::endian::little(dest->magic)) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
-        return batch_result_e::terminate_batch;
+        return batch((PNV_REL_MOUSE_MOVE_PACKET) dest, (PNV_REL_MOUSE_MOVE_PACKET) src);
       case MOUSE_MOVE_ABS_MAGIC:
-        return batch_result_e::terminate_batch;
+        return batch((PNV_ABS_MOUSE_MOVE_PACKET) dest, (PNV_ABS_MOUSE_MOVE_PACKET) src);
       case SCROLL_MAGIC_GEN5:
         return batch((PNV_SCROLL_PACKET) dest, (PNV_SCROLL_PACKET) src);
       case SS_HSCROLL_MAGIC:

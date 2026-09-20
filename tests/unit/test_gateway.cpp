@@ -3,6 +3,8 @@
  * @brief Test src/gateway.*.
  */
 
+#include "src/gateway.h"
+
 #include <array>
 #include <cstdint>
 
@@ -22,4 +24,23 @@ TEST(GatewayLengthParsingTests, ParsesSignedCharBytesAsUnsigned) {
   EXPECT_EQ(230, gateway::read_u16_be(len_230[0], len_230[1]));
   EXPECT_EQ(392, gateway::read_u16_be(len_392[0], len_392[1]));
   EXPECT_EQ(752, gateway::read_u16_be(len_752[0], len_752[1]));
+}
+
+TEST(GatewayControlAdmissionTests, AllowsUpToHardLimit) {
+  gateway::detail::control_send_admission_t admission {};
+
+  for (std::size_t i = 0; i < gateway::detail::CONTROL_MAX_IN_FLIGHT; ++i) {
+    ASSERT_TRUE(admission.try_acquire());
+  }
+  EXPECT_FALSE(admission.try_acquire());
+  EXPECT_EQ(admission.in_flight, gateway::detail::CONTROL_MAX_IN_FLIGHT);
+}
+
+TEST(GatewayControlAdmissionTests, ReleaseMakesCapacityAvailable) {
+  gateway::detail::control_send_admission_t admission {gateway::detail::CONTROL_MAX_IN_FLIGHT};
+
+  EXPECT_FALSE(admission.try_acquire());
+  admission.release();
+  EXPECT_TRUE(admission.try_acquire());
+  EXPECT_EQ(admission.in_flight, gateway::detail::CONTROL_MAX_IN_FLIGHT);
 }
