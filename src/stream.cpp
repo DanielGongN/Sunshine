@@ -119,10 +119,7 @@ namespace stream {
         return peer_address;
       }
 
-      if (routed_source_address &&
-          routed_source_address->is_v4() == peer_address.is_v4() &&
-          !routed_source_address->is_loopback() &&
-          !routed_source_address->is_unspecified()) {
+      if (routed_source_address && routed_source_address->is_v4() == peer_address.is_v4() && !routed_source_address->is_loopback() && !routed_source_address->is_unspecified()) {
         return *routed_source_address;
       }
 
