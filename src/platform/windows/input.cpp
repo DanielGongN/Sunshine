@@ -8,6 +8,7 @@
 #include <Windows.h>
 
 // standard includes
+#include <algorithm>
 #include <bitset>
 #include <chrono>
 #include <cmath>
@@ -18,6 +19,7 @@
 #include <ViGEm/Client.h>
 
 // local includes
+#include "buke_hid_input.h"
 #include "keylayout.h"
 #include "misc.h"
 #include "src/config.h"
@@ -666,6 +668,7 @@ namespace platf {
     }
 
     vigem_t *vigem;
+    std::unique_ptr<buke_hid_input_t> buke_hid;
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -675,6 +678,8 @@ namespace platf {
   input_t input() {
     input_t result {new input_raw_t {}};
     auto &raw = *(input_raw_t *) result.get();
+
+    raw.buke_hid = buke_hid_input_t::create_from_executable_dir();
 
     raw.vigem = new vigem_t {};
     if (raw.vigem->init()) {
@@ -730,6 +735,21 @@ namespace platf {
   }
 
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
+    auto &raw = *(input_raw_t *) input.get();
+    if (raw.buke_hid) {
+      // client_to_touchport() already applies the display offset.
+      const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+      const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+      const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+      const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+      if (width > 0 && height > 0) {
+        const int pixel_x = std::clamp(static_cast<int>(std::lround(x)), left, left + width - 1);
+        const int pixel_y = std::clamp(static_cast<int>(std::lround(y)), top, top + height - 1);
+        raw.buke_hid->move_absolute(pixel_x, pixel_y);
+        return;
+      }
+    }
+
     INPUT i {};
 
     i.type = INPUT_MOUSE;
@@ -754,6 +774,12 @@ namespace platf {
   }
 
   void move_mouse(input_t &input, int deltaX, int deltaY) {
+    auto &raw = *(input_raw_t *) input.get();
+    if (raw.buke_hid) {
+      raw.buke_hid->move_relative(deltaX, deltaY);
+      return;
+    }
+
     INPUT i {};
 
     i.type = INPUT_MOUSE;
@@ -781,6 +807,12 @@ namespace platf {
   }
 
   void button_mouse(input_t &input, int button, bool release) {
+    auto &raw = *(input_raw_t *) input.get();
+    if (raw.buke_hid) {
+      raw.buke_hid->button(button, release);
+      return;
+    }
+
     INPUT i {};
 
     i.type = INPUT_MOUSE;
@@ -804,6 +836,12 @@ namespace platf {
   }
 
   void scroll(input_t &input, int distance) {
+    auto &raw = *(input_raw_t *) input.get();
+    if (raw.buke_hid) {
+      raw.buke_hid->wheel(distance);
+      return;
+    }
+
     INPUT i {};
 
     i.type = INPUT_MOUSE;
@@ -828,6 +866,12 @@ namespace platf {
   }
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+    auto &raw = *(input_raw_t *) input.get();
+    if (raw.buke_hid) {
+      raw.buke_hid->key(modcode, release);
+      return;
+    }
+
     INPUT i {};
     i.type = INPUT_KEYBOARD;
     auto &ki = i.ki;
