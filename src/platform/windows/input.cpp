@@ -19,7 +19,7 @@
 #include <ViGEm/Client.h>
 
 // local includes
-#include "buke_hid_input.h"
+#include "keyboard_mouse_backend.h"
 #include "keylayout.h"
 #include "misc.h"
 #include "src/config.h"
@@ -668,7 +668,7 @@ namespace platf {
     }
 
     vigem_t *vigem;
-    std::unique_ptr<buke_hid_input_t> buke_hid;
+    keyboard_mouse_backend_t keyboard_mouse;
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -679,7 +679,7 @@ namespace platf {
     input_t result {new input_raw_t {}};
     auto &raw = *(input_raw_t *) result.get();
 
-    raw.buke_hid = buke_hid_input_t::create_from_executable_dir();
+    raw.keyboard_mouse = select_keyboard_mouse_backend_from_executable_dir();
 
     raw.vigem = new vigem_t {};
     if (raw.vigem->init()) {
@@ -736,7 +736,7 @@ namespace platf {
 
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
     auto &raw = *(input_raw_t *) input.get();
-    if (raw.buke_hid) {
+    if (raw.keyboard_mouse.interception || raw.keyboard_mouse.buke_hid) {
       // client_to_touchport() already applies the display offset.
       const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
       const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -745,8 +745,14 @@ namespace platf {
       if (width > 0 && height > 0) {
         const int pixel_x = std::clamp(static_cast<int>(std::lround(x)), left, left + width - 1);
         const int pixel_y = std::clamp(static_cast<int>(std::lround(y)), top, top + height - 1);
-        raw.buke_hid->move_absolute(pixel_x, pixel_y);
-        return;
+        if (raw.keyboard_mouse.interception) {
+          if (SetCursorPos(pixel_x, pixel_y)) {
+            return;
+          }
+        } else {
+          raw.keyboard_mouse.buke_hid->move_absolute(pixel_x, pixel_y);
+          return;
+        }
       }
     }
 
@@ -775,8 +781,12 @@ namespace platf {
 
   void move_mouse(input_t &input, int deltaX, int deltaY) {
     auto &raw = *(input_raw_t *) input.get();
-    if (raw.buke_hid) {
-      raw.buke_hid->move_relative(deltaX, deltaY);
+    if (raw.keyboard_mouse.interception) {
+      raw.keyboard_mouse.interception->move_relative(deltaX, deltaY);
+      return;
+    }
+    if (raw.keyboard_mouse.buke_hid) {
+      raw.keyboard_mouse.buke_hid->move_relative(deltaX, deltaY);
       return;
     }
 
@@ -808,8 +818,12 @@ namespace platf {
 
   void button_mouse(input_t &input, int button, bool release) {
     auto &raw = *(input_raw_t *) input.get();
-    if (raw.buke_hid) {
-      raw.buke_hid->button(button, release);
+    if (raw.keyboard_mouse.interception) {
+      raw.keyboard_mouse.interception->button(button, release);
+      return;
+    }
+    if (raw.keyboard_mouse.buke_hid) {
+      raw.keyboard_mouse.buke_hid->button(button, release);
       return;
     }
 
@@ -837,8 +851,12 @@ namespace platf {
 
   void scroll(input_t &input, int distance) {
     auto &raw = *(input_raw_t *) input.get();
-    if (raw.buke_hid) {
-      raw.buke_hid->wheel(distance);
+    if (raw.keyboard_mouse.interception) {
+      raw.keyboard_mouse.interception->wheel(distance, false);
+      return;
+    }
+    if (raw.keyboard_mouse.buke_hid) {
+      raw.keyboard_mouse.buke_hid->wheel(distance);
       return;
     }
 
@@ -854,6 +872,12 @@ namespace platf {
   }
 
   void hscroll(input_t &input, int distance) {
+    auto &raw = *(input_raw_t *) input.get();
+    if (raw.keyboard_mouse.interception) {
+      raw.keyboard_mouse.interception->wheel(distance, true);
+      return;
+    }
+
     INPUT i {};
 
     i.type = INPUT_MOUSE;
@@ -867,8 +891,8 @@ namespace platf {
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
     auto &raw = *(input_raw_t *) input.get();
-    if (raw.buke_hid) {
-      raw.buke_hid->key(modcode, release);
+    if (raw.keyboard_mouse.buke_hid) {
+      raw.keyboard_mouse.buke_hid->key(modcode, release);
       return;
     }
 
@@ -921,6 +945,12 @@ namespace platf {
 
     if (release) {
       ki.dwFlags |= KEYEVENTF_KEYUP;
+    }
+
+    if (raw.keyboard_mouse.interception && ki.wScan) {
+      const std::uint16_t state = (release ? 0x01 : 0) | ((ki.dwFlags & KEYEVENTF_EXTENDEDKEY) ? 0x02 : 0);
+      raw.keyboard_mouse.interception->key(ki.wScan, state);
+      return;
     }
 
     send_input(i);
