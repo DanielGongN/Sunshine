@@ -73,6 +73,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/buke_hid_input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/buke_hid_input.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/interception_input.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/interception_input.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_base.cpp"
