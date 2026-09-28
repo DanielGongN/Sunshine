@@ -86,4 +86,22 @@ TEST(BukeHidInput, SendsKeyboardMouseAndWholeWheelDetents) {
   EXPECT_STREQ(fake.read_events(), "K+:87,0;K-:87,0;R:3,-2;A:100,200;L+;L-;M+;M-;B+;B-;X1+;X1-;X2+;X2-;WU;WD;");
 }
 
+TEST(BukeHidInput, SplitsLargeRelativeMotionIntoSignedByteReports) {
+  fake_module_t fake(L"buke_hid_fake.dll");
+  ASSERT_NE(fake.module, nullptr);
+  ASSERT_NE(fake.reset, nullptr);
+  ASSERT_NE(fake.read_events, nullptr);
+  fake.set_init_result(true);
+
+  auto input = platf::buke_hid_input_t::create_from_path(test_dll_path(L"buke_hid_fake.dll"));
+  ASSERT_NE(input, nullptr);
+  fake.reset();
+
+  input->move_relative(127, -127);
+  input->move_relative(128, -128);
+  input->move_relative(300, -260);
+
+  EXPECT_STREQ(fake.read_events(), "R:127,-127;R:64,-64;R:64,-64;R:100,-86;R:100,-87;R:100,-87;");
+}
+
 #endif

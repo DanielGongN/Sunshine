@@ -7,6 +7,7 @@
 
 #include "src/logging.h"
 
+#include <algorithm>
 #include <array>
 
 namespace platf {
@@ -106,7 +107,21 @@ namespace platf {
 
   void buke_hid_input_t::move_relative(int dx, int dy) {
     std::lock_guard lock(mutex_);
-    mouse_move_r_(dx, dy);
+    // The HID DLL stores each relative axis in one signed report byte.
+    // Sunshine can batch several mouse packets into a larger delta.
+    constexpr std::int64_t max_step = 127;
+    const auto magnitude = [](int value) {
+      return value < 0 ? -static_cast<std::int64_t>(value) : static_cast<std::int64_t>(value);
+    };
+    const auto steps = std::max<std::int64_t>(1, (std::max(magnitude(dx), magnitude(dy)) + max_step - 1) / max_step);
+
+    for (std::int64_t step = 0; step < steps; ++step) {
+      const auto next_x = static_cast<std::int64_t>(dx) * (step + 1) / steps;
+      const auto next_y = static_cast<std::int64_t>(dy) * (step + 1) / steps;
+      const auto previous_x = static_cast<std::int64_t>(dx) * step / steps;
+      const auto previous_y = static_cast<std::int64_t>(dy) * step / steps;
+      mouse_move_r_(static_cast<int>(next_x - previous_x), static_cast<int>(next_y - previous_y));
+    }
   }
 
   void buke_hid_input_t::move_absolute(int x, int y) {
