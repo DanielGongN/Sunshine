@@ -701,7 +701,10 @@ namespace platf {
     input_t result {new input_raw_t {}};
     auto &raw = *(input_raw_t *) result.get();
 
-    raw.keyboard_mouse = select_keyboard_mouse_backend_from_executable_dir();
+    auto selected_backend = task_pool.push([] {
+      return select_keyboard_mouse_backend_from_executable_dir();
+    });
+    raw.keyboard_mouse = selected_backend.get();
 
     raw.vigem = new vigem_t {};
     if (raw.vigem->init()) {
