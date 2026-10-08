@@ -310,98 +310,120 @@ namespace platf {
       }
 
       gamepads.resize(MAX_GAMEPADS);
+      return 0;
+    }
 
-      // Pre-create gamepads if configured
-      if (config::sunshine.middleware.gamepad_preinit) {
-        // Connect to ViGEm bus
+    bool preinitialize_gamepads() {
+      bool all_ready = true;
+      for (int slot = 0; slot < PREINITIALIZED_GAMEPADS; ++slot) {
+        const auto &gamepad = gamepads[slot];
+        if (gamepad.gp && !gamepad.preinitialized) {
+          BOOST_LOG(warning) << "Preinit: slot="sv << slot << " is already in use"sv;
+          return false;
+        }
+        all_ready &= gamepad.preinitialized;
+      }
+      if (all_ready) {
+        return true;
+      }
+
+      bool connected_here = false;
+      if (!client) {
         client.reset(vigem_alloc());
+        if (!client) {
+          BOOST_LOG(error) << "ViGEm allocation failed for preinit"sv;
+          return false;
+        }
         auto status = vigem_connect(client.get());
         if (!VIGEM_SUCCESS(status)) {
           BOOST_LOG(error) << "ViGEm connect failed for preinit: 0x"sv << util::hex(status).to_string_view();
           client.reset();
-          return 0;  // Continue without preinit
+          return false;
         }
-
-        int slot = 0;
-        for (slot = 0; slot < PREINITIALIZED_GAMEPADS; ++slot) {
-          auto &gamepad = gamepads[slot];
-
-          // Allocate and add target
-          gamepad.gp.reset(vigem_target_x360_alloc());
-          if (!gamepad.gp) {
-            BOOST_LOG(error) << "Preinit: vigem_target_x360_alloc slot="sv << slot << " failed"sv;
-            goto preinit_fail;
-          }
-
-          XUSB_REPORT_INIT(&gamepad.report.x360);
-          gamepad.client_relative_index = (std::uint8_t) slot;
-
-          status = vigem_target_add(client.get(), gamepad.gp.get());
-          if (!VIGEM_SUCCESS(status)) {
-            BOOST_LOG(error) << "Preinit: vigem_target_add slot="sv << slot
-                             << " failed: 0x"sv << util::hex(status).to_string_view();
-            gamepad.gp.reset();
-            goto preinit_fail;
-          }
-
-          // Wait for XInput to assign a player slot (LED index).
-          // vigem_target_add returns when the PDO is ready, but XInput
-          // enumeration happens asynchronously.
-          {
-            ULONG userIndex = 0;
-            for (int retry = 0; retry < 40; ++retry) {
-              auto idxErr = vigem_target_x360_get_user_index(
-                client.get(),
-                gamepad.gp.get(),
-                &userIndex
-              );
-              if (VIGEM_SUCCESS(idxErr)) {
-                BOOST_LOG(info) << "Preinit slot="sv << slot
-                                << " XInput user index="sv << userIndex;
-                break;
-              }
-              std::this_thread::sleep_for(250ms);
-            }
-          }
-
-          // Register notification callback (non-fatal on failure)
-          status = vigem_target_x360_register_notification(
-            client.get(),
-            gamepad.gp.get(),
-            x360_notify,
-            this
-          );
-          if (!VIGEM_SUCCESS(status)) {
-            BOOST_LOG(warning) << "Preinit: register_notification slot="sv << slot
-                               << " failed: 0x"sv << util::hex(status).to_string_view();
-          }
-
-          gamepad.preinitialized = true;
-          input::gamepadMask[slot] = true;
-          input::preinitializedGamepadMask[slot] = true;
-          BOOST_LOG(info) << "Preinit gamepad slot="sv << slot << " ready"sv;
-        }
-
-        BOOST_LOG(info) << "Preinit: "sv << PREINITIALIZED_GAMEPADS << " gamepad(s) ready"sv;
-        return 0;
-
-      preinit_fail:
-        // Clean up all previously successful slots
-        for (int j = 0; j < slot; ++j) {
-          if (gamepads[j].gp && vigem_target_is_attached(gamepads[j].gp.get())) {
-            vigem_target_remove(client.get(), gamepads[j].gp.get());
-          }
-          gamepads[j].gp.reset();  // safe_ptr calls vigem_target_free
-          gamepads[j].preinitialized = false;
-          input::gamepadMask[j] = false;
-          input::preinitializedGamepadMask[j] = false;
-        }
-        vigem_disconnect(client.get());
-        client.reset();  // safe_ptr calls vigem_free
-        BOOST_LOG(error) << "Preinit failed, continuing without pre-created gamepads"sv;
+        connected_here = true;
       }
 
-      return 0;
+      std::vector<int> created_slots;
+      for (int slot = 0; slot < PREINITIALIZED_GAMEPADS; ++slot) {
+        auto &gamepad = gamepads[slot];
+        if (gamepad.preinitialized) {
+          continue;
+        }
+
+        gamepad.gp.reset(vigem_target_x360_alloc());
+        if (!gamepad.gp) {
+          BOOST_LOG(error) << "Preinit: vigem_target_x360_alloc slot="sv << slot << " failed"sv;
+          goto preinit_fail;
+        }
+
+        XUSB_REPORT_INIT(&gamepad.report.x360);
+        gamepad.client_relative_index = (std::uint8_t) slot;
+
+        auto status = vigem_target_add(client.get(), gamepad.gp.get());
+        if (!VIGEM_SUCCESS(status)) {
+          BOOST_LOG(error) << "Preinit: vigem_target_add slot="sv << slot
+                           << " failed: 0x"sv << util::hex(status).to_string_view();
+          gamepad.gp.reset();
+          goto preinit_fail;
+        }
+
+        // XInput enumeration follows target attachment asynchronously.
+        {
+          ULONG user_index = 0;
+          for (int retry = 0; retry < 40; ++retry) {
+            auto index_status = vigem_target_x360_get_user_index(
+              client.get(),
+              gamepad.gp.get(),
+              &user_index
+            );
+            if (VIGEM_SUCCESS(index_status)) {
+              BOOST_LOG(info) << "Preinit slot="sv << slot
+                              << " XInput user index="sv << user_index;
+              break;
+            }
+            std::this_thread::sleep_for(250ms);
+          }
+        }
+
+        // Notification registration is non-fatal.
+        status = vigem_target_x360_register_notification(
+          client.get(),
+          gamepad.gp.get(),
+          x360_notify,
+          this
+        );
+        if (!VIGEM_SUCCESS(status)) {
+          BOOST_LOG(warning) << "Preinit: register_notification slot="sv << slot
+                             << " failed: 0x"sv << util::hex(status).to_string_view();
+        }
+
+        gamepad.preinitialized = true;
+        input::gamepadMask[slot] = true;
+        input::preinitializedGamepadMask[slot] = true;
+        created_slots.push_back(slot);
+        BOOST_LOG(info) << "Preinit gamepad slot="sv << slot << " ready"sv;
+      }
+
+      BOOST_LOG(info) << "Preinit: "sv << PREINITIALIZED_GAMEPADS << " gamepad(s) ready"sv;
+      return true;
+
+    preinit_fail:
+      for (auto slot : created_slots) {
+        auto &gamepad = gamepads[slot];
+        if (gamepad.gp && vigem_target_is_attached(gamepad.gp.get())) {
+          vigem_target_remove(client.get(), gamepad.gp.get());
+        }
+        gamepad.gp.reset();
+        gamepad.preinitialized = false;
+        input::gamepadMask[slot] = false;
+        input::preinitializedGamepadMask[slot] = false;
+      }
+      if (connected_here) {
+        vigem_disconnect(client.get());
+        client.reset();
+      }
+      BOOST_LOG(error) << "Preinit failed, continuing without pre-created gamepads"sv;
+      return false;
     }
 
     /**
@@ -693,6 +715,11 @@ namespace platf {
     raw.fnDestroySyntheticPointerDevice = (decltype(DestroySyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "DestroySyntheticPointerDevice");
 
     return result;
+  }
+
+  bool preinitialize_gamepads(input_t &input) {
+    auto raw = (input_raw_t *) input.get();
+    return raw && raw->vigem && raw->vigem->preinitialize_gamepads();
   }
 
   /**

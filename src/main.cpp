@@ -457,6 +457,7 @@ int main(int argc, char *argv[]) {
   // configThread.join();  // removed
   rtspThread.join();
 
+  middleware_deinit_guard.reset();
   task_pool.stop();
   task_pool.join();
 

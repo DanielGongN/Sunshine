@@ -2212,6 +2212,21 @@ namespace input {
     return std::make_unique<deinit_t>();
   }
 
+  bool preinitialize_gamepads() {
+#ifdef _WIN32
+    if (!platf_input) {
+      return false;
+    }
+
+    auto result = task_pool.push([]() {
+      return platf::preinitialize_gamepads(platf_input);
+    });
+    return result.get();
+#else
+    return true;
+#endif
+  }
+
   bool probe_gamepads() {
     auto input = static_cast<platf::input_t *>(platf_input.get());
     const auto gamepads = platf::supported_gamepads(input);

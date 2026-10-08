@@ -193,7 +193,7 @@ ws://<middleware_address>:<middleware_port>/ws
 | `display_config` | 接收显示/码率或质量相关配置，当前主要记录和扩展使用 |
 | `click_gamepad` | 调用 `input::click_gamepad(0, button)` 注入手柄按键 |
 | `disconnected` | 触发 `mail::force_disconnect`，由 Stream 控制线程断开会话 |
-| `client_connect` | 调用 `nvhttp::add_trusted_client(uuid, cert)` 动态授权客户端证书；如携带 `rikey` 等串流参数，则调用 `nvhttp::set_pending_stream_config(data)` |
+| `client_connect` | 调用 `nvhttp::add_trusted_client(uuid, cert)` 动态授权客户端证书；如携带 `rikey` 等串流参数，则调用 `nvhttp::set_pending_stream_config(data)`；成功授权且启用 `middleware_gamepad_preinit` 时同步预创建虚拟手柄 |
 | `client_disconnect` | 调用 `nvhttp::remove_trusted_client(uuid)` 移除授权 |
 
 ### 6.3 下行到上游
@@ -446,9 +446,10 @@ input::click_gamepad(0, button_flag)
 
 Windows ViGEm 后端支持 `middleware_gamepad_preinit`。当前设计是：
 
-- Sunshine 启动输入平台时预创建固定数量的手柄槽位。
+- Sunshine 启动输入平台时只探测 ViGEm；中台 `client_connect` 成功授权后同步预创建手柄槽位，再发送 `operate_result`。
 - Windows 下 `PREINITIALIZED_GAMEPADS = 1`。
 - 预创建 slot 0 持续存在，直到 Sunshine 退出。
+- 重复的 `client_connect` 复用已创建的 slot 0；创建失败后可由后续成功事件重试。
 - Moonlight 第一只手柄复用 slot 0，并在到达时绑定当前会话的 `feedback_queue`。
 - 第二只及之后手柄走动态创建/释放。
 - 预创建槽位在会话断开时只重置状态和解绑反馈队列，不移除 ViGEm target。

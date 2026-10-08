@@ -77,6 +77,12 @@ namespace input {
 
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init();
 
+  /**
+   * @brief Preinitialize persistent gamepads after middleware authorizes a client.
+   * @return true when the requested gamepads are ready.
+   */
+  bool preinitialize_gamepads();
+
   bool probe_gamepads();
 
   extern std::bitset<platf::MAX_GAMEPADS> gamepadMask;

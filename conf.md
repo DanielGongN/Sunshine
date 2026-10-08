@@ -212,7 +212,7 @@ keybindings = [0x10, 0xA0, 0x11, 0xA2, 0x12, 0xA4]
 | `middleware_enabled` | `disabled` | 布尔值 | 是否启用上游 Middleware WebSocket 客户端。 |
 | `middleware_address` | `0.0.0.0` | IP/主机名 | Middleware 服务地址。`0.0.0.0` 通常只适合作为监听地址；作为连接目标时应配置实际地址。 |
 | `middleware_port` | `40002` | TCP 端口 | Middleware WebSocket 服务端口。 |
-| `middleware_gamepad_preinit` | `disabled` | 布尔值 | 是否在正式串流输入到达前预初始化虚拟手柄。 |
+| `middleware_gamepad_preinit` | `disabled` | 布尔值 | 中台 `client_connect` 成功授权后、正式串流输入到达前预初始化虚拟手柄。 |
 | `force_disconnected_timeout` | `900` | 秒 | 按键/控制保持不变达到阈值时强制结束会话。 |
 | `standby_disconnected_timeout` | `900` | 秒 | 没有按住控制且持续无输入达到阈值时结束待机会话。 |
 

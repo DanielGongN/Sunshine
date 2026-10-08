@@ -458,6 +458,9 @@ namespace middleware {
             nvhttp::set_pending_stream_config(data);
             BOOST_LOG(info) << "client_connect: stream config stored, waiting for serverinfo"sv;
           }
+          if (config::sunshine.middleware.gamepad_preinit && !input::preinitialize_gamepads()) {
+            BOOST_LOG(error) << "client_connect: failed to preinitialize gamepad"sv;
+          }
           status = 0;
         }
 

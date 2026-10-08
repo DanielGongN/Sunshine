@@ -781,6 +781,13 @@ namespace platf {
   bool process_group_running(std::uintptr_t native_handle);
 
   input_t input();
+#ifdef _WIN32
+  /**
+   * @brief Create persistent virtual gamepads after middleware authorizes a client.
+   * @return true when all preinitialized slots are ready.
+   */
+  bool preinitialize_gamepads(input_t &input);
+#endif
   /**
    * @brief Get the current mouse position on screen
    * @param input The input_t instance to use.
