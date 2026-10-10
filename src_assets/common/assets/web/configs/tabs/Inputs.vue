@@ -164,6 +164,15 @@ const config = ref(props.config)
               default="true"
     ></Checkbox>
 
+    <!-- Absolute desktop cursor movement on Windows -->
+    <Checkbox v-if="config.mouse === 'enabled' && platform === 'windows'"
+              class="mb-3"
+              id="desktop_mouse_absolute"
+              locale-prefix="config"
+              v-model="config.desktop_mouse_absolute"
+              default="false"
+    ></Checkbox>
+
     <!-- High resolution scrolling support -->
     <Checkbox v-if="config.mouse === 'enabled'"
               class="mb-3"

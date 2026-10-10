@@ -2282,6 +2282,9 @@ namespace input {
 
     // Ensure input is synchronous, by using the task_pool
     task_pool.push([]() {
+#ifdef _WIN32
+      platf::reset_desktop_mouse(platf_input);
+#endif
       for (int x = 0; x < mouse_press.size(); ++x) {
         if (mouse_press[x]) {
           platf::button_mouse(platf_input, x, true);

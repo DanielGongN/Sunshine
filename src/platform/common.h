@@ -790,6 +790,7 @@ namespace platf {
 
   bool uses_sendinput_mouse(input_t &input);
   std::size_t move_mouse_batch(input_t &input, std::span<const mouse_delta_t> deltas);
+  void reset_desktop_mouse(input_t &input);
 
   /**
    * @brief Create persistent virtual gamepads after middleware authorizes a client.

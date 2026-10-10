@@ -221,6 +221,7 @@ namespace config {
 
     bool keyboard;
     bool mouse;
+    bool desktop_mouse_absolute;
     bool controller;
 
     bool always_send_scancodes;

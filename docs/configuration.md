@@ -637,6 +637,29 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### desktop_mouse_absolute
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Windows only. When enabled with the SendInput mouse backend, maps relative mouse movements to absolute virtual-desktop cursor positions. This avoids Windows pointer acceleration for desktop use. Apps that require relative mouse input, such as games that capture the mouse, should leave this disabled. Interception input is unaffected.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            desktop_mouse_absolute = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### high_resolution_scrolling
 
 <table>

@@ -40,72 +40,34 @@ namespace {
     set_device_availability_fn set_device_availability = nullptr;
     read_events_fn read_events = nullptr;
   };
-
-  struct buke_fake_module_t {
-    using reset_fn = void(__cdecl *)();
-    using read_events_fn = const char *(__cdecl *) ();
-
-    buke_fake_module_t():
-        module(LoadLibraryW(test_dll_path(L"buke_hid_fake.dll").c_str())) {
-      if (module) {
-        reset = reinterpret_cast<reset_fn>(GetProcAddress(module, "TestReset"));
-        read_events = reinterpret_cast<read_events_fn>(GetProcAddress(module, "TestReadEvents"));
-      }
-    }
-
-    ~buke_fake_module_t() {
-      if (module) {
-        FreeLibrary(module);
-      }
-    }
-
-    HMODULE module;
-    reset_fn reset = nullptr;
-    read_events_fn read_events = nullptr;
-  };
 }  // namespace
 
-TEST(InterceptionInput, PreferredOverBukeWhenBothAreUsable) {
+TEST(InterceptionInput, SelectedWhenAvailable) {
   fake_module_t interception_fake;
-  buke_fake_module_t buke_fake;
   ASSERT_NE(interception_fake.module, nullptr);
-  ASSERT_NE(buke_fake.module, nullptr);
   ASSERT_NE(interception_fake.reset, nullptr);
-  ASSERT_NE(buke_fake.reset, nullptr);
-  ASSERT_NE(buke_fake.read_events, nullptr);
   interception_fake.reset();
-  buke_fake.reset();
 
-  auto backend = platf::select_keyboard_mouse_backend(test_dll_path(L"interception_fake.dll"), test_dll_path(L"buke_hid_fake.dll"));
+  auto backend = platf::select_keyboard_mouse_backend(test_dll_path(L"interception_fake.dll"));
   EXPECT_NE(backend.interception, nullptr);
-  EXPECT_EQ(backend.buke_hid, nullptr);
-  EXPECT_STREQ(buke_fake.read_events(), "");
 }
 
-TEST(InterceptionInput, FallsBackToBukeWhenInterceptionFails) {
+TEST(InterceptionInput, UsesSendInputWhenInterceptionFails) {
   fake_module_t interception_fake;
-  buke_fake_module_t buke_fake;
   ASSERT_NE(interception_fake.module, nullptr);
-  ASSERT_NE(buke_fake.module, nullptr);
   ASSERT_NE(interception_fake.reset, nullptr);
   ASSERT_NE(interception_fake.set_context_result, nullptr);
-  ASSERT_NE(buke_fake.reset, nullptr);
-  ASSERT_NE(buke_fake.read_events, nullptr);
   interception_fake.reset();
   interception_fake.set_context_result(false);
-  buke_fake.reset();
 
-  auto backend = platf::select_keyboard_mouse_backend(test_dll_path(L"interception_fake.dll"), test_dll_path(L"buke_hid_fake.dll"));
+  auto backend = platf::select_keyboard_mouse_backend(test_dll_path(L"interception_fake.dll"));
   EXPECT_EQ(backend.interception, nullptr);
-  EXPECT_NE(backend.buke_hid, nullptr);
-  EXPECT_STREQ(buke_fake.read_events(), "I;");
   interception_fake.reset();
 }
 
-TEST(InterceptionInput, UsesWindowsInputWhenBothDllsAreMissing) {
-  auto backend = platf::select_keyboard_mouse_backend(test_dll_path(L"missing-interception.dll"), test_dll_path(L"missing-buke-hid.dll"));
+TEST(InterceptionInput, UsesSendInputWhenDllIsMissing) {
+  auto backend = platf::select_keyboard_mouse_backend(test_dll_path(L"missing-interception.dll"));
   EXPECT_EQ(backend.interception, nullptr);
-  EXPECT_EQ(backend.buke_hid, nullptr);
 }
 
 TEST(InterceptionInput, MissingDllDoesNotActivate) {

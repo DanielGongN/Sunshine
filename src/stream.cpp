@@ -35,6 +35,7 @@ extern "C" {
 #include "process.h"
 #include "stream.h"
 #include "stream_disconnect.h"
+#include "stream_ping.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -96,6 +97,32 @@ namespace stream {
   constexpr std::uint64_t PING_DIAG_SAMPLE_INTERVAL = 1000;
 
   namespace detail {
+    initial_ping_result_e wait_for_initial_ping(
+      std::optional<std::chrono::milliseconds> timeout,
+      const std::function<bool()> &cancelled,
+      const std::function<bool(std::chrono::milliseconds)> &receive_ping,
+      const std::function<std::chrono::steady_clock::time_point()> &now
+    ) {
+      const auto deadline = timeout ? std::optional {now() + *timeout} : std::nullopt;
+
+      while (!cancelled()) {
+        auto wait = 100ms;
+        if (deadline) {
+          const auto remaining = *deadline - now();
+          if (remaining <= std::chrono::steady_clock::duration::zero()) {
+            return initial_ping_result_e::timeout;
+          }
+          wait = std::min(wait, std::chrono::ceil<std::chrono::milliseconds>(remaining));
+        }
+
+        if (receive_ping(wait)) {
+          return cancelled() ? initial_ping_result_e::cancelled : initial_ping_result_e::received;
+        }
+      }
+
+      return initial_ping_result_e::cancelled;
+    }
+
     timeout_notification_e select_timeout_notification(
       bool force_hold_active,
       std::int64_t force_hold_seconds,
@@ -2267,7 +2294,7 @@ namespace stream {
     broadcast_shutdown_event->reset();
   }
 
-  int recv_ping(session_t *session, decltype(broadcast)::ptr_t ref, socket_e type, std::string_view expected_payload, udp::endpoint &peer, std::chrono::milliseconds timeout) {
+  int recv_ping(session_t *session, decltype(broadcast)::ptr_t ref, socket_e type, std::string_view expected_payload, udp::endpoint &peer, std::optional<std::chrono::milliseconds> timeout) {
     auto messages = std::make_shared<message_queue_t::element_type>(30);
     av_session_id_t session_id = std::string {expected_payload};
     auto type_name = socket_type_name(type);
@@ -2279,7 +2306,7 @@ namespace stream {
     BOOST_LOG(info) << "[stream][ping-wait] type="sv << type_name
                     << " expected_payload="sv << expected_payload
                     << " expected_peer="sv << udp_endpoint_to_string(peer)
-                    << " timeout_ms="sv << timeout.count()
+                    << " timeout_ms="sv << (timeout ? std::to_string(timeout->count()) : "none")
                     << " ml_flags=0x"sv << util::hex(session->config.mlFeatureFlags).to_string_view();
 
     // Only allow matches on the peer address for legacy clients
@@ -2298,56 +2325,63 @@ namespace stream {
       ref->message_queue_queue->raise(type, session_id, nullptr);
     });
 
-    auto start_time = std::chrono::steady_clock::now();
-    auto current_time = start_time;
+    const auto result = detail::wait_for_initial_ping(
+      timeout,
+      [&]() {
+        return session->shutdown_event->peek();
+      },
+      [&](auto wait) {
+        auto msg_opt = messages->pop(wait);
+        if (!msg_opt) {
+          return false;
+        }
 
-    while (current_time - start_time < timeout) {
-      auto delta_time = current_time - start_time;
+        ++queue_messages;
+        TUPLE_2D_REF(recv_peer, msg, *msg_opt);
+        last_peer = udp_endpoint_to_string(recv_peer);
+        last_msg_hex = util::hex_vec(msg);
+        last_msg_size = msg.size();
+        if (msg.find(expected_payload) != std::string::npos) {
+          BOOST_LOG(info) << "[stream][ping-ok] type="sv << type_name
+                          << " mode=v2 from="sv << last_peer
+                          << " queued="sv << queue_messages
+                          << " bytes="sv << msg.size();
+        } else if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) && msg == "PING"sv) {
+          BOOST_LOG(info) << "[stream][ping-ok] type="sv << type_name
+                          << " mode=v1 from="sv << last_peer
+                          << " queued="sv << queue_messages;
+        } else {
+          BOOST_LOG(warning) << "[stream][ping-nonmatch] type="sv << type_name
+                             << " from="sv << last_peer
+                             << " bytes="sv << msg.size()
+                             << " expected_payload="sv << expected_payload
+                             << " msg="sv << last_msg_hex;
+          return false;
+        }
 
-      auto msg_opt = messages->pop(timeout - delta_time);
-      if (!msg_opt) {
-        break;
+        // Update connection details only after a matching PING.
+        peer = recv_peer;
+        return true;
       }
+    );
 
-      ++queue_messages;
-      TUPLE_2D_REF(recv_peer, msg, *msg_opt);
-      last_peer = udp_endpoint_to_string(recv_peer);
-      last_msg_hex = util::hex_vec(msg);
-      last_msg_size = msg.size();
-      if (msg.find(expected_payload) != std::string::npos) {
-        BOOST_LOG(info) << "[stream][ping-ok] type="sv << type_name
-                        << " mode=v2 from="sv << last_peer
-                        << " queued="sv << queue_messages
-                        << " bytes="sv << msg.size();
-      } else if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) && msg == "PING"sv) {
-        BOOST_LOG(info) << "[stream][ping-ok] type="sv << type_name
-                        << " mode=v1 from="sv << last_peer
-                        << " queued="sv << queue_messages;
-      } else {
-        BOOST_LOG(warning) << "[stream][ping-nonmatch] type="sv << type_name
-                           << " from="sv << last_peer
-                           << " bytes="sv << msg.size()
-                           << " expected_payload="sv << expected_payload
-                           << " msg="sv << last_msg_hex;
-        current_time = std::chrono::steady_clock::now();
-        continue;
-      }
-
-      // Update connection details.
-      peer = recv_peer;
+    if (result == detail::initial_ping_result_e::received) {
       return 0;
+    }
+    if (result == detail::initial_ping_result_e::cancelled) {
+      return -1;
     }
 
     BOOST_LOG(error) << "[stream][ping-timeout] type="sv << type_name
                      << " expected_payload="sv << expected_payload
                      << " expected_peer="sv << udp_endpoint_to_string(peer)
-                     << " timeout_ms="sv << timeout.count()
+                     << " timeout_ms="sv << timeout->count()
                      << " queued="sv << queue_messages
                      << " last_peer="sv << last_peer
                      << " last_msg_size="sv << last_msg_size
                      << " last_msg="sv << last_msg_hex;
     BOOST_LOG(error) << "Initial Ping Timeout"sv;
-    session::stop(*session, middleware::disconnect_notification_type_e::stream_start_timeout, std::format("Initial {} PING not received within {} ms (peer={})", type_name, timeout.count(), udp_endpoint_to_string(peer)));
+    session::stop(*session, middleware::disconnect_notification_type_e::stream_start_timeout, std::format("Initial {} PING not received within {} ms (peer={})", type_name, timeout->count(), udp_endpoint_to_string(peer)));
     return -1;
   }
 
@@ -2400,15 +2434,13 @@ namespace stream {
 
   void audioThread(session_t *session) {
     platf::set_thread_name("session::audio");
-    auto fg = util::fail_guard([&]() {
-      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Audio worker exited without an explicit stop reason");
-    });
 
     try {
       while_starting_do_nothing(session->state);
 
       auto ref = broadcast.ref();
-      auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
+      // Audio can become available after video has already started.
+      auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, std::nullopt);
       if (error < 0) {
         return;
       }
@@ -2429,18 +2461,15 @@ namespace stream {
       BOOST_LOG(debug) << "Start capturing Audio"sv;
       audio::capture(session->mail, session->config.audio, session);
     } catch (const std::exception &e) {
-      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, std::format("Audio worker exception: {}", e.what()));
+      BOOST_LOG(error) << "Optional audio worker exception: "sv << e.what();
     } catch (...) {
-      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Audio worker threw an unknown exception");
+      BOOST_LOG(error) << "Optional audio worker threw an unknown exception"sv;
     }
   }
 
   void micThread(session_t *session) {
     platf::set_thread_name("session::clientMic");
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
-    auto fg = util::fail_guard([&]() {
-      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Client microphone worker exited without an explicit stop reason");
-    });
 
     try {
       if (!session->config.client_mic.enabled) {
@@ -2450,7 +2479,8 @@ namespace stream {
       while_starting_do_nothing(session->state);
 
       auto ref = broadcast.ref();
-      auto error = recv_ping(session, ref, socket_e::mic, session->mic.ping_payload, session->mic.peer, config::stream.ping_timeout);
+      // Keep accepting a negotiated microphone that is enabled or plugged in later.
+      auto error = recv_ping(session, ref, socket_e::mic, session->mic.ping_payload, session->mic.peer, std::nullopt);
       if (error < 0) {
         return;
       }
@@ -2474,9 +2504,9 @@ namespace stream {
         session->mic.cipher ? &*session->mic.cipher : nullptr
       );
     } catch (const std::exception &e) {
-      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, std::format("Client microphone worker exception: {}", e.what()));
+      BOOST_LOG(error) << "Optional client microphone worker exception: "sv << e.what();
     } catch (...) {
-      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Client microphone worker threw an unknown exception");
+      BOOST_LOG(error) << "Optional client microphone worker threw an unknown exception"sv;
     }
   }
 

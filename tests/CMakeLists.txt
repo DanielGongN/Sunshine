@@ -102,7 +102,6 @@ endif()
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_SOURCE_DIR}/tests/*.h
         ${CMAKE_SOURCE_DIR}/tests/*.cpp)
-list(REMOVE_ITEM TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/unit/buke_hid_fake.cpp")
 list(REMOVE_ITEM TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/unit/interception_fake.cpp")
 # Add macOS-specific test files only when building tests for macOS
 if (APPLE)
@@ -128,13 +127,7 @@ if (WIN32)
     set_target_properties(interception_fake interception_incomplete PROPERTIES
             PREFIX ""
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-    add_library(buke_hid_fake SHARED unit/buke_hid_fake.cpp)
-    add_library(buke_hid_incomplete SHARED unit/buke_hid_fake.cpp)
-    target_compile_definitions(buke_hid_incomplete PRIVATE BUKE_OMIT_KEYBOARD_UP)
-    set_target_properties(buke_hid_fake buke_hid_incomplete PROPERTIES
-            PREFIX ""
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-    add_dependencies(${PROJECT_NAME} interception_fake interception_incomplete buke_hid_fake buke_hid_incomplete)
+    add_dependencies(${PROJECT_NAME} interception_fake interception_incomplete)
 endif()
 
 # Copy files needed for config consistency tests to build directory

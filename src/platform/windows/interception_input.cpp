@@ -92,29 +92,29 @@ namespace platf {
   std::unique_ptr<interception_input_t> interception_input_t::create_from_path(const std::wstring &path) {
     const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-      BOOST_LOG(info) << "Interception DLL unavailable; trying Buke";
+      BOOST_LOG(info) << "Interception DLL unavailable; using SendInput";
       return nullptr;
     }
 
     HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!module) {
-      BOOST_LOG(warning) << "Cannot load Interception DLL (Windows error " << GetLastError() << ')';
+      BOOST_LOG(warning) << "Cannot load Interception DLL (Windows error " << GetLastError() << "); using SendInput";
       return nullptr;
     }
 
     auto result = std::unique_ptr<interception_input_t>(new interception_input_t(module));
     if (!result->resolve_exports()) {
-      BOOST_LOG(warning) << "Interception DLL has incomplete exports; trying Buke";
+      BOOST_LOG(warning) << "Interception DLL has incomplete exports; using SendInput";
       return nullptr;
     }
 
     result->context_ = result->create_context_();
     if (!result->context_) {
-      BOOST_LOG(warning) << "Interception driver context unavailable; trying Buke";
+      BOOST_LOG(warning) << "Interception driver context unavailable; using SendInput";
       return nullptr;
     }
     if (!result->select_devices()) {
-      BOOST_LOG(warning) << "Interception keyboard or mouse device unavailable; trying Buke";
+      BOOST_LOG(warning) << "Interception keyboard or mouse device unavailable; using SendInput";
       return nullptr;
     }
 

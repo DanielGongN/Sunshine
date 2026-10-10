@@ -24,7 +24,7 @@ Sunshine 向上游发送 `event: "disconnected"`。`data.type` 表示分类，`d
 | 11 | `client_reported_error` | 保留：需要客户端明确报告异常；当前客户端协议没有对应报告 |
 | 12 | `peer_disconnected_unknown` | ENet 对端断开；无法确认用户意图或异常根因 |
 | 20 | `control_timeout` | 控制通道建立后超时；不据此认定客户端异常或网络故障 |
-| 21 | `stream_start_timeout` | 控制通道尚未建立，或未收到初始音频、视频、麦克风 PING |
+| 21 | `stream_start_timeout` | 控制通道尚未建立，或未在超时时间内收到初始视频 PING；音频、麦克风 PING 缺失不触发断开 |
 | 30 | `upstream_requested_stop` | 上游平台下发 `disconnected` 指令结束串流 |
 | 31 | `server_requested_stop` | 服务端管理操作主动停止，例如撤销客户端授权 |
 | 32 | `server_shutdown` | Sunshine 正常关闭或重启 |
@@ -43,5 +43,6 @@ Sunshine 向上游发送 `event: "disconnected"`。`data.type` 表示分类，`d
 - 普通对端断开不等于用户主动退出；超时也无法证明是哪一端异常。保持 `12/20/21`，直到存在更明确的证据。
 - `50` 表示服务端因协议问题关闭会话，不能直接等同于服务端程序缺陷。
 - 显示器切换和编码器重新初始化过程、可恢复的音频故障、单次丢包或发送错误不单独当作致命断开。
+- 普通音频和已协商的麦克风通道可选：没有初始 PING 时持续等待，会话继续传输视频；稍后收到匹配 PING 后再启动对应处理。会话停止时取消等待。音频和麦克风工作线程自身的异常仅记录日志，不结束整个会话。
 
 本地 `[stream][disconnect]` 日志包含 `session`、`type`、`message`。通知沿用现有发送队列；中台未连接时仍会丢弃通知。本次没有新增客户端异常报告协议、网关故障监控或进程监控程序，因此 `11/43/44` 只定义接口值。

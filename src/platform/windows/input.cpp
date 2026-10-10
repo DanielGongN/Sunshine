@@ -12,6 +12,8 @@
 #include <bitset>
 #include <chrono>
 #include <cmath>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -19,6 +21,7 @@
 #include <ViGEm/Client.h>
 
 // local includes
+#include "desktop_cursor.h"
 #include "keyboard_mouse_backend.h"
 #include "keylayout.h"
 #include "misc.h"
@@ -691,6 +694,9 @@ namespace platf {
 
     vigem_t *vigem;
     keyboard_mouse_backend_t keyboard_mouse;
+    std::mutex desktop_cursor_mutex;
+    detail::desktop_cursor_mapper_t desktop_cursor;
+    detail::desktop_cursor_mapper_t::clock_t::time_point desktop_cursor_retry_after {};
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -705,6 +711,13 @@ namespace platf {
       return select_keyboard_mouse_backend_from_executable_dir();
     });
     raw.keyboard_mouse = selected_backend.get();
+    if (config::input.desktop_mouse_absolute) {
+      if (raw.keyboard_mouse.interception) {
+        BOOST_LOG(info) << "Precise desktop cursor mode is inactive while Interception is selected"sv;
+      } else {
+        BOOST_LOG(info) << "Precise desktop cursor mode enabled for SendInput mouse movement"sv;
+      }
+    }
 
     raw.vigem = new vigem_t {};
     if (raw.vigem->init()) {
@@ -727,7 +740,7 @@ namespace platf {
 
   bool uses_sendinput_mouse(input_t &input) {
     auto *raw = static_cast<input_raw_t *>(input.get());
-    return raw && !raw->keyboard_mouse.interception && !raw->keyboard_mouse.buke_hid;
+    return raw && !raw->keyboard_mouse.interception;
   }
 
   /**
@@ -759,6 +772,68 @@ namespace platf {
     send_inputs(std::span {&i, 1});
   }
 
+  namespace {
+    detail::desktop_cursor_bounds_t virtual_desktop_bounds() {
+      return {
+        GetSystemMetrics(SM_XVIRTUALSCREEN),
+        GetSystemMetrics(SM_YVIRTUALSCREEN),
+        GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        GetSystemMetrics(SM_CYVIRTUALSCREEN),
+      };
+    }
+
+    std::optional<POINT> current_cursor_position() {
+      POINT cursor {};
+      if (GetCursorPos(&cursor)) {
+        return cursor;
+      }
+
+      syncThreadDesktop();
+      if (GetCursorPos(&cursor)) {
+        return cursor;
+      }
+
+      BOOST_LOG(warning) << "Couldn't read desktop cursor position (Windows error "sv << GetLastError() << ')';
+      return std::nullopt;
+    }
+
+    // The caller holds desktop_cursor_mutex while preparing and sending this event.
+    std::optional<INPUT> absolute_relative_mouse_event(input_raw_t &raw, int delta_x, int delta_y, detail::desktop_cursor_mapper_t::clock_t::time_point now) {
+      if (now < raw.desktop_cursor_retry_after) {
+        return std::nullopt;
+      }
+
+      const auto bounds = virtual_desktop_bounds();
+      if (!bounds.valid()) {
+        raw.desktop_cursor.reset();
+        raw.desktop_cursor_retry_after = now + std::chrono::seconds {1};
+        return std::nullopt;
+      }
+
+      if (raw.desktop_cursor.needs_sync(bounds, now)) {
+        const auto cursor = current_cursor_position();
+        if (!cursor) {
+          raw.desktop_cursor.reset();
+          raw.desktop_cursor_retry_after = now + std::chrono::seconds {1};
+          return std::nullopt;
+        }
+        raw.desktop_cursor.sync(bounds, cursor->x, cursor->y);
+      }
+
+      const auto target = raw.desktop_cursor.advance(bounds, delta_x, delta_y, now);
+      if (!target) {
+        return std::nullopt;
+      }
+
+      INPUT event {};
+      event.type = INPUT_MOUSE;
+      event.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+      event.mi.dx = target->normalized_x;
+      event.mi.dy = target->normalized_y;
+      return event;
+    }
+  }  // namespace
+
   /**
    * @brief Calls InjectSyntheticPointerInput() and switches input desktops if required.
    * @details Must only be called if InjectSyntheticPointerInput() is available.
@@ -783,7 +858,7 @@ namespace platf {
 
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
     auto &raw = *(input_raw_t *) input.get();
-    if (raw.keyboard_mouse.interception || raw.keyboard_mouse.buke_hid) {
+    if (raw.keyboard_mouse.interception) {
       // client_to_touchport() already applies the display offset.
       const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
       const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -792,15 +867,16 @@ namespace platf {
       if (width > 0 && height > 0) {
         const int pixel_x = std::clamp(static_cast<int>(std::lround(x)), left, left + width - 1);
         const int pixel_y = std::clamp(static_cast<int>(std::lround(y)), top, top + height - 1);
-        if (raw.keyboard_mouse.interception) {
-          if (SetCursorPos(pixel_x, pixel_y)) {
-            return;
-          }
-        } else {
-          raw.keyboard_mouse.buke_hid->move_absolute(pixel_x, pixel_y);
+        if (SetCursorPos(pixel_x, pixel_y)) {
           return;
         }
       }
+    }
+
+    std::unique_lock<std::mutex> cursor_lock;
+    if (config::input.desktop_mouse_absolute) {
+      cursor_lock = std::unique_lock {raw.desktop_cursor_mutex};
+      raw.desktop_cursor.reset();
     }
 
     INPUT i {};
@@ -832,10 +908,6 @@ namespace platf {
       raw.keyboard_mouse.interception->move_relative(deltaX, deltaY);
       return;
     }
-    if (raw.keyboard_mouse.buke_hid) {
-      raw.keyboard_mouse.buke_hid->move_relative(deltaX, deltaY);
-      return;
-    }
 
     INPUT i {};
 
@@ -846,12 +918,62 @@ namespace platf {
     mi.dx = deltaX;
     mi.dy = deltaY;
 
+    if (config::input.desktop_mouse_absolute) {
+      std::lock_guard<std::mutex> lock {raw.desktop_cursor_mutex};
+      const auto now = detail::desktop_cursor_mapper_t::clock_t::now();
+      auto event = absolute_relative_mouse_event(raw, deltaX, deltaY, now);
+      if (event && send_inputs(std::span {&*event, 1}) == 1) {
+        return;
+      }
+      if (event) {
+        raw.desktop_cursor_retry_after = now + std::chrono::seconds {1};
+      }
+      raw.desktop_cursor.reset();
+      send_input(i);
+      return;
+    }
+
     send_input(i);
   }
 
   std::size_t move_mouse_batch(input_t &input, std::span<const mouse_delta_t> deltas) {
     if (!uses_sendinput_mouse(input)) {
       return 0;
+    }
+
+    auto &raw = *(input_raw_t *) input.get();
+    if (config::input.desktop_mouse_absolute) {
+      std::lock_guard<std::mutex> lock {raw.desktop_cursor_mutex};
+      std::vector<INPUT> events;
+      events.reserve(deltas.size());
+      const auto now = detail::desktop_cursor_mapper_t::clock_t::now();
+      for (const auto &delta : deltas) {
+        auto event = absolute_relative_mouse_event(raw, delta.x, delta.y, now);
+        if (!event) {
+          raw.desktop_cursor.reset();
+          break;
+        }
+        events.push_back(*event);
+      }
+
+      const auto sent = events.size() == deltas.size() ? send_inputs(events) : 0;
+      if (sent == deltas.size()) {
+        return sent;
+      }
+      if (events.size() == deltas.size()) {
+        raw.desktop_cursor_retry_after = now + std::chrono::seconds {1};
+      }
+      raw.desktop_cursor.reset();
+
+      std::vector<INPUT> remaining(deltas.size() - sent);
+      for (std::size_t index = sent; index < deltas.size(); ++index) {
+        auto &event = remaining[index - sent];
+        event.type = INPUT_MOUSE;
+        event.mi.dwFlags = MOUSEEVENTF_MOVE;
+        event.mi.dx = deltas[index].x;
+        event.mi.dy = deltas[index].y;
+      }
+      return sent + send_inputs(remaining);
     }
 
     std::vector<INPUT> events(deltas.size());
@@ -862,6 +984,13 @@ namespace platf {
       events[index].mi.dy = deltas[index].y;
     }
     return send_inputs(events);
+  }
+
+  void reset_desktop_mouse(input_t &input) {
+    auto &raw = *(input_raw_t *) input.get();
+    std::lock_guard<std::mutex> lock {raw.desktop_cursor_mutex};
+    raw.desktop_cursor.reset();
+    raw.desktop_cursor_retry_after = {};
   }
 
   util::point_t get_mouse_loc(input_t &input) {
@@ -882,10 +1011,6 @@ namespace platf {
     auto &raw = *(input_raw_t *) input.get();
     if (raw.keyboard_mouse.interception) {
       raw.keyboard_mouse.interception->button(button, release);
-      return;
-    }
-    if (raw.keyboard_mouse.buke_hid) {
-      raw.keyboard_mouse.buke_hid->button(button, release);
       return;
     }
 
@@ -915,10 +1040,6 @@ namespace platf {
     auto &raw = *(input_raw_t *) input.get();
     if (raw.keyboard_mouse.interception) {
       raw.keyboard_mouse.interception->wheel(distance, false);
-      return;
-    }
-    if (raw.keyboard_mouse.buke_hid) {
-      raw.keyboard_mouse.buke_hid->wheel(distance);
       return;
     }
 
@@ -953,10 +1074,6 @@ namespace platf {
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
     auto &raw = *(input_raw_t *) input.get();
-    if (raw.keyboard_mouse.buke_hid) {
-      raw.keyboard_mouse.buke_hid->key(modcode, release);
-      return;
-    }
 
     INPUT i {};
     i.type = INPUT_KEYBOARD;
