@@ -34,6 +34,6 @@ namespace platf {
       return {};
     }
     directory.resize(slash + 1);
-    return select_keyboard_mouse_backend(directory + L"interception.dll", directory + L"buke_km_hid64.dll");
+    return select_keyboard_mouse_backend(directory + L"interception.dll", directory + L"buke_km64.dll");
   }
 }  // namespace platf

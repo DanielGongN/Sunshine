@@ -5,10 +5,46 @@
 
 #include "../tests_common.h"
 #include "src/input.h"
+#include "src/utility.h"
+
+extern "C" {
+#include <moonlight-common-c/src/Input.h>
+}
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <list>
 #include <unordered_set>
+#include <vector>
+
+namespace {
+  std::vector<std::uint8_t> make_relative_mouse_packet(std::int16_t x, std::int16_t y) {
+    NV_REL_MOUSE_MOVE_PACKET packet {};
+    packet.header.magic = util::endian::little<std::uint32_t>(MOUSE_MOVE_REL_MAGIC_GEN5);
+    packet.deltaX = util::endian::big(x);
+    packet.deltaY = util::endian::big(y);
+    std::vector<std::uint8_t> bytes(sizeof(packet));
+    std::memcpy(bytes.data(), &packet, sizeof(packet));
+    return bytes;
+  }
+
+  std::vector<std::uint8_t> make_mouse_button_packet() {
+    NV_MOUSE_BUTTON_PACKET packet {};
+    packet.header.magic = util::endian::little<std::uint32_t>(MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5);
+    std::vector<std::uint8_t> bytes(sizeof(packet));
+    std::memcpy(bytes.data(), &packet, sizeof(packet));
+    return bytes;
+  }
+
+  std::vector<std::uint8_t> make_keyboard_packet() {
+    NV_KEYBOARD_PACKET packet {};
+    packet.header.magic = util::endian::little<std::uint32_t>(KEY_DOWN_EVENT_MAGIC);
+    std::vector<std::uint8_t> bytes(sizeof(packet));
+    std::memcpy(bytes.data(), &packet, sizeof(packet));
+    return bytes;
+  }
+}  // namespace
 
 TEST(InputMouseBatchTests, AccumulatesRelativeMotionWithoutOverflow) {
   input::detail::relative_mouse_delta_t dest {100, -50};
@@ -24,6 +60,70 @@ TEST(InputMouseBatchTests, RejectsRelativeMotionOverflow) {
 
   EXPECT_FALSE(input::detail::batch_relative_mouse(dest, src));
   EXPECT_EQ(dest, (input::detail::relative_mouse_delta_t {INT16_MAX, 0}));
+}
+
+TEST(InputMouseBatchTests, SendInputPreservesMouseMotion) {
+  EXPECT_TRUE(input::detail::preserve_mouse_move(MOUSE_MOVE_REL_MAGIC_GEN5, true));
+  EXPECT_TRUE(input::detail::preserve_mouse_move(MOUSE_MOVE_ABS_MAGIC, true));
+  EXPECT_FALSE(input::detail::preserve_mouse_move(MOUSE_MOVE_REL_MAGIC_GEN5, false));
+  EXPECT_FALSE(input::detail::preserve_mouse_move(MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5, true));
+}
+
+TEST(InputMouseBatchTests, SendInputBatchKeepsReversalsAndStopsAtButton) {
+  std::list<std::vector<std::uint8_t>> queue;
+  for (int index = 0; index < 8; ++index) {
+    queue.push_back(make_relative_mouse_packet(index % 2 == 0 ? 8 : -8, 0));
+  }
+  queue.push_back(make_mouse_button_packet());
+  queue.push_back(make_relative_mouse_packet(5, 0));
+
+  const auto packets = input::detail::take_sendinput_relative_batch(queue);
+  ASSERT_EQ(packets.size(), 8);
+  for (std::size_t index = 0; index < packets.size(); ++index) {
+    const auto *packet = reinterpret_cast<const NV_REL_MOUSE_MOVE_PACKET *>(packets[index].data());
+    EXPECT_EQ(util::endian::big(packet->deltaX), index % 2 == 0 ? 8 : -8);
+  }
+  ASSERT_EQ(queue.size(), 2);
+  const auto *barrier = reinterpret_cast<const NV_INPUT_HEADER *>(queue.front().data());
+  EXPECT_EQ(util::endian::little(barrier->magic), MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5);
+}
+
+TEST(InputMouseBatchTests, SendInputBatchWaitsForEightAlreadyQueuedMoves) {
+  std::list<std::vector<std::uint8_t>> queue;
+  for (int index = 0; index < 7; ++index) {
+    queue.push_back(make_relative_mouse_packet(1, 0));
+  }
+  queue.push_back(make_mouse_button_packet());
+
+  EXPECT_TRUE(input::detail::take_sendinput_relative_batch(queue).empty());
+  EXPECT_EQ(queue.size(), 8);
+}
+
+TEST(InputMouseBatchTests, SendInputBatchDoesNotCrossKeyboardEvent) {
+  std::list<std::vector<std::uint8_t>> queue;
+  for (int index = 0; index < 8; ++index) {
+    queue.push_back(make_relative_mouse_packet(1, 0));
+  }
+  queue.push_back(make_keyboard_packet());
+  queue.push_back(make_relative_mouse_packet(2, 0));
+
+  EXPECT_EQ(input::detail::take_sendinput_relative_batch(queue).size(), 8);
+  ASSERT_EQ(queue.size(), 2);
+  const auto *barrier = reinterpret_cast<const NV_INPUT_HEADER *>(queue.front().data());
+  EXPECT_EQ(util::endian::little(barrier->magic), KEY_DOWN_EVENT_MAGIC);
+}
+
+TEST(InputMouseBatchTests, SendInputBatchCapsAtThirtyTwoMoves) {
+  std::list<std::vector<std::uint8_t>> queue;
+  for (int index = 0; index < 40; ++index) {
+    queue.push_back(make_relative_mouse_packet(index + 1, 0));
+  }
+
+  const auto packets = input::detail::take_sendinput_relative_batch(queue);
+  ASSERT_EQ(packets.size(), 32);
+  EXPECT_EQ(queue.size(), 8);
+  const auto *next = reinterpret_cast<const NV_REL_MOUSE_MOVE_PACKET *>(queue.front().data());
+  EXPECT_EQ(util::endian::big(next->deltaX), 33);
 }
 
 TEST(InputForceStateTests, NonEmptySignatureStartsForceTiming) {

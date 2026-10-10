@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <span>
 #include <string>
 
 // lib includes
@@ -782,6 +783,14 @@ namespace platf {
 
   input_t input();
 #ifdef _WIN32
+  struct mouse_delta_t {
+    int x;
+    int y;
+  };
+
+  bool uses_sendinput_mouse(input_t &input);
+  std::size_t move_mouse_batch(input_t &input, std::span<const mouse_delta_t> deltas);
+
   /**
    * @brief Create persistent virtual gamepads after middleware authorizes a client.
    * @return true when all preinitialized slots are ready.

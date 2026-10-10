@@ -92,7 +92,7 @@ namespace platf {
   std::unique_ptr<interception_input_t> interception_input_t::create_from_path(const std::wstring &path) {
     const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-      BOOST_LOG(info) << "Interception DLL unavailable; trying Buke HID";
+      BOOST_LOG(info) << "Interception DLL unavailable; trying Buke";
       return nullptr;
     }
 
@@ -104,17 +104,17 @@ namespace platf {
 
     auto result = std::unique_ptr<interception_input_t>(new interception_input_t(module));
     if (!result->resolve_exports()) {
-      BOOST_LOG(warning) << "Interception DLL has incomplete exports; trying Buke HID";
+      BOOST_LOG(warning) << "Interception DLL has incomplete exports; trying Buke";
       return nullptr;
     }
 
     result->context_ = result->create_context_();
     if (!result->context_) {
-      BOOST_LOG(warning) << "Interception driver context unavailable; trying Buke HID";
+      BOOST_LOG(warning) << "Interception driver context unavailable; trying Buke";
       return nullptr;
     }
     if (!result->select_devices()) {
-      BOOST_LOG(warning) << "Interception keyboard or mouse device unavailable; trying Buke HID";
+      BOOST_LOG(warning) << "Interception keyboard or mouse device unavailable; trying Buke";
       return nullptr;
     }
 

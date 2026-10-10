@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <nlohmann/json.hpp>
+#include <utility>
+#include <vector>
 
 namespace middleware::detail {
   nlohmann::json make_connected_payload(std::int64_t message_id);
@@ -78,6 +80,7 @@ TEST(MiddlewareDisconnectTests, OtherReasonUsesTypeZeroInData) {
 
   ASSERT_EQ(msg.value("event", ""), "disconnected");
   ASSERT_EQ(msg.value("message", ""), "network disconnected");
+  ASSERT_EQ(msg["data"].value("message", ""), "network disconnected");
   ASSERT_FALSE(msg.contains("type"));
   ASSERT_EQ(msg["data"].value("type", -1), 0);
 }
@@ -89,6 +92,7 @@ TEST(MiddlewareDisconnectTests, ForceTimeoutUsesTypeOne) {
   );
 
   ASSERT_EQ(msg["data"].value("type", -1), 1);
+  ASSERT_EQ(msg["data"].value("message", ""), "force timeout");
 }
 
 TEST(MiddlewareDisconnectTests, StandbyTimeoutUsesTypeTwo) {
@@ -98,4 +102,41 @@ TEST(MiddlewareDisconnectTests, StandbyTimeoutUsesTypeTwo) {
   );
 
   ASSERT_EQ(msg["data"].value("type", -1), 2);
+  ASSERT_EQ(msg["data"].value("message", ""), "standby timeout");
+}
+
+TEST(MiddlewareDisconnectTests, ClassifiedReasonsPreserveTypeAndDetailedMessage) {
+  using type_e = middleware::disconnect_notification_type_e;
+  const std::vector<std::pair<type_e, int>> types {
+    {type_e::client_requested_stop, 10},
+    {type_e::client_reported_error, 11},
+    {type_e::peer_disconnected_unknown, 12},
+    {type_e::control_timeout, 20},
+    {type_e::stream_start_timeout, 21},
+    {type_e::upstream_requested_stop, 30},
+    {type_e::server_requested_stop, 31},
+    {type_e::server_shutdown, 32},
+    {type_e::server_capture_error, 40},
+    {type_e::server_encoder_error, 41},
+    {type_e::server_internal_error, 42},
+    {type_e::gateway_error, 43},
+    {type_e::server_process_abnormal_exit, 44},
+    {type_e::control_protocol_error, 50},
+  };
+  const std::string reason = "编码器初始化失败：NVENC error=8\nframe=123";
+
+  for (const auto &[type, value] : types) {
+    SCOPED_TRACE(value);
+    auto msg = middleware::detail::make_disconnected_payload(reason, type);
+    auto serialized = nlohmann::json::parse(msg.dump());
+    EXPECT_EQ(serialized["data"]["type"], value);
+    EXPECT_EQ(serialized["data"]["message"], reason);
+    EXPECT_EQ(serialized["message"], reason);
+  }
+}
+
+TEST(MiddlewareDisconnectTests, EmptyReasonStillHasMessageField) {
+  auto msg = middleware::detail::make_disconnected_payload("", middleware::disconnect_notification_type_e::other);
+  ASSERT_TRUE(msg["data"].contains("message"));
+  EXPECT_EQ(msg["data"]["message"], "");
 }

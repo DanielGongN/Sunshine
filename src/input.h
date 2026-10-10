@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <unordered_set>
+#include <vector>
 
 // local includes
 #include "platform/common.h"
@@ -32,6 +34,8 @@ namespace input {
     };
 
     bool batch_relative_mouse(relative_mouse_delta_t &dest, const relative_mouse_delta_t &src);
+    bool preserve_mouse_move(std::uint32_t magic, bool uses_sendinput);
+    std::vector<std::vector<std::uint8_t>> take_sendinput_relative_batch(std::list<std::vector<std::uint8_t>> &queue, std::size_t max_count = 32);
 
     enum class force_axis_e : std::int8_t {
       negative = -1,

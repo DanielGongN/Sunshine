@@ -5,6 +5,7 @@
 
 // standard includes
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <future>
 #include <queue>
@@ -33,6 +34,7 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "stream.h"
+#include "stream_disconnect.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -510,6 +512,8 @@ namespace stream {
 
     safe::mail_t mail;
 
+    std::shared_ptr<detail::disconnect_state_t> disconnect = std::make_shared<detail::disconnect_state_t>();
+
     std::shared_ptr<input::input_t> input;
 
     std::thread audioThread;
@@ -827,8 +831,7 @@ namespace stream {
                              << " last_payload="sv << last_payload_len
                              << " session_state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
           if (session->state == session::state_e::RUNNING) {
-            middleware::notify_client_disconnected(u8"客户端主动断开连接或网络异常断开连接");
-            session::stop(*session);
+            session::stop(*session, middleware::disconnect_notification_type_e::peer_disconnected_unknown, std::format("Control peer disconnected; client intent is unknown (ENet data={})", event.data));
           }
           break;
         case ENET_EVENT_TYPE_NONE:
@@ -1264,7 +1267,7 @@ namespace stream {
                          << tagged_cipher_length
                          << " payload_len="sv << payload.size();
 
-        session::stop(*session);
+        session::stop(*session, middleware::disconnect_notification_type_e::control_protocol_error, std::format("Legacy input authentication failed (tagged_len={}, payload_len={})", tagged_cipher_length, payload.size()));
         return;
       }
 
@@ -1322,7 +1325,7 @@ namespace stream {
                          << " tagged_len="sv << tagged_cipher_length
                          << " payload_len="sv << payload.size();
 
-        session::stop(*session);
+        session::stop(*session, middleware::disconnect_notification_type_e::control_protocol_error, std::format("Encrypted control authentication failed (seq={}, length={}, payload_len={})", seq, length, payload.size()));
         return;
       }
 
@@ -1332,7 +1335,7 @@ namespace stream {
       if (type == packetTypes[IDX_ENCRYPTED]) {
         BOOST_LOG(error) << "[control][stop] reason=bad_nested_encrypted seq="sv << seq
                          << " plaintext_size="sv << plaintext.size();
-        session::stop(*session);
+        session::stop(*session, middleware::disconnect_notification_type_e::control_protocol_error, std::format("Nested encrypted control message is invalid (seq={}, plaintext_size={})", seq, plaintext.size()));
         return;
       }
 
@@ -1365,11 +1368,10 @@ namespace stream {
         if (force_event->view(CONTROL_SERVICE_DRAIN_TIMEOUT)) {
           BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream"sv;
           force_event->pop();
-          middleware::notify_client_disconnected(u8"上游请求断开连接");
           for (auto s : *server->_sessions) {
             if (s->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
               send_termination_msg(s, CONTROL_TERMINATION_GRACEFUL, "force_disconnect_from_upstream"sv);
-              session::stop(*s);
+              session::stop(*s, middleware::disconnect_notification_type_e::upstream_requested_stop, "Upstream platform requested stream termination");
             }
           }
         }
@@ -1422,12 +1424,10 @@ namespace stream {
             }
           }
 
-          if (now > session->pingTimeout) {
+          if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && now > session->pingTimeout) {
             auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
             BOOST_LOG(warning) << "[control][stop] reason=ping_timeout address="sv << address << " state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
-            // Notify upstream of network disconnect
-            middleware::notify_client_disconnected(u8"网络异常断开连接");
-            session::stop(*session);
+            session::stop(*session, session->control.peer ? middleware::disconnect_notification_type_e::control_timeout : middleware::disconnect_notification_type_e::stream_start_timeout, std::format("Control channel timed out after {} ms (peer={}); root cause is unknown", config::stream.ping_timeout.count(), address));
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
@@ -1494,6 +1494,8 @@ namespace stream {
     auto lg = server->_sessions.lock();
     for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
       auto session = *pos;
+
+      session::stop(*session, shutdown_event->peek() ? middleware::disconnect_notification_type_e::server_shutdown : middleware::disconnect_notification_type_e::server_internal_error, shutdown_event->peek() ? "Sunshine is shutting down" : "Shared streaming broadcast stopped unexpectedly");
 
       // We may not have gotten far enough to have an ENet connection yet
       if (session->control.peer) {
@@ -2345,118 +2347,137 @@ namespace stream {
                      << " last_msg_size="sv << last_msg_size
                      << " last_msg="sv << last_msg_hex;
     BOOST_LOG(error) << "Initial Ping Timeout"sv;
+    session::stop(*session, middleware::disconnect_notification_type_e::stream_start_timeout, std::format("Initial {} PING not received within {} ms (peer={})", type_name, timeout.count(), udp_endpoint_to_string(peer)));
     return -1;
   }
 
   void videoThread(session_t *session) {
     platf::set_thread_name("session::video");
     auto fg = util::fail_guard([&]() {
-      session::stop(*session);
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Video worker exited without an explicit stop reason");
     });
 
-    while_starting_do_nothing(session->state);
+    try {
+      while_starting_do_nothing(session->state);
 
-    auto ref = broadcast.ref();
-    auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
-    if (error < 0) {
-      return;
+      auto ref = broadcast.ref();
+      auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
+      if (error < 0) {
+        return;
+      }
+
+      if (!gateway::get_client_ip().empty() && session->video.peer.address().is_loopback()) {
+        auto gateway_port = static_cast<std::uint16_t>(
+          net::map_port(VIDEO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
+        );
+        session->video.peer.address(boost::asio::ip::make_address("127.0.0.1"));
+        session->video.peer.port(gateway_port);
+        BOOST_LOG(info) << "[gateway mode] video peer uses gateway outbound port 127.0.0.1:"sv
+                        << gateway_port;
+      }
+
+      boost::system::error_code local_endpoint_ec;
+      auto video_local_endpoint = ref->video_sock.local_endpoint(local_endpoint_ec);
+      auto video_bound_address = local_endpoint_ec ?
+                                   (session->video.peer.address().is_v4() ?
+                                      boost::asio::ip::address {boost::asio::ip::address_v4::any()} :
+                                      boost::asio::ip::address {boost::asio::ip::address_v6::any()}) :
+                                   video_local_endpoint.address();
+      session->video.source_address = resolve_video_source_address(session->video.peer, video_bound_address);
+
+      // Enable local prioritization and QoS tagging on video traffic if requested by the client
+      auto address = session->video.peer.address();
+      session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+
+      BOOST_LOG(debug) << "Start capturing Video"sv;
+      video::capture(session->mail, session->config.monitor, session, session->disconnect);
+    } catch (const std::exception &e) {
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, std::format("Video worker exception: {}", e.what()));
+    } catch (...) {
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Video worker threw an unknown exception");
     }
-
-    if (!gateway::get_client_ip().empty() && session->video.peer.address().is_loopback()) {
-      auto gateway_port = static_cast<std::uint16_t>(
-        net::map_port(VIDEO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
-      );
-      session->video.peer.address(boost::asio::ip::make_address("127.0.0.1"));
-      session->video.peer.port(gateway_port);
-      BOOST_LOG(info) << "[gateway mode] video peer uses gateway outbound port 127.0.0.1:"sv
-                      << gateway_port;
-    }
-
-    boost::system::error_code local_endpoint_ec;
-    auto video_local_endpoint = ref->video_sock.local_endpoint(local_endpoint_ec);
-    auto video_bound_address = local_endpoint_ec ?
-                                 (session->video.peer.address().is_v4() ?
-                                    boost::asio::ip::address {boost::asio::ip::address_v4::any()} :
-                                    boost::asio::ip::address {boost::asio::ip::address_v6::any()}) :
-                                 video_local_endpoint.address();
-    session->video.source_address = resolve_video_source_address(session->video.peer, video_bound_address);
-
-    // Enable local prioritization and QoS tagging on video traffic if requested by the client
-    auto address = session->video.peer.address();
-    session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
-
-    BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session);
   }
 
   void audioThread(session_t *session) {
     platf::set_thread_name("session::audio");
     auto fg = util::fail_guard([&]() {
-      session::stop(*session);
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Audio worker exited without an explicit stop reason");
     });
 
-    while_starting_do_nothing(session->state);
+    try {
+      while_starting_do_nothing(session->state);
 
-    auto ref = broadcast.ref();
-    auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
-    if (error < 0) {
-      return;
+      auto ref = broadcast.ref();
+      auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
+      if (error < 0) {
+        return;
+      }
+      if (!gateway::get_client_ip().empty() && session->audio.peer.address().is_loopback()) {
+        auto gateway_port = static_cast<std::uint16_t>(
+          net::map_port(AUDIO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
+        );
+        session->audio.peer.address(boost::asio::ip::make_address("127.0.0.1"));
+        session->audio.peer.port(gateway_port);
+        BOOST_LOG(info) << "[gateway mode] audio peer uses gateway outbound port 127.0.0.1:"sv
+                        << gateway_port;
+      }
+
+      // Enable local prioritization and QoS tagging on audio traffic if requested by the client
+      auto address = session->audio.peer.address();
+      session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+
+      BOOST_LOG(debug) << "Start capturing Audio"sv;
+      audio::capture(session->mail, session->config.audio, session);
+    } catch (const std::exception &e) {
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, std::format("Audio worker exception: {}", e.what()));
+    } catch (...) {
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Audio worker threw an unknown exception");
     }
-    if (!gateway::get_client_ip().empty() && session->audio.peer.address().is_loopback()) {
-      auto gateway_port = static_cast<std::uint16_t>(
-        net::map_port(AUDIO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
-      );
-      session->audio.peer.address(boost::asio::ip::make_address("127.0.0.1"));
-      session->audio.peer.port(gateway_port);
-      BOOST_LOG(info) << "[gateway mode] audio peer uses gateway outbound port 127.0.0.1:"sv
-                      << gateway_port;
-    }
-
-    // Enable local prioritization and QoS tagging on audio traffic if requested by the client
-    auto address = session->audio.peer.address();
-    session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
-
-    BOOST_LOG(debug) << "Start capturing Audio"sv;
-    audio::capture(session->mail, session->config.audio, session);
   }
 
   void micThread(session_t *session) {
     platf::set_thread_name("session::clientMic");
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
     auto fg = util::fail_guard([&]() {
-      session::stop(*session);
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Client microphone worker exited without an explicit stop reason");
     });
 
-    if (!session->config.client_mic.enabled) {
-      return;
+    try {
+      if (!session->config.client_mic.enabled) {
+        return;
+      }
+
+      while_starting_do_nothing(session->state);
+
+      auto ref = broadcast.ref();
+      auto error = recv_ping(session, ref, socket_e::mic, session->mic.ping_payload, session->mic.peer, config::stream.ping_timeout);
+      if (error < 0) {
+        return;
+      }
+
+      auto address = session->mic.peer.address();
+      session->mic.qos = platf::enable_socket_qos(ref->mic_sock.native_handle(), address, session->mic.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+
+      session->mic.packets = std::make_shared<client_mic::packet_queue_t::element_type>(CLIENT_MIC_PACKET_QUEUE_SIZE);
+      auto peer_key = udp_endpoint_to_string(session->mic.peer);
+      ref->mic_packet_queue_queue->raise(peer_key, session->mic.packets);
+      auto packet_queue_fg = util::fail_guard([&]() {
+        session->mic.packets->stop();
+        ref->mic_packet_queue_queue->raise(peer_key, nullptr);
+      });
+
+      BOOST_LOG(debug) << "Start receiving Client Microphone"sv;
+      client_mic::receive(
+        session->mail,
+        session->config.client_mic,
+        session->mic.packets,
+        session->mic.cipher ? &*session->mic.cipher : nullptr
+      );
+    } catch (const std::exception &e) {
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, std::format("Client microphone worker exception: {}", e.what()));
+    } catch (...) {
+      session::stop(*session, middleware::disconnect_notification_type_e::server_internal_error, "Client microphone worker threw an unknown exception");
     }
-
-    while_starting_do_nothing(session->state);
-
-    auto ref = broadcast.ref();
-    auto error = recv_ping(session, ref, socket_e::mic, session->mic.ping_payload, session->mic.peer, config::stream.ping_timeout);
-    if (error < 0) {
-      return;
-    }
-
-    auto address = session->mic.peer.address();
-    session->mic.qos = platf::enable_socket_qos(ref->mic_sock.native_handle(), address, session->mic.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
-
-    session->mic.packets = std::make_shared<client_mic::packet_queue_t::element_type>(CLIENT_MIC_PACKET_QUEUE_SIZE);
-    auto peer_key = udp_endpoint_to_string(session->mic.peer);
-    ref->mic_packet_queue_queue->raise(peer_key, session->mic.packets);
-    auto packet_queue_fg = util::fail_guard([&]() {
-      session->mic.packets->stop();
-      ref->mic_packet_queue_queue->raise(peer_key, nullptr);
-    });
-
-    BOOST_LOG(debug) << "Start receiving Client Microphone"sv;
-    client_mic::receive(
-      session->mail,
-      session->config.client_mic,
-      session->mic.packets,
-      session->mic.cipher ? &*session->mic.cipher : nullptr
-    );
   }
 
   namespace session {
@@ -2470,8 +2491,15 @@ namespace stream {
       return session.client_cert;
     }
 
-    void stop(session_t &session) {
+    void stop(session_t &session, middleware::disconnect_notification_type_e type, std::string_view message) {
       while_starting_do_nothing(session.state);
+      if (session.state.load(std::memory_order_acquire) != state_e::RUNNING) {
+        return;
+      }
+      auto reason = session.disconnect->claim(type, message);
+      if (!reason) {
+        return;
+      }
       auto expected = state_e::RUNNING;
       auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
       if (already_stopping) {
@@ -2479,6 +2507,10 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      BOOST_LOG(info) << "[stream][disconnect] session="sv << session.launch_session_id
+                      << " type="sv << static_cast<int>(reason->type)
+                      << " message="sv << reason->message;
+      middleware::notify_client_disconnected(reason->message, reason->type);
     }
 
     void join(session_t &session) {
@@ -2569,8 +2601,9 @@ namespace stream {
 
       session.timeout_notification_sent = false;
       input::reset_timeout_state(session.input);
-      session.state.store(state_e::RUNNING, std::memory_order_release);
+      // Queue the connected event before workers can report an immediate failure.
       middleware::notify_client_connected();
+      session.state.store(state_e::RUNNING, std::memory_order_release);
 
       // If this is the first session, invoke the platform callbacks
       if (++running_sessions == 1) {

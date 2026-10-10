@@ -408,7 +408,7 @@ namespace rtsp_stream {
   class rtsp_server_t {
   public:
     ~rtsp_server_t() {
-      clear();
+      clear(true, middleware::disconnect_notification_type_e::server_shutdown, "RTSP server is shutting down");
     }
 
     int bind(net::af_e af, std::uint16_t port, boost::system::error_code &ec) {
@@ -464,7 +464,8 @@ namespace rtsp_stream {
         BOOST_LOG(error) << "Couldn't accept incoming connections: "sv << ec.message();
 
         // Stop server
-        clear();
+        auto shutting_down = mail::man->event<bool>(mail::shutdown)->peek();
+        clear(true, shutting_down ? middleware::disconnect_notification_type_e::server_shutdown : middleware::disconnect_notification_type_e::server_internal_error, shutting_down ? "RTSP server is shutting down" : std::format("RTSP accept failed: {}", ec.message()));
         return;
       }
 
@@ -567,13 +568,17 @@ namespace rtsp_stream {
      * clear(false);
      * @examples_end
      */
-    void clear(bool all = true) {
+    void clear(
+      bool all = true,
+      middleware::disconnect_notification_type_e type = middleware::disconnect_notification_type_e::server_requested_stop,
+      std::string_view message = "Server requested stream termination"
+    ) {
       auto lg = _session_slots.lock();
 
       for (auto i = _session_slots->begin(); i != _session_slots->end();) {
         auto &slot = *(*i);
         if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
+          stream::session::stop(slot, type, message);
           stream::session::join(slot);
 
           i = _session_slots->erase(i);
@@ -588,7 +593,7 @@ namespace rtsp_stream {
       for (auto i = _session_slots->begin(); i != _session_slots->end();) {
         auto &slot = *(*i);
         if (stream::session::client_cert(slot) == cert) {
-          stream::session::stop(slot);
+          stream::session::stop(slot, middleware::disconnect_notification_type_e::server_requested_stop, "Server revoked client authorization");
           stream::session::join(slot);
           i = _session_slots->erase(i);
         } else {
@@ -635,7 +640,7 @@ namespace rtsp_stream {
     void stop() {
       acceptor.close();
       io_context.stop();
-      clear();
+      clear(true, middleware::disconnect_notification_type_e::server_shutdown, "RTSP server is shutting down");
     }
 
   private:
@@ -673,8 +678,8 @@ namespace rtsp_stream {
     return server.running_session_count();
   }
 
-  void terminate_sessions() {
-    server.clear(true);
+  void terminate_sessions(middleware::disconnect_notification_type_e type, std::string_view message) {
+    server.clear(true, type, message);
   }
 
   void terminate_sessions_by_cert(std::string_view cert) {
@@ -1276,14 +1281,14 @@ namespace rtsp_stream {
         server.iterate();
 
         if (broadcast_shutdown_event->peek()) {
-          server.clear();
+          server.clear(true, shutdown_event->peek() ? middleware::disconnect_notification_type_e::server_shutdown : middleware::disconnect_notification_type_e::server_internal_error, shutdown_event->peek() ? "Sunshine is shutting down" : "Shared streaming broadcast stopped unexpectedly");
         } else {
           // cleanup all stopped sessions
           server.clear(false);
         }
       }
 
-      server.clear();
+      server.clear(true, middleware::disconnect_notification_type_e::server_shutdown, "Sunshine is shutting down");
     }};
 
     // Wait for shutdown

@@ -9,6 +9,7 @@
 
 // local includes
 #include "crypto.h"
+#include "middleware.h"
 #include "thread_safe.h"
 
 namespace rtsp_stream {
@@ -66,7 +67,10 @@ namespace rtsp_stream {
   /**
    * @brief Terminates all running streaming sessions.
    */
-  void terminate_sessions();
+  void terminate_sessions(
+    middleware::disconnect_notification_type_e type = middleware::disconnect_notification_type_e::server_requested_stop,
+    std::string_view message = "Server requested stream termination"
+  );
   void terminate_sessions_by_cert(std::string_view cert);
 
   /**

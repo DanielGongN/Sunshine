@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/buke_hid_input.h
- * @brief Optional Buke HID keyboard and mouse input backend.
+ * @brief Optional Buke keyboard and mouse input backend.
  */
 #pragma once
 

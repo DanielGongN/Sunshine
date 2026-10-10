@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <format>
 #include <list>
 #include <thread>
 
@@ -28,6 +29,7 @@ extern "C" {
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
+#include "stream_disconnect.h"
 #include "sync.h"
 #include "video.h"
 
@@ -439,6 +441,7 @@ namespace video {
     config_t config;
     int frame_nr;
     void *channel_data;
+    std::shared_ptr<stream::detail::disconnect_state_t> disconnect;
   };
 
   struct sync_session_t {
@@ -452,6 +455,7 @@ namespace video {
   struct capture_ctx_t {
     img_event_t images;
     config_t config;
+    std::shared_ptr<stream::detail::disconnect_state_t> disconnect;
   };
 
   struct capture_thread_async_ctx_t {
@@ -1261,113 +1265,105 @@ namespace video {
     const encoder_t &encoder
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
+    std::string capture_failure = "Video capture thread ended unexpectedly";
 
     auto fg = util::fail_guard([&]() {
       capture_ctx_queue->stop();
 
       // Stop all sessions listening to this thread
       for (auto &capture_ctx : capture_ctxs) {
+        if (capture_ctx.images->running()) {
+          capture_ctx.disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, capture_failure);
+        }
         capture_ctx.images->stop();
       }
       for (auto &capture_ctx : capture_ctx_queue->unsafe()) {
+        capture_ctx.disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, capture_failure);
         capture_ctx.images->stop();
       }
     });
 
-    auto switch_display_event = mail::man->event<int>(mail::switch_display);
+    try {
+      auto switch_display_event = mail::man->event<int>(mail::switch_display);
 
-    // Wait for the initial capture context or a request to stop the queue
-    auto initial_capture_ctx = capture_ctx_queue->pop();
-    if (!initial_capture_ctx) {
-      return;
-    }
-    capture_ctxs.emplace_back(std::move(*initial_capture_ctx));
-
-    // Get all the monitor names now, rather than at boot, to
-    // get the most up-to-date list available monitors
-    std::vector<std::string> display_names;
-    int display_p = -1;
-    refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
-    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
-    if (!disp) {
-      return;
-    }
-    display_wp = disp;
-
-    constexpr auto capture_buffer_size = 12;
-    std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
-
-    std::vector<std::optional<std::chrono::steady_clock::time_point>> imgs_used_timestamps;
-    const std::chrono::seconds trim_timeot = 3s;
-    auto trim_imgs = [&]() {
-      // count allocated and used within current pool
-      size_t allocated_count = 0;
-      size_t used_count = 0;
-      for (const auto &img : imgs) {
-        if (img) {
-          allocated_count += 1;
-          if (img.use_count() > 1) {
-            used_count += 1;
-          }
-        }
+      // Wait for the initial capture context or a request to stop the queue
+      auto initial_capture_ctx = capture_ctx_queue->pop();
+      if (!initial_capture_ctx) {
+        return;
       }
+      capture_ctxs.emplace_back(std::move(*initial_capture_ctx));
 
-      // remember the timestamp of currently used count
-      const auto now = std::chrono::steady_clock::now();
-      if (imgs_used_timestamps.size() <= used_count) {
-        imgs_used_timestamps.resize(used_count + 1);
+      // Get all the monitor names now, rather than at boot, to
+      // get the most up-to-date list available monitors
+      std::vector<std::string> display_names;
+      int display_p = -1;
+      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+      if (!disp) {
+        capture_failure = "Could not initialize the video capture display";
+        return;
       }
-      imgs_used_timestamps[used_count] = now;
+      display_wp = disp;
 
-      // decide whether to trim allocated unused above the currently used count
-      // based on last used timestamp and universal timeout
-      size_t trim_target = used_count;
-      for (size_t i = used_count; i < imgs_used_timestamps.size(); i++) {
-        if (imgs_used_timestamps[i] && now - *imgs_used_timestamps[i] < trim_timeot) {
-          trim_target = i;
-        }
-      }
+      constexpr auto capture_buffer_size = 12;
+      std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
 
-      // trim allocated unused above the newly decided trim target
-      if (allocated_count > trim_target) {
-        size_t to_trim = allocated_count - trim_target;
-        // prioritize trimming least recently used
-        for (auto it = imgs.rbegin(); it != imgs.rend(); it++) {
-          auto &img = *it;
-          if (img && img.use_count() == 1) {
-            img.reset();
-            to_trim -= 1;
-            if (to_trim == 0) {
-              break;
+      std::vector<std::optional<std::chrono::steady_clock::time_point>> imgs_used_timestamps;
+      const std::chrono::seconds trim_timeot = 3s;
+      auto trim_imgs = [&]() {
+        // count allocated and used within current pool
+        size_t allocated_count = 0;
+        size_t used_count = 0;
+        for (const auto &img : imgs) {
+          if (img) {
+            allocated_count += 1;
+            if (img.use_count() > 1) {
+              used_count += 1;
             }
           }
         }
-        // forget timestamps that no longer relevant
-        imgs_used_timestamps.resize(trim_target + 1);
-      }
-    };
 
-    auto pull_free_image_callback = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
-      img_out.reset();
-      while (capture_ctx_queue->running()) {
-        // pick first allocated but unused
-        for (auto it = imgs.begin(); it != imgs.end(); it++) {
-          if (*it && it->use_count() == 1) {
-            img_out = *it;
-            if (it != imgs.begin()) {
-              // move image to the front of the list to prioritize its reusal
-              imgs.erase(it);
-              imgs.push_front(img_out);
-            }
-            break;
+        // remember the timestamp of currently used count
+        const auto now = std::chrono::steady_clock::now();
+        if (imgs_used_timestamps.size() <= used_count) {
+          imgs_used_timestamps.resize(used_count + 1);
+        }
+        imgs_used_timestamps[used_count] = now;
+
+        // decide whether to trim allocated unused above the currently used count
+        // based on last used timestamp and universal timeout
+        size_t trim_target = used_count;
+        for (size_t i = used_count; i < imgs_used_timestamps.size(); i++) {
+          if (imgs_used_timestamps[i] && now - *imgs_used_timestamps[i] < trim_timeot) {
+            trim_target = i;
           }
         }
-        // otherwise pick first unallocated
-        if (!img_out) {
+
+        // trim allocated unused above the newly decided trim target
+        if (allocated_count > trim_target) {
+          size_t to_trim = allocated_count - trim_target;
+          // prioritize trimming least recently used
+          for (auto it = imgs.rbegin(); it != imgs.rend(); it++) {
+            auto &img = *it;
+            if (img && img.use_count() == 1) {
+              img.reset();
+              to_trim -= 1;
+              if (to_trim == 0) {
+                break;
+              }
+            }
+          }
+          // forget timestamps that no longer relevant
+          imgs_used_timestamps.resize(trim_target + 1);
+        }
+      };
+
+      auto pull_free_image_callback = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
+        img_out.reset();
+        while (capture_ctx_queue->running()) {
+          // pick first allocated but unused
           for (auto it = imgs.begin(); it != imgs.end(); it++) {
-            if (!*it) {
-              // allocate image
-              *it = disp->alloc_img();
+            if (*it && it->use_count() == 1) {
               img_out = *it;
               if (it != imgs.begin()) {
                 // move image to the front of the list to prioritize its reusal
@@ -1377,137 +1373,160 @@ namespace video {
               break;
             }
           }
-        }
-        if (img_out) {
-          // trim allocated but unused portion of the pool based on timeouts
-          trim_imgs();
-          img_out->frame_timestamp.reset();
-          return true;
-        } else {
-          // sleep and retry if image pool is full
-          std::this_thread::sleep_for(1ms);
-        }
-      }
-      return false;
-    };
-
-    // Capture takes place on this thread
-    platf::set_thread_name("video::capture");
-    platf::adjust_thread_priority(platf::thread_priority_e::critical);
-
-    while (capture_ctx_queue->running()) {
-      bool artificial_reinit = false;
-
-      auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
-        KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
-          if (!capture_ctx->images->running()) {
-            capture_ctx = capture_ctxs.erase(capture_ctx);
-
-            continue;
-          }
-
-          if (frame_captured) {
-            capture_ctx->images->raise(img);
-          }
-
-          ++capture_ctx;
-        })
-
-        if (!capture_ctx_queue->running()) {
-          return false;
-        }
-
-        while (capture_ctx_queue->peek()) {
-          capture_ctxs.emplace_back(std::move(*capture_ctx_queue->pop()));
-        }
-
-        if (switch_display_event->peek()) {
-          artificial_reinit = true;
-          return false;
-        }
-
-        return true;
-      };
-
-      auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
-
-      if (artificial_reinit && status != platf::capture_e::error) {
-        status = platf::capture_e::reinit;
-
-        artificial_reinit = false;
-      }
-
-      switch (status) {
-        case platf::capture_e::reinit:
-          {
-            reinit_event.raise(true);
-
-            // Some classes of images contain references to the display --> display won't delete unless img is deleted
-            for (auto &img : imgs) {
-              img.reset();
-            }
-
-            // display_wp is modified in this thread only
-            // Wait for the other shared_ptr's of display to be destroyed.
-            // New displays will only be created in this thread.
-            while (display_wp->use_count() != 1) {
-              // Free images that weren't consumed by the encoders. These can reference the display and prevent
-              // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
-              // conditions where the encoding loop might free a good frame after reinitializing if we capture
-              // a new frame here before the encoder has finished reinitializing.
-              KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
-                if (!capture_ctx->images->running()) {
-                  capture_ctx = capture_ctxs.erase(capture_ctx);
-                  continue;
+          // otherwise pick first unallocated
+          if (!img_out) {
+            for (auto it = imgs.begin(); it != imgs.end(); it++) {
+              if (!*it) {
+                // allocate image
+                *it = disp->alloc_img();
+                img_out = *it;
+                if (it != imgs.begin()) {
+                  // move image to the front of the list to prioritize its reusal
+                  imgs.erase(it);
+                  imgs.push_front(img_out);
                 }
-
-                while (capture_ctx->images->peek()) {
-                  capture_ctx->images->pop();
-                }
-
-                ++capture_ctx;
-              });
-
-              std::this_thread::sleep_for(20ms);
-            }
-
-            while (capture_ctx_queue->running()) {
-              // Release the display before reenumerating displays, since some capture backends
-              // only support a single display session per device/application.
-              disp.reset();
-
-              // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
-
-              // Process any pending display switch with the new list of displays
-              if (switch_display_event->peek()) {
-                display_p = std::clamp(*switch_display_event->pop(), 0, (int) display_names.size() - 1);
-              }
-
-              // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
-              if (disp) {
                 break;
               }
             }
-            if (!disp) {
-              return;
+          }
+          if (img_out) {
+            // trim allocated but unused portion of the pool based on timeouts
+            trim_imgs();
+            img_out->frame_timestamp.reset();
+            return true;
+          } else {
+            // sleep and retry if image pool is full
+            std::this_thread::sleep_for(1ms);
+          }
+        }
+        return false;
+      };
+
+      // Capture takes place on this thread
+      platf::set_thread_name("video::capture");
+      platf::adjust_thread_priority(platf::thread_priority_e::critical);
+
+      while (capture_ctx_queue->running()) {
+        bool artificial_reinit = false;
+
+        auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+          KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
+            if (!capture_ctx->images->running()) {
+              capture_ctx = capture_ctxs.erase(capture_ctx);
+
+              continue;
             }
 
-            display_wp = disp;
+            if (frame_captured) {
+              capture_ctx->images->raise(img);
+            }
 
-            reinit_event.reset();
-            continue;
+            ++capture_ctx;
+          })
+
+          if (!capture_ctx_queue->running()) {
+            return false;
           }
-        case platf::capture_e::error:
-        case platf::capture_e::ok:
-        case platf::capture_e::timeout:
-        case platf::capture_e::interrupted:
-          return;
-        default:
-          BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
-          return;
+
+          while (capture_ctx_queue->peek()) {
+            capture_ctxs.emplace_back(std::move(*capture_ctx_queue->pop()));
+          }
+
+          if (switch_display_event->peek()) {
+            artificial_reinit = true;
+            return false;
+          }
+
+          return true;
+        };
+
+        auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+
+        if (artificial_reinit && status != platf::capture_e::error) {
+          status = platf::capture_e::reinit;
+
+          artificial_reinit = false;
+        }
+
+        switch (status) {
+          case platf::capture_e::reinit:
+            {
+              reinit_event.raise(true);
+
+              // Some classes of images contain references to the display --> display won't delete unless img is deleted
+              for (auto &img : imgs) {
+                img.reset();
+              }
+
+              // display_wp is modified in this thread only
+              // Wait for the other shared_ptr's of display to be destroyed.
+              // New displays will only be created in this thread.
+              while (display_wp->use_count() != 1) {
+                // Free images that weren't consumed by the encoders. These can reference the display and prevent
+                // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
+                // conditions where the encoding loop might free a good frame after reinitializing if we capture
+                // a new frame here before the encoder has finished reinitializing.
+                KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
+                  if (!capture_ctx->images->running()) {
+                    capture_ctx = capture_ctxs.erase(capture_ctx);
+                    continue;
+                  }
+
+                  while (capture_ctx->images->peek()) {
+                    capture_ctx->images->pop();
+                  }
+
+                  ++capture_ctx;
+                });
+
+                std::this_thread::sleep_for(20ms);
+              }
+
+              while (capture_ctx_queue->running()) {
+                // Release the display before reenumerating displays, since some capture backends
+                // only support a single display session per device/application.
+                disp.reset();
+
+                // Refresh display names since a display removal might have caused the reinitialization
+                refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+
+                // Process any pending display switch with the new list of displays
+                if (switch_display_event->peek()) {
+                  display_p = std::clamp(*switch_display_event->pop(), 0, (int) display_names.size() - 1);
+                }
+
+                // reset_display() will sleep between retries
+                reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+                if (disp) {
+                  break;
+                }
+              }
+              if (!disp) {
+                capture_failure = "Could not reinitialize the video capture display";
+                return;
+              }
+
+              display_wp = disp;
+
+              reinit_event.reset();
+              continue;
+            }
+          case platf::capture_e::error:
+          case platf::capture_e::ok:
+          case platf::capture_e::timeout:
+          case platf::capture_e::interrupted:
+            capture_failure = std::format("Video capture stopped (status={})", static_cast<int>(status));
+            return;
+          default:
+            BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
+            capture_failure = std::format("Unrecognized video capture status ({})", static_cast<int>(status));
+            return;
+        }
       }
+    } catch (const std::exception &e) {
+      capture_failure = std::format("Video capture exception: {}", e.what());
+    } catch (...) {
+      capture_failure = "Video capture threw an unknown exception";
     }
   }
 
@@ -2027,7 +2046,7 @@ namespace video {
     return nullptr;
   }
 
-  void encode_run(
+  bool encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
     img_event_t images,
@@ -2036,11 +2055,13 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
-    void *channel_data
+    void *channel_data,
+    const std::shared_ptr<stream::detail::disconnect_state_t> &disconnect
   ) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
-      return;
+      disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not initialize video encoder '{}'", encoder.codec_from_config(config).name));
+      return false;
     }
 
     // As a workaround for NVENC hangs and to generally speed up encoder reinit,
@@ -2076,8 +2097,13 @@ namespace video {
       // allocation which can be freed immediately after convert(), so we do this
       // in a separate scope.
       auto dummy_img = disp->alloc_img();
-      if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
-        return;
+      if (!dummy_img || disp->dummy_img(dummy_img.get())) {
+        disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, "Could not create the initial capture image");
+        return false;
+      }
+      if (session->convert(*dummy_img)) {
+        disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert the initial video image");
+        return false;
       }
     }
 
@@ -2118,7 +2144,8 @@ namespace video {
           frame_timestamp = img->frame_timestamp;
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
-            return;
+            disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert a captured video image");
+            return false;
           }
         } else if (!images->running()) {
           break;
@@ -2127,7 +2154,8 @@ namespace video {
 
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
-        return;
+        disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not encode video frame {} with '{}'", frame_nr - 1, encoder.codec_from_config(config).name));
+        return false;
       }
 
       session->request_normal_frame();
@@ -2136,6 +2164,7 @@ namespace video {
       // This is useful for KVM switch scenarios where mouse may disappear during streaming
       platf::enable_mouse_keys();
     }
+    return true;
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
@@ -2241,6 +2270,7 @@ namespace video {
 
     auto encode_device = make_encode_device(*disp, encoder, ctx.config);
     if (!encode_device) {
+      ctx.disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not create the video encoding device");
       return std::nullopt;
     }
 
@@ -2260,12 +2290,14 @@ namespace video {
 
     auto session = make_encode_session(disp, encoder, ctx.config, img.width, img.height, std::move(encode_device));
     if (!session) {
+      ctx.disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not initialize video encoder '{}'", encoder.codec_from_config(ctx.config).name));
       return std::nullopt;
     }
 
     // Load the initial image to prepare for encoding
     if (session->convert(img)) {
       BOOST_LOG(error) << "Could not convert initial image"sv;
+      ctx.disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert the initial video image");
       return std::nullopt;
     }
 
@@ -2312,11 +2344,19 @@ namespace video {
     }
 
     if (!disp) {
+      for (const auto &ctx : synced_session_ctxs) {
+        if (!ctx->shutdown_event->peek()) {
+          ctx->disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, "Could not initialize the video capture display");
+        }
+      }
       return encode_e::error;
     }
 
     auto img = disp->alloc_img();
     if (!img || disp->dummy_img(img.get())) {
+      for (const auto &ctx : synced_session_ctxs) {
+        ctx->disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, "Could not create the initial capture image");
+      }
       return encode_e::error;
     }
 
@@ -2375,6 +2415,7 @@ namespace video {
 
           if (frame_captured && pos->session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
+            ctx->disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert a captured video image");
             ctx->shutdown_event->raise(true);
 
             continue;
@@ -2387,6 +2428,7 @@ namespace video {
 
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
+            ctx->disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not encode video frame {} with '{}'", ctx->frame_nr - 1, encoder.codec_from_config(ctx->config).name));
             ctx->shutdown_event->raise(true);
 
             continue;
@@ -2414,10 +2456,16 @@ namespace video {
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
       switch (status) {
         case platf::capture_e::reinit:
+          return ec != platf::capture_e::ok ? ec : status;
         case platf::capture_e::error:
         case platf::capture_e::ok:
         case platf::capture_e::timeout:
         case platf::capture_e::interrupted:
+          for (const auto &ctx : synced_session_ctxs) {
+            if (ec == platf::capture_e::ok && !ctx->shutdown_event->peek()) {
+              ctx->disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, std::format("Video capture stopped (status={})", static_cast<int>(status)));
+            }
+          }
           return ec != platf::capture_e::ok ? ec : status;
       }
     }
@@ -2431,15 +2479,22 @@ namespace video {
     std::vector<std::unique_ptr<sync_session_ctx_t>> synced_session_ctxs;
 
     auto &ctx = ref->encode_session_ctx_queue;
+    std::string worker_failure = "Shared capture/encoding worker stopped unexpectedly";
     auto lg = util::fail_guard([&]() {
       ctx.stop();
 
       for (auto &ctx : synced_session_ctxs) {
+        if (!ctx->shutdown_event->peek()) {
+          ctx->disconnect->record(middleware::disconnect_notification_type_e::server_internal_error, worker_failure);
+        }
         ctx->shutdown_event->raise(true);
         ctx->join_event->raise(true);
       }
 
       for (auto &ctx : ctx.unsafe()) {
+        if (!ctx.shutdown_event->peek()) {
+          ctx.disconnect->record(middleware::disconnect_notification_type_e::server_internal_error, worker_failure);
+        }
         ctx.shutdown_event->raise(true);
         ctx.join_event->raise(true);
       }
@@ -2451,103 +2506,125 @@ namespace video {
 
     std::vector<std::string> display_names;
     int display_p = -1;
-    while (encode_run_sync(synced_session_ctxs, ctx, display_names, display_p) == encode_e::reinit) {}
+    try {
+      while (encode_run_sync(synced_session_ctxs, ctx, display_names, display_p) == encode_e::reinit) {}
+    } catch (const std::exception &e) {
+      worker_failure = std::format("Shared capture/encoding worker exception: {}", e.what());
+    } catch (...) {
+      worker_failure = "Shared capture/encoding worker threw an unknown exception";
+    }
   }
 
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    void *channel_data
+    void *channel_data,
+    const std::shared_ptr<stream::detail::disconnect_state_t> &disconnect
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
     auto images = std::make_shared<img_event_t::element_type>();
+    // Stop this session's images before releasing the shared capture worker.
+    decltype(capture_thread_async.ref()) ref;
     auto lg = util::fail_guard([&]() {
       images->stop();
       shutdown_event->raise(true);
     });
 
-    auto ref = capture_thread_async.ref();
-    if (!ref) {
-      return;
-    }
-
-    ref->capture_ctx_queue->raise(capture_ctx_t {images, config});
-
-    if (!ref->capture_ctx_queue->running()) {
-      return;
-    }
-
-    int frame_nr = 1;
-
-    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
-    auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
-
-    // Encoding takes place on this thread
-    platf::adjust_thread_priority(platf::thread_priority_e::high);
-
-    while (!shutdown_event->peek() && images->running()) {
-      // Wait for the main capture event when the display is being reinitialized
-      if (ref->reinit_event.peek()) {
-        std::this_thread::sleep_for(20ms);
-        continue;
-      }
-      // Wait for the display to be ready
-      std::shared_ptr<platf::display_t> display;
-      {
-        auto lg = ref->display_wp.lock();
-        if (ref->display_wp->expired()) {
-          continue;
-        }
-
-        display = ref->display_wp->lock();
-      }
-
-      auto &encoder = *chosen_encoder;
-
-      auto encode_device = make_encode_device(*display, encoder, config);
-      if (!encode_device) {
+    try {
+      ref = capture_thread_async.ref();
+      if (!ref) {
+        disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, "Could not start the video capture worker");
         return;
       }
 
-      // absolute mouse coordinates require that the dimensions of the screen are known
-      touch_port_event->raise(make_port(display.get(), config));
+      ref->capture_ctx_queue->raise(capture_ctx_t {images, config, disconnect});
 
-      // Update client with our current HDR display state
-      hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
-      if (colorspace_is_hdr(encode_device->colorspace)) {
-        if (display->get_hdr_metadata(hdr_info->metadata)) {
-          hdr_info->enabled = true;
-        } else {
-          BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
+      if (!ref->capture_ctx_queue->running()) {
+        disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, "Video capture worker is not running");
+        return;
+      }
+
+      int frame_nr = 1;
+
+      auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
+      auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
+
+      // Encoding takes place on this thread
+      platf::adjust_thread_priority(platf::thread_priority_e::high);
+
+      while (!shutdown_event->peek() && images->running()) {
+        // Wait for the main capture event when the display is being reinitialized
+        if (ref->reinit_event.peek()) {
+          std::this_thread::sleep_for(20ms);
+          continue;
+        }
+        // Wait for the display to be ready
+        std::shared_ptr<platf::display_t> display;
+        {
+          auto lg = ref->display_wp.lock();
+          if (ref->display_wp->expired()) {
+            continue;
+          }
+
+          display = ref->display_wp->lock();
+        }
+
+        auto &encoder = *chosen_encoder;
+
+        auto encode_device = make_encode_device(*display, encoder, config);
+        if (!encode_device) {
+          disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not create the video encoding device");
+          return;
+        }
+
+        // absolute mouse coordinates require that the dimensions of the screen are known
+        touch_port_event->raise(make_port(display.get(), config));
+
+        // Update client with our current HDR display state
+        hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
+        if (colorspace_is_hdr(encode_device->colorspace)) {
+          if (display->get_hdr_metadata(hdr_info->metadata)) {
+            hdr_info->enabled = true;
+          } else {
+            BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
+          }
+        }
+        hdr_event->raise(std::move(hdr_info));
+
+        if (!encode_run(
+              frame_nr,
+              mail,
+              images,
+              config,
+              display,
+              std::move(encode_device),
+              ref->reinit_event,
+              *ref->encoder_p,
+              channel_data,
+              disconnect
+            )) {
+          return;
         }
       }
-      hdr_event->raise(std::move(hdr_info));
-
-      encode_run(
-        frame_nr,
-        mail,
-        images,
-        config,
-        display,
-        std::move(encode_device),
-        ref->reinit_event,
-        *ref->encoder_p,
-        channel_data
-      );
+    } catch (const std::exception &e) {
+      disconnect->record(middleware::disconnect_notification_type_e::server_internal_error, std::format("Video encoding worker exception: {}", e.what()));
+    } catch (...) {
+      disconnect->record(middleware::disconnect_notification_type_e::server_internal_error, "Video encoding worker threw an unknown exception");
     }
   }
 
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    void *channel_data,
+    std::shared_ptr<stream::detail::disconnect_state_t> disconnect
   ) {
     auto idr_events = mail->event<bool>(mail::idr);
 
     idr_events->raise(true);
     if (chosen_encoder->flags & PARALLEL_ENCODING) {
-      capture_async(std::move(mail), config, channel_data);
+      capture_async(std::move(mail), config, channel_data, disconnect);
     } else {
       safe::signal_t join_event;
       auto ref = capture_thread_sync.ref();
@@ -2561,6 +2638,7 @@ namespace video {
         config,
         1,
         channel_data,
+        std::move(disconnect),
       });
 
       // Wait for join signal
@@ -2748,9 +2826,7 @@ namespace video {
 
         auto encoder_codec_name = encoder.codec_from_config(config).name;
 
-        if ((encoder.flags & YUV444_SUPPORT) &&
-            disp->is_codec_supported(encoder_codec_name, config) &&
-            validate_config(disp, encoder, config) >= 0) {
+        if ((encoder.flags & YUV444_SUPPORT) && disp->is_codec_supported(encoder_codec_name, config) && validate_config(disp, encoder, config) >= 0) {
           flag_map[encoder_t::YUV444] = true;
         } else {
           flag_map[encoder_t::YUV444] = false;
@@ -2790,9 +2866,7 @@ namespace video {
 
         auto encoder_codec_name = encoder.codec_from_config(config).name;
 
-        if ((encoder.flags & YUV444_SUPPORT) &&
-            disp->is_codec_supported(encoder_codec_name, config) &&
-            validate_config(disp, encoder, config) >= 0) {
+        if ((encoder.flags & YUV444_SUPPORT) && disp->is_codec_supported(encoder_codec_name, config) && validate_config(disp, encoder, config) >= 0) {
           flag_map[encoder_t::DYNAMIC_RANGE_YUV444] = true;
         } else {
           flag_map[encoder_t::DYNAMIC_RANGE_YUV444] = false;
@@ -2922,29 +2996,25 @@ namespace video {
         }
 
         // Skip it if it doesn't support the specified codec at all
-        if ((active_hevc_mode >= 2 && !encoder->hevc[encoder_t::PASSED]) ||
-            (active_av1_mode >= 2 && !encoder->av1[encoder_t::PASSED])) {
+        if ((active_hevc_mode >= 2 && !encoder->hevc[encoder_t::PASSED]) || (active_av1_mode >= 2 && !encoder->av1[encoder_t::PASSED])) {
           pos++;
           continue;
         }
 
         // Skip it if it doesn't support HDR on the specified codec
-        if ((active_hevc_mode == 5 && !encoder->hevc[encoder_t::DYNAMIC_RANGE] && !encoder->hevc[encoder_t::DYNAMIC_RANGE_YUV444]) ||
-            (active_av1_mode == 5 && !encoder->av1[encoder_t::DYNAMIC_RANGE] && !encoder->av1[encoder_t::DYNAMIC_RANGE_YUV444])) {
+        if ((active_hevc_mode == 5 && !encoder->hevc[encoder_t::DYNAMIC_RANGE] && !encoder->hevc[encoder_t::DYNAMIC_RANGE_YUV444]) || (active_av1_mode == 5 && !encoder->av1[encoder_t::DYNAMIC_RANGE] && !encoder->av1[encoder_t::DYNAMIC_RANGE_YUV444])) {
           pos++;
           continue;
         }
 
         // Skip it if it doesn't support HDR on the specified codec
-        if ((active_hevc_mode == 4 && !encoder->hevc[encoder_t::DYNAMIC_RANGE_YUV444]) ||
-            (active_av1_mode == 4 && !encoder->av1[encoder_t::DYNAMIC_RANGE_YUV444])) {
+        if ((active_hevc_mode == 4 && !encoder->hevc[encoder_t::DYNAMIC_RANGE_YUV444]) || (active_av1_mode == 4 && !encoder->av1[encoder_t::DYNAMIC_RANGE_YUV444])) {
           pos++;
           continue;
         }
 
         // Skip it if it doesn't support HDR on the specified codec
-        if ((active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) ||
-            (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE])) {
+        if ((active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) || (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE])) {
           pos++;
           continue;
         }

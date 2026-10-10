@@ -17,6 +17,10 @@ extern "C" {
 
 struct AVPacket;
 
+namespace stream::detail {
+  class disconnect_state_t;
+}
+
 namespace video {
 
   /* Encoding configuration requested by remote client */
@@ -351,7 +355,8 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    void *channel_data,
+    std::shared_ptr<stream::detail::disconnect_state_t> disconnect
   );
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure);

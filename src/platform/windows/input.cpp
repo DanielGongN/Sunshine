@@ -725,21 +725,38 @@ namespace platf {
     return raw && raw->vigem && raw->vigem->preinitialize_gamepads();
   }
 
+  bool uses_sendinput_mouse(input_t &input) {
+    auto *raw = static_cast<input_raw_t *>(input.get());
+    return raw && !raw->keyboard_mouse.interception && !raw->keyboard_mouse.buke_hid;
+  }
+
   /**
    * @brief Calls SendInput() and switches input desktops if required.
    * @param i The `INPUT` struct to send.
    */
-  void send_input(INPUT &i) {
-  retry:
-    auto send = SendInput(1, &i, sizeof(INPUT));
-    if (send != 1) {
-      auto hDesk = syncThreadDesktop();
-      if (_lastKnownInputDesktop != hDesk) {
-        _lastKnownInputDesktop = hDesk;
-        goto retry;
+  std::size_t send_inputs(std::span<INPUT> inputs) {
+    std::size_t sent = 0;
+    while (sent < inputs.size()) {
+      const auto inserted = SendInput(static_cast<UINT>(inputs.size() - sent), inputs.data() + sent, sizeof(INPUT));
+      if (inserted != 0) {
+        sent += inserted;
+        continue;
       }
-      BOOST_LOG(error) << "Couldn't send input"sv;
+
+      const auto win_error = GetLastError();
+      auto desktop = syncThreadDesktop();
+      if (_lastKnownInputDesktop != desktop) {
+        _lastKnownInputDesktop = desktop;
+        continue;
+      }
+      BOOST_LOG(error) << "Couldn't send input (inserted "sv << sent << '/' << inputs.size() << ", Windows error "sv << win_error << ')';
+      break;
     }
+    return sent;
+  }
+
+  void send_input(INPUT &i) {
+    send_inputs(std::span {&i, 1});
   }
 
   /**
@@ -830,6 +847,21 @@ namespace platf {
     mi.dy = deltaY;
 
     send_input(i);
+  }
+
+  std::size_t move_mouse_batch(input_t &input, std::span<const mouse_delta_t> deltas) {
+    if (!uses_sendinput_mouse(input)) {
+      return 0;
+    }
+
+    std::vector<INPUT> events(deltas.size());
+    for (std::size_t index = 0; index < deltas.size(); ++index) {
+      events[index].type = INPUT_MOUSE;
+      events[index].mi.dwFlags = MOUSEEVENTF_MOVE;
+      events[index].mi.dx = deltas[index].x;
+      events[index].mi.dy = deltas[index].y;
+    }
+    return send_inputs(events);
   }
 
   util::point_t get_mouse_loc(input_t &input) {

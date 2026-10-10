@@ -15,8 +15,8 @@ extern "C" {
 #include <bitset>
 #include <chrono>
 #include <cmath>
-#include <list>
 #include <limits>
+#include <list>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -92,6 +92,42 @@ namespace input {
     return true;
   }
 
+  bool detail::preserve_mouse_move(std::uint32_t magic, bool uses_sendinput) {
+    return uses_sendinput && (magic == MOUSE_MOVE_REL_MAGIC_GEN5 || magic == MOUSE_MOVE_ABS_MAGIC);
+  }
+
+  std::vector<std::vector<std::uint8_t>> detail::take_sendinput_relative_batch(std::list<std::vector<std::uint8_t>> &queue, std::size_t max_count) {
+    constexpr std::size_t min_count = 8;
+    constexpr std::size_t batch_limit = 32;
+    const auto limit = std::min(max_count, batch_limit);
+    if (limit < min_count || queue.size() < min_count) {
+      return {};
+    }
+
+    std::size_t count = 0;
+    for (auto it = queue.begin(); it != queue.end() && count < limit; ++it) {
+      if (it->size() < sizeof(NV_REL_MOUSE_MOVE_PACKET)) {
+        break;
+      }
+      const auto *header = reinterpret_cast<const NV_INPUT_HEADER *>(it->data());
+      if (util::endian::little(header->magic) != MOUSE_MOVE_REL_MAGIC_GEN5) {
+        break;
+      }
+      ++count;
+    }
+    if (count < min_count) {
+      return {};
+    }
+
+    std::vector<std::vector<std::uint8_t>> batch;
+    batch.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      batch.push_back(std::move(queue.front()));
+      queue.pop_front();
+    }
+    return batch;
+  }
+
   typedef uint32_t key_press_id_t;
 
   key_press_id_t make_kpid(uint16_t vk, uint8_t flags) {
@@ -159,6 +195,8 @@ namespace input {
     std::uint64_t battery_packets {};
     std::uint64_t arrival_packets {};
     std::uint64_t unknown_packets {};
+    std::uint64_t sendinput_motion_batches {};
+    std::uint64_t sendinput_motion_failed {};
     std::size_t queue_peak {};
     bool has_last_gamepad {};
     std::uint16_t last_gamepad_controller {};
@@ -234,7 +272,15 @@ namespace input {
                     << " motion="sv << input_stats.motion_packets
                     << " battery="sv << input_stats.battery_packets
                     << " arrival="sv << input_stats.arrival_packets
-                    << " unknown="sv << input_stats.unknown_packets;
+                    << " unknown="sv << input_stats.unknown_packets
+                    << " sendinput_motion_batches="sv << input_stats.sendinput_motion_batches
+                    << " sendinput_motion_failed="sv << input_stats.sendinput_motion_failed;
+  }
+
+  void note_sendinput_motion_batch(std::size_t count, std::size_t sent) {
+    std::lock_guard<std::mutex> lg(input_stats_lock);
+    ++input_stats.sendinput_motion_batches;
+    input_stats.sendinput_motion_failed += count - sent;
   }
 
   void note_input_queued(std::size_t bytes, std::size_t queue_size) {
@@ -1963,14 +2009,18 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PNV_INPUT_HEADER dest, PNV_INPUT_HEADER src) {
+  batch_result_e batch(PNV_INPUT_HEADER dest, PNV_INPUT_HEADER src, bool uses_sendinput) {
     // We can only batch if the packet types are the same
     if (dest->magic != src->magic) {
       return batch_result_e::terminate_batch;
     }
 
     // We can only batch certain message types
-    switch (util::endian::little(dest->magic)) {
+    const auto magic = util::endian::little(dest->magic);
+    if (detail::preserve_mouse_move(magic, uses_sendinput)) {
+      return batch_result_e::terminate_batch;
+    }
+    switch (magic) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
         return batch((PNV_REL_MOUSE_MOVE_PACKET) dest, (PNV_REL_MOUSE_MOVE_PACKET) src);
       case MOUSE_MOVE_ABS_MAGIC:
@@ -1995,6 +2045,46 @@ namespace input {
     }
   }
 
+#ifdef _WIN32
+  std::size_t passthrough_sendinput_mouse_batch(std::shared_ptr<input_t> input, std::size_t max_count) {
+    if (!platf::uses_sendinput_mouse(platf_input)) {
+      return 0;
+    }
+
+    std::vector<std::vector<std::uint8_t>> entries;
+    std::size_t queue_size_after_batch = 0;
+    {
+      std::lock_guard<std::mutex> lg(input->input_queue_lock);
+      entries = detail::take_sendinput_relative_batch(input->input_queue, max_count);
+      queue_size_after_batch = input->input_queue.size();
+    }
+    if (entries.empty()) {
+      return 0;
+    }
+
+    std::array<platf::mouse_delta_t, 32> deltas {};
+    bool has_motion = false;
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+      auto *packet = reinterpret_cast<PNV_REL_MOUSE_MOVE_PACKET>(entries[index].data());
+      input::print(packet);
+      note_input_processed(MOUSE_MOVE_REL_MAGIC_GEN5, entries[index].size(), queue_size_after_batch, 0);
+      const auto x = util::endian::big(packet->deltaX);
+      const auto y = util::endian::big(packet->deltaY);
+      deltas[index] = {x, y};
+      has_motion |= x != 0 || y != 0;
+    }
+
+    if (config::input.mouse) {
+      if (has_motion) {
+        update_input_time(input);
+      }
+      const auto sent = platf::move_mouse_batch(platf_input, std::span {deltas.data(), entries.size()});
+      note_sendinput_motion_batch(entries.size(), sent);
+    }
+    return entries.size();
+  }
+#endif
+
   /**
    * @brief Called on a thread pool thread to process one input message.
    * @param input The input context pointer.
@@ -2010,6 +2100,10 @@ namespace input {
     // Lock the input queue while batching, but release it before sending
     // the input to the OS. This avoids potentially lengthy lock contention
     // in the control stream thread while input is being processed by the OS.
+    bool uses_sendinput = false;
+#ifdef _WIN32
+    uses_sendinput = platf::uses_sendinput_mouse(platf_input);
+#endif
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
 
@@ -2019,7 +2113,7 @@ namespace input {
       }
 
       // Pop off the first entry, which we will send
-      entry = input->input_queue.front();
+      entry = std::move(input->input_queue.front());
       payload = (PNV_INPUT_HEADER) entry.data();
       input->input_queue.pop_front();
 
@@ -2029,7 +2123,7 @@ namespace input {
         auto &batchable_entry = *i;
         auto batchable_payload = (PNV_INPUT_HEADER) batchable_entry.data();
 
-        auto batch_result = batch(payload, batchable_payload);
+        auto batch_result = batch(payload, batchable_payload, uses_sendinput);
         if (batch_result == batch_result_e::terminate_batch) {
           // Stop batching
           break;
@@ -2116,6 +2210,13 @@ namespace input {
     auto max_messages = INPUT_DRAIN_MAX_MESSAGES;
     std::size_t processed_messages = 0;
     while (processed_messages < max_messages) {
+#ifdef _WIN32
+      const auto batch_count = passthrough_sendinput_mouse_batch(input, max_messages - processed_messages);
+      if (batch_count != 0) {
+        processed_messages += batch_count;
+        continue;
+      }
+#endif
       if (!passthrough_next_message(input)) {
         bool should_continue = false;
         {

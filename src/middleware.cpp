@@ -102,7 +102,8 @@ namespace middleware {
       msg["event"] = "disconnected";
       msg["message"] = std::string {message};
       msg["data"] = {
-        {"type", static_cast<int>(type)}
+        {"type", static_cast<int>(type)},
+        {"message", std::string {message}}
       };
       return msg;
     }
@@ -427,9 +428,9 @@ namespace middleware {
         BOOST_LOG(info) << "click_gamepad: injecting button="sv << button;
         input::click_gamepad(0, it->second);
       } else if (event_type == "disconnected") {
-        BOOST_LOG(info) << "Middleware requested client disconnect"sv;
-        auto force_event = mail::man->event<bool>(mail::force_disconnect);
-        force_event->raise(true);
+        // Ignore upstream disconnected events until this command is enabled again.
+        // auto force_event = mail::man->event<bool>(mail::force_disconnect);
+        // force_event->raise(true);
       } else if (event_type == "consume_record_create_success") {
         auto pending_msg_id = pending_connected_message_id();
         if (!pending_msg_id) {

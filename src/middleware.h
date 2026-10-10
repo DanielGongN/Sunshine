@@ -19,6 +19,20 @@ namespace middleware {
     other = 0,
     force_timeout = 1,
     standby_timeout = 2,
+    client_requested_stop = 10,
+    client_reported_error = 11,  ///< Reserved for explicit client error reports.
+    peer_disconnected_unknown = 12,
+    control_timeout = 20,
+    stream_start_timeout = 21,
+    upstream_requested_stop = 30,
+    server_requested_stop = 31,
+    server_shutdown = 32,
+    server_capture_error = 40,
+    server_encoder_error = 41,
+    server_internal_error = 42,
+    gateway_error = 43,  ///< Reserved for confirmed fatal gateway failures.
+    server_process_abnormal_exit = 44,  ///< Reserved for an external process monitor.
+    control_protocol_error = 50,
   };
 
   /**
@@ -50,7 +64,8 @@ namespace middleware {
    * @param message Human-readable disconnect reason.
    * @param type Machine-readable disconnect reason type.
    *
-   * Thread-safe. Emits a disconnected event with the reason type in data.type.
+   * Thread-safe. Emits a disconnected event with data.type and data.message.
+   * The top-level message is retained for compatibility.
    */
   void notify_client_disconnected(std::string_view message, disconnect_notification_type_e type = disconnect_notification_type_e::other);
   void notify_client_disconnected(std::u8string_view message, disconnect_notification_type_e type = disconnect_notification_type_e::other);

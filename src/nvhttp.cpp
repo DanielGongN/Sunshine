@@ -1333,7 +1333,7 @@ namespace nvhttp {
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
-    rtsp_stream::terminate_sessions();
+    rtsp_stream::terminate_sessions(middleware::disconnect_notification_type_e::client_requested_stop, "Client requested stream termination through /cancel");
 
     if (proc::proc.running() > 0) {
       proc::proc.terminate();

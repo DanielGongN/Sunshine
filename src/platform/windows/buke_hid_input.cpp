@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/buke_hid_input.cpp
- * @brief Optional Buke HID keyboard and mouse input backend.
+ * @brief Optional Buke keyboard and mouse input backend.
  */
 
 #include "buke_hid_input.h"
@@ -12,13 +12,13 @@
 
 namespace platf {
   namespace {
-    constexpr wchar_t dll_name[] = L"buke_km_hid64.dll";
+    constexpr wchar_t dll_name[] = L"buke_km64.dll";
 
     template<class Function>
     bool resolve_export(HMODULE module, const char *name, Function &function) {
       function = reinterpret_cast<Function>(GetProcAddress(module, name));
       if (!function) {
-        BOOST_LOG(warning) << "Buke HID DLL is missing export " << name;
+        BOOST_LOG(warning) << "Buke DLL is missing export " << name;
       }
       return function != nullptr;
     }
@@ -37,14 +37,14 @@ namespace platf {
     std::array<wchar_t, 32768> buffer {};
     const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
     if (length == 0 || length == buffer.size()) {
-      BOOST_LOG(warning) << "Cannot determine Sunshine executable path for Buke HID";
+      BOOST_LOG(warning) << "Cannot determine Sunshine executable path for Buke";
       return nullptr;
     }
 
     std::wstring path(buffer.data(), length);
     const auto slash = path.find_last_of(L"\\/");
     if (slash == std::wstring::npos) {
-      BOOST_LOG(warning) << "Cannot determine Sunshine executable directory for Buke HID";
+      BOOST_LOG(warning) << "Cannot determine Sunshine executable directory for Buke";
       return nullptr;
     }
 
@@ -56,27 +56,27 @@ namespace platf {
   std::unique_ptr<buke_hid_input_t> buke_hid_input_t::create_from_path(const std::wstring &path) {
     const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-      BOOST_LOG(info) << "Buke HID DLL unavailable; using Windows input";
+      BOOST_LOG(info) << "Buke DLL unavailable; using Windows input";
       return nullptr;
     }
 
     HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!module) {
-      BOOST_LOG(warning) << "Cannot load Buke HID DLL (Windows error " << GetLastError() << ')';
+      BOOST_LOG(warning) << "Cannot load Buke DLL (Windows error " << GetLastError() << ')';
       return nullptr;
     }
 
     auto result = std::unique_ptr<buke_hid_input_t>(new buke_hid_input_t(module));
     if (!result->resolve_exports()) {
-      BOOST_LOG(warning) << "Buke HID DLL has incomplete exports; using Windows input";
+      BOOST_LOG(warning) << "Buke DLL has incomplete exports; using Windows input";
       return nullptr;
     }
     if (!result->init_(0, 0)) {
-      BOOST_LOG(warning) << "Buke HID Init failed; using Windows input";
+      BOOST_LOG(warning) << "Buke Init failed; using Windows input";
       return nullptr;
     }
 
-    BOOST_LOG(info) << "Buke HID keyboard and mouse input enabled";
+    BOOST_LOG(info) << "Buke normal DLL (buke_km64.dll) keyboard and mouse input enabled";
     return result;
   }
 
@@ -107,7 +107,7 @@ namespace platf {
 
   void buke_hid_input_t::move_relative(int dx, int dy) {
     std::lock_guard lock(mutex_);
-    // The HID DLL stores each relative axis in one signed report byte.
+    // Keep relative increments bounded while comparing the Buke DLL backends.
     // Sunshine can batch several mouse packets into a larger delta.
     constexpr std::int64_t max_step = 127;
     const auto magnitude = [](int value) {

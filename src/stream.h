@@ -16,6 +16,7 @@
 #include "audio.h"
 #include "client_mic.h"
 #include "crypto.h"
+#include "middleware.h"
 #include "video.h"
 
 namespace stream {
@@ -75,7 +76,11 @@ namespace stream {
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
     int start(session_t &session, const std::string &addr_string);
-    void stop(session_t &session);
+    void stop(
+      session_t &session,
+      middleware::disconnect_notification_type_e type = middleware::disconnect_notification_type_e::other,
+      std::string_view message = "Streaming session ended without a specific reason"
+    );
     void join(session_t &session);
     state_e state(session_t &session);
     const std::string &client_cert(session_t &session);
