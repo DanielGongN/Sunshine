@@ -910,6 +910,11 @@ editing the `conf` file in a text editor. Use the examples as reference.
             Compatible clients should send 48 kHz Opus microphone audio using the advertised
             10 ms packet duration for low latency. Set the virtual audio device format to
             48 kHz where possible to avoid extra Windows resampling.
+            Sunshine mutes the corresponding virtual recording endpoint when the streaming session
+            ends or no valid microphone audio arrives for 500 ms, and unmutes it when audio resumes.
+            Dedicate this recording endpoint to the client microphone. Keep host system audio and
+            voice-call playback on a separate output to avoid sending those sounds into the call
+            while the client microphone is active.
             @note{This option is only supported on Windows.}
         </td>
     </tr>
@@ -934,6 +939,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             The Windows playback endpoint that receives client microphone audio.
+            Leave empty to automatically select the first usable active Virtual Audio Cable or
+            VB-Audio Cable playback endpoint, ordered by Device ID. A matching active recording
+            endpoint with mute control is required. Ordinary speakers are never selected automatically.
+            An explicit name or Device ID takes priority and does not fall back to another device.
             For Virtual Audio Cable, set this to the playback endpoint, usually
             <code>CABLE Input (VB-Audio Virtual Cable)</code>. Host applications should then use
             the matching recording endpoint, usually <code>CABLE Output (VB-Audio Virtual Cable)</code>.
@@ -947,7 +956,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
     <tr>
         <td>Default</td>
-        <td colspan="2">n/a</td>
+        <td colspan="2">Automatic virtual cable selection</td>
     </tr>
     <tr>
         <td>Example</td>

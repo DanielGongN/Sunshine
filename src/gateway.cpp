@@ -230,7 +230,7 @@ namespace gateway {
         std::lock_guard lock {udp_mutex};
         client_count = udp_clients.size();
         udp_clients.clear();
-        ++udp_client_generation;
+        udp_route_versions.clear();
       }
 
       {
@@ -241,7 +241,21 @@ namespace gateway {
 
       BOOST_LOG(info) << "[gateway][udp-clear] clients="sv << client_count;
       asio::post(udp_ioc, [this]() {
+        media_paused = false;
         schedule_udp_client_sends();
+      });
+    }
+
+    void set_media_paused(bool paused) {
+      asio::post(udp_ioc, [this, paused]() {
+        media_paused = paused;
+        udp_audio_out_queue.clear();
+        udp_video_out_queue.clear();
+        udp_audio_out_bytes = 0;
+        udp_video_out_bytes = 0;
+        if (!paused) {
+          schedule_udp_client_sends();
+        }
       });
     }
 
@@ -292,7 +306,8 @@ namespace gateway {
     std::atomic<bool> stopping;
 
     std::map<std::uint8_t, udp::endpoint> udp_clients;
-    std::uint64_t udp_client_generation {};
+    detail::udp_route_versions_t udp_route_versions;
+    bool media_paused {};
     std::mutex udp_mutex;
 
     std::map<std::uint8_t, std::shared_ptr<udp::socket>> udp_internal_sockets;
@@ -357,7 +372,7 @@ namespace gateway {
     start_udp_forwarder(net::map_port(stream::VIDEO_STREAM_PORT), STREAM_VIDEO);
     start_udp_forwarder(net::map_port(stream::CONTROL_PORT), STREAM_CONTROL);
     start_udp_forwarder(net::map_port(stream::AUDIO_STREAM_PORT), STREAM_AUDIO);
-    if (config::audio.client_mic && !config::audio.client_mic_sink.empty()) {
+    if (config::audio.client_mic) {
       start_udp_forwarder(net::map_port(stream::CLIENT_MIC_STREAM_PORT), STREAM_CLIENT_MIC);
     }
 
@@ -701,7 +716,10 @@ namespace gateway {
       std::lock_guard lock {udp_mutex};
       auto it = udp_clients.find(stream_id);
       if (it != udp_clients.end() && it->second != client_ep) {
-        ++udp_client_generation;
+        udp_route_versions.change(stream_id);
+        BOOST_LOG(info) << "[gateway][udp-rebind] stream="sv << udp_stream_name(stream_id)
+                        << " old="sv << udp_endpoint_to_string(it->second)
+                        << " new="sv << udp_endpoint_to_string(client_ep);
       }
       udp_clients[stream_id] = client_ep;
     }
@@ -724,14 +742,14 @@ namespace gateway {
     }
 
     client_ep = it->second;
-    client_generation = udp_client_generation;
+    client_generation = udp_route_versions.get(stream_id);
     return true;
   }
 
   bool gateway_t::is_current_udp_client(const udp_queued_packet_t &packet) {
     std::lock_guard lock {udp_mutex};
     auto it = udp_clients.find(packet.stream_id);
-    return it != udp_clients.end() && it->second == packet.endpoint && packet.client_generation == udp_client_generation;
+    return it != udp_clients.end() && it->second == packet.endpoint && packet.client_generation == udp_route_versions.get(packet.stream_id);
   }
 
   void gateway_t::log_stale_udp_client_drop(const udp_queued_packet_t &packet) {
@@ -828,6 +846,10 @@ namespace gateway {
       return;
     }
 
+    if (media_paused) {
+      return;
+    }
+
     auto data = std::make_shared<std::vector<std::uint8_t>>();
     data->reserve(UDP_GATEWAY_HEADER_SIZE + payload_len);
     data->push_back(stream_id);
@@ -898,7 +920,7 @@ namespace gateway {
   }
 
   void gateway_t::send_next_audio_packet() {
-    if (udp_audio_out_send_active || stopping.load()) {
+    if (udp_audio_out_send_active || stopping.load() || media_paused) {
       return;
     }
 
@@ -925,7 +947,7 @@ namespace gateway {
   }
 
   void gateway_t::send_next_video_packet() {
-    if (udp_video_out_send_active || stopping.load()) {
+    if (udp_video_out_send_active || stopping.load() || media_paused) {
       return;
     }
 
@@ -955,7 +977,6 @@ namespace gateway {
       return;
     }
   }
-
 
   void gateway_t::start_udp_forwarder(std::uint16_t target_port, std::uint8_t stream_id) {
     if (stream_id == STREAM_CONTROL) {
@@ -1227,6 +1248,13 @@ namespace gateway {
 
     if (impl) {
       impl->clear_udp_clients();
+    }
+  }
+
+  void set_media_paused(bool paused) {
+    std::lock_guard lock {g_client_mutex};
+    if (g_gateway_impl) {
+      g_gateway_impl->set_media_paused(paused);
     }
   }
 

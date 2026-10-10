@@ -8,16 +8,20 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <map>
+#include <mutex>
 
 // platform includes
 #include <Audioclient.h>
 #include <avrt.h>
+#include <endpointvolume.h>
 #include <mmdeviceapi.h>
 #include <newdev.h>
 #include <roapi.h>
 #include <synchapi.h>
 
 // local includes
+#include "src/client_mic_device.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -223,6 +227,7 @@ namespace platf::audio {
   using audio_client_t = util::safe_ptr<IAudioClient, Release<IAudioClient>>;
   using audio_capture_t = util::safe_ptr<IAudioCaptureClient, Release<IAudioCaptureClient>>;
   using audio_render_t = util::safe_ptr<IAudioRenderClient, Release<IAudioRenderClient>>;
+  using endpoint_volume_t = util::safe_ptr<IAudioEndpointVolume, Release<IAudioEndpointVolume>>;
   using wave_format_t = util::safe_ptr<WAVEFORMATEX, co_task_free<WAVEFORMATEX>>;
   using wstring_t = util::safe_ptr<WCHAR, co_task_free<WCHAR>>;
   using handle_t = util::safe_ptr_v2<void, BOOL, CloseHandle>;
@@ -265,6 +270,58 @@ namespace platf::audio {
 
     PROPVARIANT prop;
   };
+
+  std::vector<client_mic::sink_device_t> client_mic_devices(device_enum_t &device_enum, EDataFlow flow) {
+    collection_t collection;
+    auto status = device_enum->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &collection);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Couldn't enumerate client microphone endpoints [0x"sv << util::hex(status).to_string_view() << ']';
+      return {};
+    }
+
+    UINT count = 0;
+    if (FAILED(collection->GetCount(&count))) {
+      return {};
+    }
+
+    std::vector<client_mic::sink_device_t> result;
+    for (UINT i = 0; i < count; ++i) {
+      device_t device;
+      wstring_t id;
+      prop_t properties;
+      if (FAILED(collection->Item(i, &device)) || FAILED(device->GetId(&id)) || FAILED(device->OpenPropertyStore(STGM_READ, &properties))) {
+        continue;
+      }
+
+      auto property = [&](const PROPERTYKEY &key) -> std::string {
+        prop_var_t value;
+        if (FAILED(properties->GetValue(key, &value.prop)) || value.prop.vt != VT_LPWSTR || !value.prop.pwszVal) {
+          return {};
+        }
+        return utf_utils::to_utf8(value.prop.pwszVal);
+      };
+      result.push_back({
+        utf_utils::to_utf8(id.get()),
+        property(PKEY_Device_FriendlyName),
+        property(PKEY_Device_DeviceDesc),
+        property(PKEY_DeviceInterface_FriendlyName),
+      });
+    }
+    return result;
+  }
+
+  std::shared_ptr<client_mic::sink_gate_t> client_mic_gate(const std::string &recording_id) {
+    static std::mutex mutex;
+    static std::map<std::string, std::weak_ptr<client_mic::sink_gate_t>> gates;
+    std::lock_guard lock {mutex};
+    auto &entry = gates[recording_id];
+    auto gate = entry.lock();
+    if (!gate) {
+      gate = std::make_shared<client_mic::sink_gate_t>();
+      entry = gate;
+    }
+    return gate;
+  }
 
   struct format_t {
     WORD channel_count;
@@ -453,7 +510,7 @@ namespace platf::audio {
 
   class client_mic_sink_wasapi_t: public ::platf::client_mic_sink_t {
   public:
-    int init(device_enum_t &device_enum, const std::wstring &device_id, std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t input_channels) {
+    int init(device_enum_t &device_enum, const client_mic::sink_pair_t &pair, std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t input_channels) {
       if (!co_init.ready()) {
         BOOST_LOG(error) << "Couldn't initialize COM for client microphone sink [0x"sv << util::hex(co_init.result()).to_string_view() << ']';
         return -1;
@@ -470,7 +527,24 @@ namespace platf::audio {
         return -1;
       }
 
-      HRESULT status = device_enum->GetDevice(device_id.c_str(), &device);
+      device_t recording_device;
+      HRESULT status = device_enum->GetDevice(utf_utils::from_utf8(pair.recording.id).c_str(), &recording_device);
+      if (SUCCEEDED(status)) {
+        status = recording_device->Activate(IID_IAudioEndpointVolume, CLSCTX_ALL, nullptr, (void **) &recording_volume);
+      }
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't control client microphone recording endpoint [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+
+      gate = client_mic_gate(pair.recording.id);
+      if (!gate->silence([this](bool muted) {
+            return set_muted(muted);
+          })) {
+        return -1;
+      }
+
+      status = device_enum->GetDevice(utf_utils::from_utf8(pair.playback.id).c_str(), &device);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Couldn't open client microphone sink device: [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
@@ -492,18 +566,33 @@ namespace platf::audio {
         }
       }
 
-      status = audio_client->Start();
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Couldn't start client microphone sink rendering [0x"sv << util::hex(status).to_string_view() << ']';
-        return -1;
-      }
-
       return 0;
     }
 
-    capture_e write(const float *samples, std::size_t frames) override {
+    capture_e write(const float *samples, std::size_t frames, const std::function<bool()> &cancelled) override {
+      if (cancelled()) {
+        silence();
+        return capture_e::timeout;
+      }
+      if (!active) {
+        const auto status = audio_client->Start();
+        if (FAILED(status) || !gate->acquire([this](bool muted) {
+              return set_muted(muted);
+            })) {
+          audio_client->Stop();
+          audio_client->Reset();
+          BOOST_LOG(error) << "Couldn't resume client microphone sink rendering"sv;
+          return capture_e::error;
+        }
+        active = true;
+      }
+
       std::size_t frames_written = 0;
       while (frames_written < frames) {
+        if (cancelled()) {
+          silence();
+          return capture_e::timeout;
+        }
         UINT32 padding = 0;
         auto status = audio_client->GetCurrentPadding(&padding);
         if (status == AUDCLNT_E_DEVICE_INVALIDATED) {
@@ -541,7 +630,12 @@ namespace platf::audio {
 
         copy_frames(reinterpret_cast<float *>(buffer), samples + frames_written * input_channels, frames_to_write);
 
-        status = audio_render->ReleaseBuffer(frames_to_write, 0);
+        const auto stopping = cancelled();
+        status = audio_render->ReleaseBuffer(frames_to_write, stopping ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
+        if (stopping) {
+          silence();
+          return capture_e::timeout;
+        }
         if (status == AUDCLNT_E_DEVICE_INVALIDATED) {
           return capture_e::reinit;
         }
@@ -556,10 +650,26 @@ namespace platf::audio {
       return capture_e::ok;
     }
 
-    ~client_mic_sink_wasapi_t() override {
+    void silence() override {
+      if (gate) {
+        const auto muted = [this](bool value) {
+          return set_muted(value);
+        };
+        if (active) {
+          gate->release(muted);
+        } else {
+          gate->silence(muted);
+        }
+      }
       if (audio_client) {
         audio_client->Stop();
+        audio_client->Reset();
       }
+      active = false;
+    }
+
+    ~client_mic_sink_wasapi_t() override {
+      silence();
 
       if (mmcss_task_handle) {
         AvRevertMmThreadCharacteristics(mmcss_task_handle);
@@ -567,6 +677,21 @@ namespace platf::audio {
     }
 
   private:
+    bool set_muted(bool muted) {
+      BOOL current = FALSE;
+      if (SUCCEEDED(recording_volume->GetMute(&current)) && static_cast<bool>(current) == muted) {
+        return true;
+      }
+      const auto status = recording_volume->SetMute(muted, nullptr);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Couldn't "sv << (muted ? "mute"sv : "unmute"sv)
+                         << " client microphone recording endpoint [0x"sv << util::hex(status).to_string_view() << ']';
+        return false;
+      }
+      BOOST_LOG(info) << "Client microphone recording endpoint "sv << (muted ? "muted"sv : "unmuted"sv);
+      return true;
+    }
+
     int try_init(std::uint32_t output_channels) {
       audio_client.reset();
       audio_render.reset();
@@ -653,6 +778,9 @@ namespace platf::audio {
     device_t device;
     audio_client_t audio_client;
     audio_render_t audio_render;
+    endpoint_volume_t recording_volume;
+    std::shared_ptr<client_mic::sink_gate_t> gate;
+    bool active {};
 
     DWORD default_latency_ms {};
     UINT32 buffer_frames {};
@@ -1420,11 +1548,6 @@ namespace platf {
   }
 
   std::unique_ptr<client_mic_sink_t> client_mic_sink(const std::string &sink, std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t channels) {
-    if (sink.empty()) {
-      BOOST_LOG(error) << "Client microphone sink is not configured"sv;
-      return nullptr;
-    }
-
     audio::co_init_t co_init;
     if (!co_init.ready()) {
       BOOST_LOG(error) << "Couldn't initialize COM for client microphone sink discovery [0x"sv << util::hex(co_init.result()).to_string_view() << ']';
@@ -1436,18 +1559,27 @@ namespace platf {
       return nullptr;
     }
 
-    auto matched = control.find_device_id(control.match_all_fields(utf_utils::from_utf8(sink)));
-    if (!matched) {
-      BOOST_LOG(error) << "Couldn't find client microphone sink " << sink;
+    const auto pairs = client_mic::find_sink_pairs(
+      audio::client_mic_devices(control.device_enum, eRender),
+      audio::client_mic_devices(control.device_enum, eCapture),
+      sink
+    );
+    if (pairs.empty()) {
+      BOOST_LOG(error) << "Couldn't find client microphone sink with an unambiguous recording endpoint: "sv
+                       << (sink.empty() ? "automatic virtual cable selection" : sink);
       return nullptr;
     }
 
-    auto writer = std::make_unique<audio::client_mic_sink_wasapi_t>();
-    if (writer->init(control.device_enum, matched->second, sample_rate, frame_size, channels)) {
-      return nullptr;
+    for (const auto &pair : pairs) {
+      auto writer = std::make_unique<audio::client_mic_sink_wasapi_t>();
+      if (!writer->init(control.device_enum, pair, sample_rate, frame_size, channels)) {
+        BOOST_LOG(info) << "Client microphone sink selected: "sv << pair.playback.name
+                        << " ["sv << pair.playback.id << "], recording="sv << pair.recording.name
+                        << " ["sv << pair.recording.id << "]"sv;
+        return writer;
+      }
     }
-
-    return writer;
+    return nullptr;
   }
 
   std::unique_ptr<deinit_t> init() {

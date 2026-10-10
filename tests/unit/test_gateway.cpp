@@ -44,3 +44,24 @@ TEST(GatewayControlAdmissionTests, ReleaseMakesCapacityAvailable) {
   EXPECT_TRUE(admission.try_acquire());
   EXPECT_EQ(admission.in_flight, gateway::detail::CONTROL_MAX_IN_FLIGHT);
 }
+
+TEST(GatewayRouteTests, RebindingOneChannelDoesNotInvalidateAnother) {
+  gateway::detail::udp_route_versions_t versions;
+  const auto control = versions.get(gateway::STREAM_CONTROL);
+  const auto audio = versions.get(gateway::STREAM_AUDIO);
+  versions.change(gateway::STREAM_AUDIO);
+  EXPECT_EQ(versions.get(gateway::STREAM_CONTROL), control);
+  EXPECT_NE(versions.get(gateway::STREAM_AUDIO), audio);
+  versions.change(gateway::STREAM_AUDIO);
+  EXPECT_NE(versions.get(gateway::STREAM_AUDIO), audio);
+}
+
+TEST(GatewayRouteTests, ClearingRoutesInvalidatesEveryChannel) {
+  gateway::detail::udp_route_versions_t versions;
+  versions.change(gateway::STREAM_AUDIO);
+  const auto audio = versions.get(gateway::STREAM_AUDIO);
+  const auto control = versions.get(gateway::STREAM_CONTROL);
+  versions.clear();
+  EXPECT_NE(versions.get(gateway::STREAM_AUDIO), audio);
+  EXPECT_NE(versions.get(gateway::STREAM_CONTROL), control);
+}

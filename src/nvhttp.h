@@ -231,7 +231,10 @@ namespace nvhttp {
    * For architectures where game lifecycle is managed externally.
    * Creates a launch session and registers it for RTSP.
    *
-   * @param stream_params JSON with optional: width, height, fps, appid, rikey, rikeyid,
+   * Display resolution and refresh rate are supplied by Moonlight's RTSP ANNOUNCE;
+   * upstream width, height, and fps fields are ignored.
+   *
+   * @param stream_params JSON with optional: appid, rikey, rikeyid,
    *                       surroundAudioInfo, gcmap, enable_hdr, enable_sops, uniqueid
    * @return RTSP session URL on success, empty string on failure
    */

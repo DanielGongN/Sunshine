@@ -43,7 +43,7 @@ namespace client_mic {
       iv[11] = 'M';
     }
 
-    bool decode_and_write(OpusDecoder *decoder, platf::client_mic_sink_t &sink, const std::string_view &payload, const config_t &config, std::vector<float> &pcm) {
+    bool decode_and_write(OpusDecoder *decoder, platf::client_mic_sink_t &sink, const std::string_view &payload, const config_t &config, std::vector<float> &pcm, const std::function<bool()> &cancelled, bool &decoded) {
       auto decoded_frames = opus_decode_float(
         decoder,
         reinterpret_cast<const unsigned char *>(payload.data()),
@@ -58,7 +58,11 @@ namespace client_mic {
         return true;
       }
 
-      auto status = sink.write(pcm.data(), static_cast<std::size_t>(decoded_frames));
+      decoded = true;
+      if (cancelled()) {
+        return true;
+      }
+      auto status = sink.write(pcm.data(), static_cast<std::size_t>(decoded_frames), cancelled);
       switch (status) {
         case platf::capture_e::ok:
         case platf::capture_e::timeout:
@@ -71,14 +75,17 @@ namespace client_mic {
       }
     }
 
-    bool write_plc(OpusDecoder *decoder, platf::client_mic_sink_t &sink, const config_t &config, std::vector<float> &pcm) {
+    bool write_plc(OpusDecoder *decoder, platf::client_mic_sink_t &sink, const config_t &config, std::vector<float> &pcm, const std::function<bool()> &cancelled) {
       auto decoded_frames = opus_decode_float(decoder, nullptr, 0, pcm.data(), config.frame_size(), 0);
       if (decoded_frames < 0) {
         BOOST_LOG(warning) << "Client microphone Opus PLC failed: "sv << opus_strerror(decoded_frames);
         return true;
       }
 
-      auto status = sink.write(pcm.data(), static_cast<std::size_t>(decoded_frames));
+      if (cancelled()) {
+        return true;
+      }
+      auto status = sink.write(pcm.data(), static_cast<std::size_t>(decoded_frames), cancelled);
       return status == platf::capture_e::ok || status == platf::capture_e::timeout;
     }
 
@@ -98,11 +105,24 @@ namespace client_mic {
            supported_packet_duration(config.packet_duration);
   }
 
-  void receive(safe::mail_t mail, const config_t &config, packet_queue_t packets, crypto::cipher::gcm_t *cipher) {
-    auto shutdown_event = mail->event<bool>(mail::shutdown);
+  void receive(safe::mail_t mail, const config_t &config, packet_queue_t packets, crypto::cipher::gcm_t *cipher, const std::function<bool()> &suspended) {
+    receive(std::move(mail), config, std::move(packets), cipher, [&]() {
+      return platf::client_mic_sink(config::audio.client_mic_sink, config.sample_rate, static_cast<std::uint32_t>(config.frame_size()), static_cast<std::uint32_t>(config.channels));
+    },
+            std::chrono::steady_clock::now,
+            suspended);
+  }
 
-    if (!config.enabled) {
-      shutdown_event->view();
+  void receive(safe::mail_t mail, const config_t &config, packet_queue_t packets, crypto::cipher::gcm_t *cipher, const sink_factory_t &make_sink, const std::function<std::chrono::steady_clock::time_point()> &now, const std::function<bool()> &suspended) {
+    auto shutdown_event = mail->event<bool>(mail::shutdown);
+    const auto cancelled = [&]() {
+      return shutdown_event->peek() || !packets->running();
+    };
+    const auto write_cancelled = [&]() {
+      return cancelled() || (suspended && suspended());
+    };
+
+    if (!config.enabled || cancelled()) {
       return;
     }
 
@@ -122,12 +142,15 @@ namespace client_mic {
       return;
     }
 
-    auto sink = platf::client_mic_sink(config::audio.client_mic_sink, config.sample_rate, static_cast<std::uint32_t>(config.frame_size()), static_cast<std::uint32_t>(config.channels));
+    auto sink = make_sink();
     if (!sink) {
       BOOST_LOG(error) << "Unable to initialize client microphone sink"sv;
-      shutdown_event->view();
       return;
     }
+    auto silence_on_exit = util::fail_guard([&]() {
+      sink->silence();
+      BOOST_LOG(info) << "Client microphone stopped"sv;
+    });
 
     BOOST_LOG(info) << "Client microphone initialized: "sv << config.sample_rate / 1000 << " kHz, "sv
                     << config.channels << " channel(s), "sv
@@ -137,10 +160,36 @@ namespace client_mic {
     std::vector<float> pcm(static_cast<std::size_t>(config.frame_size() * config.channels));
     std::vector<std::uint8_t> plaintext;
     std::optional<std::uint16_t> expected_sequence;
+    std::optional<std::chrono::steady_clock::time_point> last_audio;
     crypto::aes_t iv;
+    bool was_suspended = false;
 
-    while (!shutdown_event->peek()) {
+    while (!cancelled()) {
       auto packet = packets->pop(QUEUE_WAIT);
+      if (cancelled()) {
+        break;
+      }
+      if (suspended && suspended()) {
+        if (!was_suspended) {
+          packets->discard();
+          sink->silence();
+          last_audio.reset();
+          expected_sequence.reset();
+          opus_decoder_ctl(decoder.get(), OPUS_RESET_STATE);
+          BOOST_LOG(info) << "Client microphone suspended during control recovery"sv;
+        }
+        was_suspended = true;
+        continue;
+      }
+      was_suspended = false;
+      const auto current_time = now();
+      if (last_audio && current_time - *last_audio >= IDLE_TIMEOUT) {
+        sink->silence();
+        last_audio.reset();
+        expected_sequence.reset();
+        opus_decoder_ctl(decoder.get(), OPUS_RESET_STATE);
+        BOOST_LOG(info) << "Client microphone idle; silencing recording endpoint"sv;
+      }
       if (!packet) {
         continue;
       }
@@ -163,27 +212,6 @@ namespace client_mic {
       }
 
       const auto sequence = util::endian::big(rtp.sequenceNumber);
-      if (expected_sequence) {
-        const auto delta = sequence_delta(sequence, *expected_sequence);
-        if (delta < 0) {
-          BOOST_LOG(debug) << "Dropping late client microphone packet seq="sv << sequence;
-          continue;
-        }
-
-        if (delta > 0) {
-          if (delta <= MAX_PLC_FRAMES) {
-            BOOST_LOG(debug) << "Client microphone lost "sv << delta << " packet(s), applying Opus PLC"sv;
-            for (auto i = 0; i < delta && !shutdown_event->peek(); ++i) {
-              if (!write_plc(decoder.get(), *sink, config, pcm)) {
-                break;
-              }
-            }
-          } else {
-            BOOST_LOG(warning) << "Client microphone sequence gap too large, resyncing: expected="sv << *expected_sequence << " got="sv << sequence;
-          }
-        }
-      }
-
       std::string_view payload {
         reinterpret_cast<const char *>(packet->data() + sizeof(RTP_PACKET)),
         packet->size() - sizeof(RTP_PACKET)
@@ -208,16 +236,47 @@ namespace client_mic {
         };
       }
 
-      if (!decode_and_write(decoder.get(), *sink, payload, config, pcm)) {
-        BOOST_LOG(info) << "Reinitializing client microphone sink"sv;
-        sink = platf::client_mic_sink(config::audio.client_mic_sink, config.sample_rate, static_cast<std::uint32_t>(config.frame_size()), static_cast<std::uint32_t>(config.channels));
-        if (!sink) {
-          BOOST_LOG(error) << "Couldn't reinitialize client microphone sink"sv;
-          return;
+      // Authenticate first: rejected packets must never open the recording gate,
+      // including by provoking packet-loss concealment for a sequence gap.
+      if (expected_sequence) {
+        const auto delta = sequence_delta(sequence, *expected_sequence);
+        if (delta < 0) {
+          BOOST_LOG(debug) << "Dropping late client microphone packet seq="sv << sequence;
+          continue;
+        }
+        if (delta > 0 && delta <= MAX_PLC_FRAMES) {
+          for (auto i = 0; i < delta && !cancelled(); ++i) {
+            if (!write_plc(decoder.get(), *sink, config, pcm, write_cancelled)) {
+              return;
+            }
+          }
+        } else if (delta > MAX_PLC_FRAMES) {
+          BOOST_LOG(warning) << "Client microphone sequence gap too large, resyncing: expected="sv << *expected_sequence << " got="sv << sequence;
         }
       }
 
-      expected_sequence = static_cast<std::uint16_t>(sequence + 1);
+      bool decoded = false;
+      if (!decode_and_write(decoder.get(), *sink, payload, config, pcm, write_cancelled, decoded)) {
+        sink->silence();
+        if (cancelled()) {
+          break;
+        }
+        BOOST_LOG(info) << "Reinitializing client microphone sink"sv;
+        auto replacement = make_sink();
+        if (!replacement) {
+          BOOST_LOG(error) << "Couldn't reinitialize client microphone sink"sv;
+          return;
+        }
+        sink = std::move(replacement);
+        last_audio.reset();
+        expected_sequence.reset();
+        continue;
+      }
+
+      if (decoded && !write_cancelled()) {
+        last_audio = now();
+        expected_sequence = static_cast<std::uint16_t>(sequence + 1);
+      }
     }
   }
 }  // namespace client_mic

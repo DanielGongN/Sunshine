@@ -25,6 +25,7 @@ extern "C" {
 // local includes
 #include "client_mic.h"
 #include "config.h"
+#include "display_device.h"
 #include "gateway.h"
 #include "globals.h"
 #include "input.h"
@@ -43,6 +44,14 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace rtsp_stream {
+  void detail::apply_client_display_mode(launch_session_t &session, const video::config_t &client_config) {
+    session.width = client_config.width;
+    session.height = client_config.height;
+    session.fps = client_config.framerate;
+    session.fps_x100 = client_config.framerateX100;
+    session.display_mode_pending = false;
+  }
+
   void free_msg(PRTSP_MESSAGE msg) {
     freeMessage(msg);
 
@@ -86,7 +95,7 @@ namespace rtsp_stream {
   using cmd_func_t = std::function<void(rtsp_server_t *server, tcp::socket &, launch_session_t &, msg_t &&)>;
 
   bool client_mic_supported() {
-    return config::audio.client_mic && !config::audio.client_mic_sink.empty();
+    return config::audio.client_mic;
   }
 
   void print_msg(PRTSP_MESSAGE msg);
@@ -448,6 +457,15 @@ namespace rtsp_stream {
     }
 
     void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+      if (std::string_view {req->message.request.command} == "ANNOUNCE"sv) {
+        const auto current = launch_event.view();
+        if (!current || current->id != session.id) {
+          respond(sock, session, nullptr, 409, "Conflict", req->sequenceNumber, {});
+          boost::system::error_code ec;
+          sock.shutdown(boost::asio::socket_base::shutdown_type::shutdown_both, ec);
+          return;
+        }
+      }
       auto func = _map_cmd_cb.find(req->message.request.command);
       if (func != std::end(_map_cmd_cb)) {
         func->second(this, sock, session, std::move(req));
@@ -471,7 +489,7 @@ namespace rtsp_stream {
 
       auto socket = std::move(next_socket);
 
-      auto launch_session {launch_event.view(0s)};
+      auto launch_session {launch_event.view()};
       if (launch_session) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
@@ -504,25 +522,32 @@ namespace rtsp_stream {
      *       the session will be discarded.
      * @param launch_session Streaming session information.
      */
-    void session_raise(std::shared_ptr<launch_session_t> launch_session) {
+    bool session_raise(std::shared_ptr<launch_session_t> launch_session) {
       // If a launch event is still pending, don't overwrite it.
-      if (launch_event.view(0s)) {
-        return;
+      const auto id = launch_session->id;
+      if (!launch_event.raise(std::move(launch_session))) {
+        BOOST_LOG(warning) << "[rtsp][launch-busy] rejected_session="sv << id;
+        return false;
       }
 
-      // Raise the new launch session to prepare for the RTSP handshake
-      launch_event.raise(std::move(launch_session));
-
-      // Arm the timer to expire this launch session if the client times out
-      raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this](const boost::system::error_code &ec) {
-        if (!ec) {
-          auto discarded = launch_event.pop(0s);
-          if (discarded) {
-            BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
-          }
+      // Timer operations belong to the RTSP executor. An old cancellation or
+      // expiration must never remove a newly admitted launch.
+      asio::post(io_context, [this, id]() {
+        const auto current = launch_event.view();
+        if (!current || current->id != id) {
+          return;
         }
+        armed_session_id = id;
+        raised_timer.expires_after(config::stream.ping_timeout);
+        raised_timer.async_wait([this, id](const boost::system::error_code &ec) {
+          if (!ec) {
+            if (auto discarded = launch_event.clear(id)) {
+              BOOST_LOG(info) << "[rtsp][launch-timeout] session="sv << id;
+            }
+          }
+        });
       });
+      return true;
     }
 
     /**
@@ -532,14 +557,12 @@ namespace rtsp_stream {
     void session_clear(uint32_t launch_session_id) {
       // We currently only support a single pending RTSP session,
       // so the ID should always match the one for that session.
-      auto launch_session = launch_event.view(0s);
-      if (launch_session) {
-        if (launch_session->id != launch_session_id) {
-          BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
-        } else {
-          raised_timer.cancel();
-          launch_event.pop();
-        }
+      if (launch_event.clear(launch_session_id)) {
+        asio::post(io_context, [this, launch_session_id]() {
+          if (armed_session_id == launch_session_id) {
+            raised_timer.cancel();
+          }
+        });
       }
     }
 
@@ -559,7 +582,7 @@ namespace rtsp_stream {
       });
     }
 
-    safe::event_t<std::shared_ptr<launch_session_t>> launch_event;
+    detail::launch_slot_t launch_event;
 
     /**
      * @brief Clear launch sessions.
@@ -651,14 +674,19 @@ namespace rtsp_stream {
     boost::asio::io_context io_context;
     tcp::acceptor acceptor {io_context};
     boost::asio::steady_timer raised_timer {io_context};
+    std::uint32_t armed_session_id {};
 
     std::shared_ptr<socket_t> next_socket;
   };
 
   rtsp_server_t server {};
 
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
-    server.session_raise(std::move(launch_session));
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
+    return server.session_raise(std::move(launch_session));
+  }
+
+  bool launch_session_pending() {
+    return static_cast<bool>(server.launch_event.view());
   }
 
   void launch_session_clear(uint32_t launch_session_id) {
@@ -1110,6 +1138,12 @@ namespace rtsp_stream {
       config.monitor.width = (int) util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
       config.monitor.framerate = (int) util::from_view(args.at("x-nv-video[0].maxFPS"sv));
       config.monitor.framerateX100 = (int) util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv));
+      if (config.monitor.width <= 0 || config.monitor.height <= 0 || config.monitor.framerate <= 0) {
+        BOOST_LOG(warning) << "Client requested invalid video mode: "sv
+                           << config.monitor.width << 'x' << config.monitor.height << " at "sv << config.monitor.framerate << " fps"sv;
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
       // Validate framerateX100 against framerate. Some clients (e.g. Moonlight Android) send the
       // client display's refresh rate as clientRefreshRateX100, which may differ from the requested
       // streaming framerate. Discard framerateX100 if the derived fps is not within 1% of framerate.
@@ -1227,6 +1261,22 @@ namespace rtsp_stream {
 
       respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
       return;
+    }
+
+    if (!server->launch_event.claim_announce(session.id)) {
+      respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
+      return;
+    }
+
+    BOOST_LOG(info) << "[rtsp][video-config] session="sv << session.id
+                    << " resolution="sv << config.monitor.width << 'x' << config.monitor.height
+                    << " fps="sv << config.monitor.framerate << " fps_x100="sv << config.monitor.framerateX100;
+
+    if (session.display_mode_pending) {
+      detail::apply_client_display_mode(session, config.monitor);
+      if (running_session_count() == 0) {
+        display_device::configure_display(config::video, session);
+      }
     }
 
     auto stream_session = stream::session::alloc(config, session);

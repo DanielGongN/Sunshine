@@ -9,6 +9,7 @@
 #include <fstream>
 #include <future>
 #include <queue>
+#include <set>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
@@ -34,8 +35,11 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "stream.h"
+#include "stream_control_diagnostics.h"
 #include "stream_disconnect.h"
 #include "stream_ping.h"
+#include "stream_recovery.h"
+#include "stream_route.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -459,6 +463,21 @@ namespace stream {
   public:
     int bind(net::af_e address_family, std::uint16_t port) {
       _host = net::host_create(address_family, _addr, port);
+      if (_host) {
+        _host->intercept = [](ENetHost *host, ENetEvent *) {
+          if (servicing_server && !host->checksum) {
+            const auto header = detail::observed_disconnect_header({host->receivedData, host->receivedDataLength});
+            if (header) {
+              const auto peer_id = *header & ~(ENET_PROTOCOL_HEADER_FLAG_MASK | ENET_PROTOCOL_HEADER_SESSION_MASK);
+              const auto session_id = (*header & ENET_PROTOCOL_HEADER_SESSION_MASK) >> ENET_PROTOCOL_HEADER_SESSION_SHIFT;
+              if (peer_id < host->peerCount && host->peers[peer_id].incomingSessionID == session_id) {
+                servicing_server->_wire_disconnects.insert(&host->peers[peer_id]);
+              }
+            }
+          }
+          return 0;
+        };
+      }
 
       return !(bool) _host;
     }
@@ -514,6 +533,8 @@ namespace stream {
 
     ENetAddress _addr;
     net::host_t _host;
+    inline static thread_local control_server_t *servicing_server {};
+    std::set<ENetPeer *> _wire_disconnects;
   };
 
   struct broadcast_ctx_t {
@@ -532,6 +553,13 @@ namespace stream {
     udp::socket mic_sock {io_context};
 
     control_server_t control_server;
+
+    struct route_registration_t {
+      std::weak_ptr<detail::media_route_t> route;
+      safe::mail_raw_t::event_t<bool> idr;
+    };
+
+    std::map<std::pair<socket_e, std::string>, route_registration_t> media_routes;
   };
 
   struct session_t {
@@ -547,7 +575,6 @@ namespace stream {
     std::thread micThread;
     std::thread videoThread;
 
-    std::chrono::steady_clock::time_point pingTimeout;
     bool timeout_notification_sent {};
 
     safe::shared_t<broadcast_ctx_t>::ptr_t broadcast_ref;
@@ -619,10 +646,36 @@ namespace stream {
     safe::signal_t controlEnd;
 
     std::atomic<session::state_e> state;
+
+    std::shared_ptr<detail::control_recovery_t> recovery = std::make_shared<detail::control_recovery_t>();
+    std::shared_ptr<detail::media_route_t> video_route = std::make_shared<detail::media_route_t>();
+    std::shared_ptr<detail::media_route_t> audio_route = std::make_shared<detail::media_route_t>();
+    // Written only by the video broadcast worker. A new recovery generation
+    // requires a new IDR even if the previous IDR was interrupted in flight.
+    std::uint64_t video_recovery_generation {};
   };
 
-  bool can_send_av_packet(session_t *session, const udp::endpoint &peer) {
-    return session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && peer.port() != 0;
+  bool can_send_av_packet(session_t *session, const udp::endpoint &peer, std::optional<std::uint64_t> generation = std::nullopt) {
+    return session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && peer.port() != 0 &&
+           (generation ? session->recovery->available(*generation) : session->recovery->available());
+  }
+
+  bool complete_control_payload(std::uint16_t type, std::string_view payload) {
+    return (type != packetTypes[IDX_LOSS_STATS] || payload.size() >= 4 * sizeof(std::int32_t)) &&
+           (type != packetTypes[IDX_INVALIDATE_REF_FRAMES] || payload.size() >= 2 * sizeof(std::int64_t));
+  }
+
+  void valid_control_received(session_t *session) {
+    const auto transition = session->recovery->receive(std::chrono::steady_clock::now(), config::stream.ping_timeout);
+    if (transition == detail::recovery_transition_e::expired) {
+      session::stop(*session, middleware::disconnect_notification_type_e::control_timeout, "Valid control data arrived after the recovery deadline");
+    } else if (transition == detail::recovery_transition_e::recovered) {
+      session->video.idr_events->raise(true);
+      if (session->localAddress.is_loopback()) {
+        gateway::set_media_paused(false);
+      }
+      BOOST_LOG(info) << "[stream][recovery] session="sv << session->launch_session_id << " state=recovered action=request_idr"sv;
+    }
   }
 
   /**
@@ -704,7 +757,7 @@ namespace stream {
       auto session_p = *pos;
 
       // Skip sessions that are already established
-      if (session_p->control.peer) {
+      if (session_p->control.peer || session_p->state != session::state_e::RUNNING) {
         continue;
       }
 
@@ -774,11 +827,32 @@ namespace stream {
         << util::hex_vec(payload) << std::endl
         << "---end data---"sv;
     } else {
-      cb->second(session, payload);
+      if (!complete_control_payload(type, payload)) {
+        return;
+      }
+      // Input and encrypted messages refresh liveness only after authentication.
+      if (!reinjected && type != packetTypes[IDX_INPUT_DATA] && type != packetTypes[IDX_ENCRYPTED]) {
+        valid_control_received(session);
+      }
+      if (session->state == session::state_e::RUNNING) {
+        cb->second(session, payload);
+      }
     }
   }
 
   void control_server_t::iterate(std::chrono::milliseconds timeout) {
+    servicing_server = this;
+    auto service_guard = util::fail_guard([]() {
+      servicing_server = nullptr;
+    });
+    std::map<ENetPeer *, detail::control_peer_snapshot_t> peer_snapshots;
+    {
+      const auto lock = _peer_to_session.lock();
+      const auto now = enet_time_get();
+      for (const auto &[peer, session] : *_peer_to_session) {
+        peer_snapshots.emplace(peer, detail::snapshot_control_peer(*peer, now));
+      }
+    }
     ENetEvent event;
     auto wait = timeout;
     bool processed_any = false;
@@ -811,16 +885,22 @@ namespace stream {
       auto session = get_session(event.peer, event.data);
       if (!session) {
         BOOST_LOG(warning) << "Rejected connection from ["sv << platf::from_sockaddr((sockaddr *) &event.peer->address.address) << "]: it's not properly set up"sv;
+        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+          enet_packet_destroy(event.packet);
+        }
         enet_peer_disconnect_now(event.peer, 0);
         continue;
       }
-
-      session->pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
       switch (event.type) {
         case ENET_EVENT_TYPE_RECEIVE:
           {
             net::packet_t packet {event.packet};
+
+            if (packet->dataLength < sizeof(std::uint16_t)) {
+              BOOST_LOG(warning) << "Dropping truncated control packet"sv;
+              break;
+            }
 
             auto type = *(std::uint16_t *) packet->data;
             std::string_view payload {(char *) packet->data + sizeof(type), packet->dataLength - sizeof(type)};
@@ -843,13 +923,32 @@ namespace stream {
           }
           break;
         case ENET_EVENT_TYPE_CONNECT:
+          _wire_disconnects.erase(event.peer);
           ++connect_events;
+          {
+            const auto budget = detail::control_transport_timeout(config::stream.ping_timeout);
+            enet_peer_timeout(event.peer, ENET_PEER_TIMEOUT_LIMIT, budget, budget);
+            BOOST_LOG(info) << "[control][recovery-budget] application_ms="sv << config::stream.ping_timeout.count()
+                            << " transport_ms="sv << budget;
+          }
           BOOST_LOG(info) << "[control][event] CLIENT CONNECTED peer="sv
                           << platf::from_sockaddr((sockaddr *) &event.peer->address.address)
                           << " data="sv << event.data;
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
           ++disconnect_events;
+          {
+            const auto snapshot = peer_snapshots[event.peer];
+            BOOST_LOG(warning) << "[control][disconnect-detail] session="sv << session->launch_session_id
+                               << " wire_disconnect_observed="sv << (_wire_disconnects.erase(event.peer) != 0)
+                               << " valid_control_idle_ms="sv << session->recovery->idle_ms(std::chrono::steady_clock::now())
+                               << " ack_age_ms="sv << snapshot.ack_age_ms
+                               << " earliest_timeout_age_ms="sv << snapshot.earliest_timeout_age_ms
+                               << " pending_reliable="sv << snapshot.pending_reliable
+                               << " max_send_attempts="sv << snapshot.max_send_attempts
+                               << " transport_min_ms="sv << snapshot.timeout_minimum
+                               << " transport_max_ms="sv << snapshot.timeout_maximum;
+          }
           BOOST_LOG(warning) << "[control][disconnect] CLIENT DISCONNECTED peer="sv
                              << platf::from_sockaddr((sockaddr *) &event.peer->address.address)
                              << " data="sv << event.data
@@ -857,6 +956,13 @@ namespace stream {
                              << " last_type_hex=0x"sv << util::hex(last_type).to_string_view()
                              << " last_payload="sv << last_payload_len
                              << " session_state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
+          // ENet has already reset this peer and may reuse its slot on the next
+          // service call. Old-session cleanup must never send to that new peer.
+          {
+            auto peer_lock = _peer_to_session.lock();
+            _peer_to_session->erase(event.peer);
+          }
+          session->control.peer = nullptr;
           if (session->state == session::state_e::RUNNING) {
             session::stop(*session, middleware::disconnect_notification_type_e::peer_disconnected_unknown, std::format("Control peer disconnected; client intent is unknown (ENet data={})", event.data));
           }
@@ -1243,6 +1349,9 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_LOSS_STATS], [&](session_t *session, const std::string_view &payload) {
+      if (payload.size() < 4 * sizeof(std::int32_t)) {
+        return;
+      }
       int32_t *stats = (int32_t *) payload.data();
       auto count = stats[0];
       std::chrono::milliseconds t {stats[1]};
@@ -1265,6 +1374,9 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
+      if (payload.size() < 2 * sizeof(std::int64_t)) {
+        return;
+      }
       auto frames = (std::int64_t *) payload.data();
       auto firstFrame = frames[0];
       auto lastFrame = frames[1];
@@ -1280,7 +1392,13 @@ namespace stream {
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
 
+      if (payload.size() < sizeof(std::int32_t)) {
+        return;
+      }
       auto tagged_cipher_length = util::endian::big(*(int32_t *) payload.data());
+      if (tagged_cipher_length < crypto::cipher::tag_size || static_cast<std::size_t>(tagged_cipher_length) > payload.size() - sizeof(std::int32_t)) {
+        return;
+      }
       std::string_view tagged_cipher {payload.data() + sizeof(tagged_cipher_length), (size_t) tagged_cipher_length};
 
       std::vector<uint8_t> plaintext;
@@ -1302,18 +1420,28 @@ namespace stream {
         std::copy(payload.end() - 16, payload.end(), std::begin(iv));
       }
 
+      if (plaintext.size() < sizeof(NV_INPUT_HEADER)) {
+        return;
+      }
+      valid_control_received(session);
+      if (session->state != session::state_e::RUNNING) {
+        return;
+      }
       input::passthrough(session->input, std::move(plaintext));
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_ENCRYPTED]"sv;
 
+      if (payload.size() + sizeof(std::uint16_t) < sizeof(control_encrypted_t)) {
+        return;
+      }
       auto header = (control_encrypted_p) (payload.data() - 2);
 
       auto length = util::endian::little(header->length);
       auto seq = util::endian::little(header->seq);
 
-      if (length < (16 + 4 + 4)) {
+      if (length < (16 + 4 + 4) || static_cast<std::size_t>(length) + sizeof(std::uint16_t) > payload.size()) {
         BOOST_LOG(warning) << "Control: Runt packet"sv;
         return;
       }
@@ -1356,13 +1484,30 @@ namespace stream {
         return;
       }
 
-      auto type = *(std::uint16_t *) plaintext.data();
-      std::string_view next_payload {(char *) plaintext.data() + 4, plaintext.size() - 4};
+      if (plaintext.size() < sizeof(control_header_v2)) {
+        return;
+      }
+      control_header_v2 inner_header;
+      std::memcpy(&inner_header, plaintext.data(), sizeof(inner_header));
+      const auto type = util::endian::little(inner_header.type);
+      const auto payload_length = util::endian::little(inner_header.payloadLength);
+      if (payload_length != plaintext.size() - sizeof(inner_header)) {
+        return;
+      }
+      std::string_view next_payload {(char *) plaintext.data() + sizeof(inner_header), payload_length};
+      if (!server->_map_type_cb.contains(type) || !complete_control_payload(type, next_payload) || (type == packetTypes[IDX_INPUT_DATA] && next_payload.size() < sizeof(NV_INPUT_HEADER))) {
+        return;
+      }
 
       if (type == packetTypes[IDX_ENCRYPTED]) {
         BOOST_LOG(error) << "[control][stop] reason=bad_nested_encrypted seq="sv << seq
                          << " plaintext_size="sv << plaintext.size();
         session::stop(*session, middleware::disconnect_notification_type_e::control_protocol_error, std::format("Nested encrypted control message is invalid (seq={}, plaintext_size={})", seq, plaintext.size()));
+        return;
+      }
+
+      valid_control_received(session);
+      if (session->state != session::state_e::RUNNING) {
         return;
       }
 
@@ -1411,6 +1556,18 @@ namespace stream {
 
           auto session = *pos;
 
+          if (session->state == session::state_e::RUNNING && session->control.peer) {
+            const auto transition = session->recovery->poll(now, config::stream.ping_timeout);
+            if (transition == detail::recovery_transition_e::waiting) {
+              input::reset(session->input);
+              if (session->localAddress.is_loopback()) {
+                gateway::set_media_paused(true);
+              }
+              BOOST_LOG(info) << "[stream][recovery] session="sv << session->launch_session_id
+                              << " state=waiting idle_ms="sv << session->recovery->idle_ms(now);
+            }
+          }
+
           // Timeout detection starts once the session is running and the control channel is connected.
           if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && session->control.peer) {
             auto timeout_state = input::get_timeout_state(session->input);
@@ -1451,7 +1608,7 @@ namespace stream {
             }
           }
 
-          if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && now > session->pingTimeout) {
+          if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && session->recovery->idle_ms(now) >= config::stream.ping_timeout.count()) {
             auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
             BOOST_LOG(warning) << "[control][stop] reason=ping_timeout address="sv << address << " state="sv << static_cast<int>(session->state.load(std::memory_order_acquire));
             session::stop(*session, session->control.peer ? middleware::disconnect_notification_type_e::control_timeout : middleware::disconnect_notification_type_e::stream_start_timeout, std::format("Control channel timed out after {} ms (peer={}); root cause is unknown", config::stream.ping_timeout.count(), address));
@@ -1642,6 +1799,27 @@ namespace stream {
           return;
         }
 
+        if (bytes == sizeof(SS_PING) && socket_type != socket_e::mic) {
+          const auto ping = reinterpret_cast<PSS_PING>(buf[buf_elem].data());
+          const std::string token {ping->payload, sizeof(ping->payload)};
+          const auto registration = ctx.media_routes.find({socket_type, token});
+          if (registration != ctx.media_routes.end()) {
+            if (const auto route = registration->second.route.lock()) {
+              const auto previous = route->snapshot();
+              if (route->rebind(token, peer)) {
+                if (registration->second.idr) {
+                  registration->second.idr->raise(true);
+                }
+                BOOST_LOG(info) << "[stream][media-rebind] type="sv << type_name
+                                << " old="sv << udp_endpoint_to_string(previous.peer)
+                                << " new="sv << udp_endpoint_to_string(peer);
+              }
+              return;
+            }
+            ctx.media_routes.erase(registration);
+          }
+        }
+
         if (socket_type == socket_e::mic && bytes > sizeof(RTP_PACKET)) {
           auto peer_key = udp_endpoint_to_string(peer);
           auto packet_queue = peer_to_mic_packet_queue.find(peer_key);
@@ -1762,10 +1940,18 @@ namespace stream {
       }
 
       auto session = (session_t *) packet->channel_data;
-      if (!can_send_av_packet(session, session->video.peer)) {
+      auto destination = session->video_route->snapshot();
+      const auto recovery_generation = session->recovery->generation();
+      if (!can_send_av_packet(session, destination.peer, recovery_generation)) {
         BOOST_LOG(debug) << "[stream][video-drop] reason=no_active_client state="sv << static_cast<int>(session->state.load(std::memory_order_acquire))
-                         << " peer="sv << udp_endpoint_to_string(session->video.peer);
+                         << " peer="sv << udp_endpoint_to_string(destination.peer);
         continue;
+      }
+      if (session->video_recovery_generation != recovery_generation) {
+        if (!packet->is_idr()) {
+          continue;
+        }
+        session->video_recovery_generation = recovery_generation;
       }
 
       frame_network_latency_logger.first_point_now();
@@ -1920,7 +2106,7 @@ namespace stream {
           auto shards = fec::encode(current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
           frame_fec_latency_logger.second_point_now_and_log();
 
-          auto peer_address = session->video.peer.address();
+          auto peer_address = destination.peer.address();
           auto batch_info = platf::batched_send_info_t {
             shards.headers.begin(),
             shards.prefixsize,
@@ -1930,8 +2116,8 @@ namespace stream {
             0,
             (uintptr_t) sock.native_handle(),
             peer_address,
-            session->video.peer.port(),
-            session->video.source_address,
+            destination.peer.port(),
+            destination.source,
           };
 
           size_t next_shard_to_send = 0;
@@ -1984,6 +2170,9 @@ namespace stream {
             }
 
             if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
+              if (!can_send_av_packet(session, destination.peer, recovery_generation)) {
+                break;
+              }
               // Do pacing within the frame.
               // Also trigger pacing before the first send_batch() of the frame
               // to account for the last send_batch() of the previous frame.
@@ -2005,6 +2194,9 @@ namespace stream {
               batch_info.block_count = current_batch_size;
 
               frame_send_batch_latency_logger.first_point_now();
+              if (!can_send_av_packet(session, destination.peer, recovery_generation)) {
+                break;
+              }
               // Use a batched send if it's supported on this platform
               if (!platf::send_batch(batch_info)) {
                 // Batched send is not available, so send each packet individually
@@ -2017,8 +2209,8 @@ namespace stream {
                     shards.blocksize,
                     (uintptr_t) sock.native_handle(),
                     peer_address,
-                    session->video.peer.port(),
-                    session->video.source_address,
+                    destination.peer.port(),
+                    destination.source,
                   };
 
                   platf::send(send_info);
@@ -2090,9 +2282,10 @@ namespace stream {
 
       TUPLE_2D_REF(channel_data, packet_data, *packet);
       auto session = (session_t *) channel_data;
-      if (!can_send_av_packet(session, session->audio.peer)) {
+      auto destination = session->audio_route->snapshot();
+      if (!can_send_av_packet(session, destination.peer)) {
         BOOST_LOG(debug) << "[stream][audio-drop] reason=no_active_client state="sv << static_cast<int>(session->state.load(std::memory_order_acquire))
-                         << " peer="sv << udp_endpoint_to_string(session->audio.peer);
+                         << " peer="sv << udp_endpoint_to_string(destination.peer);
         continue;
       }
 
@@ -2117,7 +2310,7 @@ namespace stream {
       session->audio.sequenceNumber++;
       session->audio.timestamp += session->config.audio.packetDuration;
 
-      auto peer_address = session->audio.peer.address();
+      auto peer_address = destination.peer.address();
       try {
         auto send_info = platf::send_info_t {
           (const char *) &audio_packet,
@@ -2126,8 +2319,8 @@ namespace stream {
           (size_t) bytes,
           (uintptr_t) sock.native_handle(),
           peer_address,
-          session->audio.peer.port(),
-          session->localAddress,
+          destination.peer.port(),
+          destination.source,
         };
         platf::send(send_info);
 
@@ -2153,8 +2346,8 @@ namespace stream {
               (size_t) bytes,
               (uintptr_t) sock.native_handle(),
               peer_address,
-              session->audio.peer.port(),
-              session->localAddress,
+              destination.peer.port(),
+              destination.source,
             };
             platf::send(send_info);
             BOOST_LOG(verbose) << "Audio FEC ["sv << (sequenceNumber & ~(RTPA_DATA_SHARDS - 1)) << ' ' << x << "] ::  send..."sv;
@@ -2176,7 +2369,7 @@ namespace stream {
     auto video_port = net::map_port(VIDEO_STREAM_PORT);
     auto audio_port = net::map_port(AUDIO_STREAM_PORT);
     auto mic_port = net::map_port(CLIENT_MIC_STREAM_PORT);
-    auto client_mic_available = config::audio.client_mic && !config::audio.client_mic_sink.empty();
+    auto client_mic_available = config::audio.client_mic;
 
     if (ctx.control_server.bind(address_family, control_port)) {
       BOOST_LOG(error) << "Couldn't bind Control server to port ["sv << control_port << "], likely another process already bound to the port"sv;
@@ -2385,6 +2578,24 @@ namespace stream {
     return -1;
   }
 
+  void retain_media_route(session_t *session, const decltype(broadcast)::ptr_t &ref, socket_e type, const std::shared_ptr<detail::media_route_t> &route, const udp::endpoint &peer, const boost::asio::ip::address &source, const std::string &token, bool gateway_mode) {
+    route->initialize({peer, source}, session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1 ? token : "", gateway_mode);
+    if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1)) {
+      return;
+    }
+    auto &ctx = *ref.get();
+    const std::weak_ptr<detail::media_route_t> weak_route = route;
+    const auto idr = type == socket_e::video ? session->video.idr_events : nullptr;
+    asio::post(ctx.io_context, [&ctx, type, token, weak_route, idr]() {
+      std::erase_if(ctx.media_routes, [](const auto &entry) {
+        return entry.second.route.expired();
+      });
+      if (!weak_route.expired()) {
+        ctx.media_routes[{type, token}] = {weak_route, idr};
+      }
+    });
+  }
+
   void videoThread(session_t *session) {
     platf::set_thread_name("session::video");
     auto fg = util::fail_guard([&]() {
@@ -2400,7 +2611,8 @@ namespace stream {
         return;
       }
 
-      if (!gateway::get_client_ip().empty() && session->video.peer.address().is_loopback()) {
+      const bool gateway_mode = !gateway::get_client_ip().empty() && session->video.peer.address().is_loopback();
+      if (gateway_mode) {
         auto gateway_port = static_cast<std::uint16_t>(
           net::map_port(VIDEO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
         );
@@ -2418,6 +2630,7 @@ namespace stream {
                                       boost::asio::ip::address {boost::asio::ip::address_v6::any()}) :
                                    video_local_endpoint.address();
       session->video.source_address = resolve_video_source_address(session->video.peer, video_bound_address);
+      retain_media_route(session, ref, socket_e::video, session->video_route, session->video.peer, session->video.source_address, session->video.ping_payload, gateway_mode);
 
       // Enable local prioritization and QoS tagging on video traffic if requested by the client
       auto address = session->video.peer.address();
@@ -2444,7 +2657,8 @@ namespace stream {
       if (error < 0) {
         return;
       }
-      if (!gateway::get_client_ip().empty() && session->audio.peer.address().is_loopback()) {
+      const bool gateway_mode = !gateway::get_client_ip().empty() && session->audio.peer.address().is_loopback();
+      if (gateway_mode) {
         auto gateway_port = static_cast<std::uint16_t>(
           net::map_port(AUDIO_STREAM_PORT) + gateway::UDP_FWD_OFFSET
         );
@@ -2457,6 +2671,7 @@ namespace stream {
       // Enable local prioritization and QoS tagging on audio traffic if requested by the client
       auto address = session->audio.peer.address();
       session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+      retain_media_route(session, ref, socket_e::audio, session->audio_route, session->audio.peer, session->localAddress, session->audio.ping_payload, gateway_mode);
 
       BOOST_LOG(debug) << "Start capturing Audio"sv;
       audio::capture(session->mail, session->config.audio, session);
@@ -2501,7 +2716,10 @@ namespace stream {
         session->mail,
         session->config.client_mic,
         session->mic.packets,
-        session->mic.cipher ? &*session->mic.cipher : nullptr
+        session->mic.cipher ? &*session->mic.cipher : nullptr,
+        [recovery = session->recovery]() {
+          return !recovery->available();
+        }
       );
     } catch (const std::exception &e) {
       BOOST_LOG(error) << "Optional client microphone worker exception: "sv << e.what();
@@ -2512,6 +2730,7 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;
+    std::mutex lifecycle_mutex;
 
     state_e state(session_t &session) {
       return session.state.load(std::memory_order_relaxed);
@@ -2536,6 +2755,9 @@ namespace stream {
         return;
       }
 
+      session.recovery->stop();
+      session.video_route->stop();
+      session.audio_route->stop();
       session.shutdown_event->raise(true);
       BOOST_LOG(info) << "[stream][disconnect] session="sv << session.launch_session_id
                       << " type="sv << static_cast<int>(reason->type)
@@ -2573,6 +2795,7 @@ namespace stream {
       input::reset(session.input);
 
       // If this is the last session, invoke the platform callbacks
+      std::lock_guard lifecycle_lock {lifecycle_mutex};
       if (--running_sessions == 0) {
         gateway::clear_udp_clients();
         middleware::notify_client_state(false);
@@ -2607,12 +2830,6 @@ namespace stream {
       session.control.expected_peer_address = addr_string;
       BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
 
-      // Insert this session into the session list
-      {
-        auto lg = session.broadcast_ref->control_server._sessions.lock();
-        session.broadcast_ref->control_server._sessions->push_back(&session);
-      }
-
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video.peer.address(addr);
       session.video.peer.port(0);
@@ -2621,7 +2838,23 @@ namespace stream {
       session.mic.peer.address(addr);
       session.mic.peer.port(0);
 
-      session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
+      session.recovery->start(std::chrono::steady_clock::now());
+
+      // Reserve the running count before exposing the session or starting its
+      // workers, so the old session's final callbacks cannot clear new routes.
+      std::lock_guard lifecycle_lock {lifecycle_mutex};
+      if (++running_sessions == 1) {
+        gateway::set_media_paused(false);
+        middleware::notify_client_state(true);
+        platf::streaming_will_start();
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+        system_tray::update_tray_playing(proc::proc.get_last_run_app_name());
+#endif
+      }
+      {
+        auto lg = session.broadcast_ref->control_server._sessions.lock();
+        session.broadcast_ref->control_server._sessions->push_back(&session);
+      }
 
       session.audioThread = std::thread {audioThread, &session};
       if (session.config.client_mic.enabled) {
@@ -2634,15 +2867,6 @@ namespace stream {
       // Queue the connected event before workers can report an immediate failure.
       middleware::notify_client_connected();
       session.state.store(state_e::RUNNING, std::memory_order_release);
-
-      // If this is the first session, invoke the platform callbacks
-      if (++running_sessions == 1) {
-        middleware::notify_client_state(true);
-        platf::streaming_will_start();
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-        system_tray::update_tray_playing(proc::proc.get_last_run_app_name());
-#endif
-      }
 
       return 0;
     }

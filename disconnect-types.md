@@ -7,6 +7,7 @@
 | **0** | `unknown` | 原因未知，证据不足时兜底 |
 | **1** | `force_timeout` | 保留现有挂机超时通知 |
 | **2** | `standby_timeout` | 保留现有无操作超时通知 |
+| **3** | `game_process_exit` | 游戏进程退出，断开连接 (agent服务触发)|
 | **10** | `client_requested_stop` | 客户端明确请求退出串流 |
 | **11** | `client_reported_error` | 客户端明确报告解码失败、渲染失败等异常并结束串流 |
 | **12** | `peer_disconnected_unknown` | 收到对端断开事件，但无法确定是主动退出还是异常后的清理 |

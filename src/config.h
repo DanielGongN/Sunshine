@@ -169,7 +169,7 @@ namespace config {
     bool stream;  ///< Enable audio streaming to clients
     bool install_steam_drivers;  ///< Install Steam audio drivers for enhanced compatibility
     bool client_mic;  ///< Enable client microphone uplink
-    std::string client_mic_sink;  ///< Audio render endpoint used to feed the client microphone into the host
+    std::string client_mic_sink;  ///< Client microphone playback endpoint; empty selects an available virtual cable
   };
 
   constexpr int ENCRYPTION_MODE_NEVER = 0;  // Never use video encryption, even if the client supports it

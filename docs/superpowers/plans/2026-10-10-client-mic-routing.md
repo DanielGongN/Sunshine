@@ -23,9 +23,9 @@
 
 **Interfaces:** Endpoint metadata contains ID, friendly name, description, and adapter. Selection returns playback/recording pairs. Gate ownership tracks active writers by recording-device ID.
 
-- [ ] Test VAC line matching, VB cable matching, ambiguous pairs, ordinary speakers, and stable ID ordering.
-- [ ] Implement the matching policy and active-writer counter.
-- [ ] Verify that releasing one writer does not close another writer's gate.
+- [x] Test VAC line matching, VB cable matching, ambiguous pairs, ordinary speakers, and stable ID ordering.
+- [x] Implement the matching policy and active-writer counter.
+- [x] Verify that releasing one writer does not close another writer's gate.
 
 ### Task 2: Windows discovery and mute lifecycle
 
@@ -33,10 +33,10 @@
 
 **Interfaces:** The microphone sink gains `silence()` and a cancellation callback for `write()`. The platform factory retains its configured-name/ID argument; an empty value enables discovery.
 
-- [ ] Enumerate active render/capture endpoints and apply Task 1 matching.
-- [ ] For automatic mode, try candidate pairs in ID order until initialization succeeds; explicit failures retain clear errors.
-- [ ] Activate recording-endpoint volume control. Initialize muted, unmute on valid writes, mute on the final active writer's silence, and stop/reset the render client.
-- [ ] Remove nonempty-sink gates from capability advertisement and socket setup.
+- [x] Enumerate active render/capture endpoints and apply Task 1 matching.
+- [x] For automatic mode, try candidate pairs in ID order until initialization succeeds; explicit failures retain clear errors.
+- [x] Activate recording-endpoint volume control. Initialize muted, unmute on valid writes, mute on the final active writer's silence, and stop/reset the render client.
+- [x] Remove nonempty-sink gates from capability advertisement and socket setup.
 
 ### Task 3: Receiver shutdown, idle, and resume
 
@@ -44,16 +44,20 @@
 
 **Interfaces:** Add a receiver overload accepting a sink factory for deterministic tests; normal callers keep the existing signature.
 
-- [ ] Recheck shutdown and packet-queue closure after waits and before writes.
-- [ ] Authenticate before PLC; only successfully decoded audio keeps the channel active.
-- [ ] Silence after 500 ms with no valid audio, reset sequence/decoder state, and resume on new valid packets.
-- [ ] Use a fake sink to verify idle, resume, queued-packet shutdown, queue closure, and failed authentication.
+- [x] Recheck shutdown and packet-queue closure after waits and before writes.
+- [x] Authenticate before PLC; only successfully decoded audio keeps the channel active.
+- [x] Silence after 500 ms with no valid audio, reset sequence/decoder state, and resume on new valid packets.
+- [x] Use a fake sink to verify idle, resume, queued-packet shutdown, queue closure, and failed authentication.
 
 ### Task 4: Documentation and verification
 
 **Files:** `docs/configuration.md`, `src/config.h`, `src_assets/common/assets/web/public/assets/locale/en.json`.
 
-- [ ] Explain automatic selection, dedicated virtual recording endpoint, mute-on-close, and separate QQ playback routing.
-- [ ] Format changed C++ with `.clang-format`.
-- [ ] Build `test_sunshine` and Sunshine with the existing UCRT64 build configuration.
-- [ ] Run focused microphone, stream-ping, gateway, and configuration tests; inspect the final diff.
+- [x] Explain automatic selection, dedicated virtual recording endpoint, mute-on-close, and separate QQ playback routing.
+- [x] Format changed C++ with `.clang-format`.
+- [x] Build `test_sunshine` and Sunshine with the existing UCRT64 build configuration.
+- [x] Run focused microphone, stream-ping, gateway, and configuration tests; inspect the final diff.
+
+## Validation result
+
+MSYS2/UCRT64 built ws_engine.exe and tests/test_sunshine.exe successfully. The focused run passed 46 of 47 tests, including all 16 ClientMic tests. ConfigConsistencyTest.AllConfigOptionsExistInAllFiles also fails against HEAD versions of its four input files with the identical 18 missing-documentation entries for six unrelated existing options. Driver/QQ behavior still requires a real cloud-host check.

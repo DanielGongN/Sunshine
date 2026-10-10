@@ -368,7 +368,9 @@ namespace display_device {
         case refresh_rate_option_e::automatic:
           {
             if (session.fps >= 0) {
-              config.m_refresh_rate = Rational {static_cast<unsigned int>(session.fps), 1};
+              config.m_refresh_rate = session.fps_x100 > 0 ?
+                                        Rational {static_cast<unsigned int>(session.fps_x100), 100} :
+                                        Rational {static_cast<unsigned int>(session.fps), 1};
             } else {
               BOOST_LOG(error) << "FPS value provided by client session config is invalid: " << session.fps;
               return false;
@@ -832,6 +834,12 @@ namespace display_device {
     config.m_device_id = video_config.output_name;
     config.m_device_prep = *device_prep;
     config.m_hdr_state = parse_hdr_option(video_config, session);
+
+    // Device preparation is needed for encoder probing, but middleware launches
+    // must wait for Moonlight's ANNOUNCE before changing or remapping the mode.
+    if (session.display_mode_pending) {
+      return config;
+    }
 
     if (!parse_resolution_option(video_config, session, config)) {
       // Error already logged

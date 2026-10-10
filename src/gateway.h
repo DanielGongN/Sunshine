@@ -10,6 +10,7 @@
 
 #include "platform/common.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -25,6 +26,24 @@ namespace gateway {
 
       bool try_acquire();
       void release();
+    };
+
+    struct udp_route_versions_t {
+      std::array<std::uint64_t, 256> values {};
+
+      void change(std::uint8_t stream_id) {
+        ++values[stream_id];
+      }
+
+      void clear() {
+        for (auto &value : values) {
+          ++value;
+        }
+      }
+
+      std::uint64_t get(std::uint8_t stream_id) const {
+        return values[stream_id];
+      }
     };
   }  // namespace detail
 
@@ -69,5 +88,8 @@ namespace gateway {
    * @brief Clear recorded UDP client endpoints so queued client-bound packets are dropped.
    */
   void clear_udp_clients();
+
+  /** Drop queued media during control recovery; control traffic remains active. */
+  void set_media_paused(bool paused);
 
 }  // namespace gateway

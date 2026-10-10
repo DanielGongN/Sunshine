@@ -321,6 +321,11 @@ namespace safe {
       return _queue;
     }
 
+    void discard() {
+      std::lock_guard lock {_lock};
+      _queue.clear();
+    }
+
     void stop() {
       std::lock_guard lg {_lock};
 
@@ -330,6 +335,7 @@ namespace safe {
     }
 
     [[nodiscard]] bool running() const {
+      std::lock_guard lock {_lock};
       return _continue;
     }
 
@@ -337,7 +343,7 @@ namespace safe {
     bool _continue {true};
     std::uint32_t _max_elements;
 
-    std::mutex _lock;
+    mutable std::mutex _lock;
     std::condition_variable _cv;
 
     std::vector<T> _queue;

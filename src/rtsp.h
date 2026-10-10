@@ -6,11 +6,18 @@
 
 // standard includes
 #include <atomic>
+#include <mutex>
+#include <utility>
 
 // local includes
 #include "crypto.h"
 #include "middleware.h"
 #include "thread_safe.h"
+
+// forward declarations
+namespace video {
+  struct config_t;
+}
 
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 26;
@@ -42,9 +49,59 @@ namespace rtsp_stream {
     std::string rtsp_url_scheme;
     uint32_t rtsp_iv_counter;
     std::string client_cert;
+
+    bool display_mode_pending {};  ///< Wait for ANNOUNCE before applying a middleware launch's display mode.
+    int fps_x100 {};  ///< Optional validated client refresh rate in hundredths of Hz.
   };
 
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+  namespace detail {
+    /** Complete a middleware launch's pending display mode from validated ANNOUNCE parameters. */
+    void apply_client_display_mode(launch_session_t &session, const video::config_t &client_config);
+
+    class launch_slot_t {
+    public:
+      bool raise(std::shared_ptr<launch_session_t> session) {
+        std::lock_guard lock {_mutex};
+        if (_session) {
+          return false;
+        }
+        _session = std::move(session);
+        _announced = false;
+        return true;
+      }
+
+      std::shared_ptr<launch_session_t> view() const {
+        std::lock_guard lock {_mutex};
+        return _session;
+      }
+
+      std::shared_ptr<launch_session_t> clear(std::uint32_t id) {
+        std::lock_guard lock {_mutex};
+        if (!_session || _session->id != id) {
+          return nullptr;
+        }
+        return std::exchange(_session, nullptr);
+      }
+
+      bool claim_announce(std::uint32_t id) {
+        std::lock_guard lock {_mutex};
+        if (!_session || _session->id != id || _announced) {
+          return false;
+        }
+        _announced = true;
+        return true;
+      }
+
+    private:
+      mutable std::mutex _mutex;
+      std::shared_ptr<launch_session_t> _session;
+      bool _announced {};
+    };
+  }  // namespace detail
+
+  /** Returns false when another RTSP handshake is pending. */
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+  bool launch_session_pending();
 
   /**
    * @brief Clear state for the specified launch session.

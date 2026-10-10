@@ -575,7 +575,9 @@ namespace platf {
 
   class client_mic_sink_t {
   public:
-    virtual capture_e write(const float *samples, std::size_t frames) = 0;
+    virtual capture_e write(const float *samples, std::size_t frames, const std::function<bool()> &cancelled) = 0;
+
+    virtual void silence() = 0;
 
     virtual ~client_mic_sink_t() = default;
   };

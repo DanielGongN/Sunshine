@@ -213,6 +213,8 @@ namespace nvhttp {
 
   // Pending stream config set by middleware client_connect, consumed by serverinfo
   std::optional<nlohmann::json> pending_stream_config;
+  std::mutex pending_stream_config_mutex;
+  std::mutex launch_preparation_mutex;
 
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
@@ -401,13 +403,21 @@ namespace nvhttp {
   }
 
   std::string start_stream_session(const nlohmann::json &params) {
+    std::lock_guard launch_lock {launch_preparation_mutex};
+    if (rtsp_stream::launch_session_pending()) {
+      BOOST_LOG(warning) << "[launch] RTSP handshake pending; retaining middleware configuration"sv;
+      return {};
+    }
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
     launch_session->id = ++session_id_counter;
 
-    // Extract launch parameters from JSON and use defaults for missing values.
-    launch_session->width = params.value("width", 1920);
-    launch_session->height = params.value("height", 1080);
-    launch_session->fps = params.value("fps", 60);
+    // The platform's mode is not authoritative. Moonlight supplies it in ANNOUNCE.
+    launch_session->width = 0;
+    launch_session->height = 0;
+    launch_session->fps = 0;
+    launch_session->display_mode_pending = true;
+
+    // Extract the remaining launch parameters from JSON.
     launch_session->appid = params.value("appid", 0);
     launch_session->unique_id = params.value("uniqueid", "middleware");
     launch_session->enable_sops = params.value("enable_sops", 0);
@@ -450,7 +460,7 @@ namespace nvhttp {
     launch_session->mic_ping_payload = util::hex_vec(raw_payload);
     RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
 
-    // Prepare display and probe encoders
+    // Prepare the display and probe encoders without applying a pending display mode.
     bool revert_display = (rtsp_stream::running_session_count() == 0);
     if (revert_display) {
       display_device::configure_display(config::video, *launch_session);
@@ -464,13 +474,17 @@ namespace nvhttp {
     auto rtsp_port = net::map_port(rtsp_stream::RTSP_SETUP_PORT);
     auto rtsp_url = std::format("{}127.0.0.1:{}", launch_session->rtsp_url_scheme, rtsp_port);
 
-    rtsp_stream::launch_session_raise(launch_session);
+    if (!rtsp_stream::launch_session_raise(launch_session)) {
+      BOOST_LOG(warning) << "[start_stream_session] another RTSP handshake is pending"sv;
+      return "";
+    }
     BOOST_LOG(info) << "[start_stream_session] session created, RTSP URL: "sv << rtsp_url;
 
     return rtsp_url;
   }
 
   void set_pending_stream_config(const nlohmann::json &config) {
+    std::lock_guard lock {pending_stream_config_mutex};
     pending_stream_config = config;
     BOOST_LOG(info) << "[nvhttp] stored pending stream config"sv;
   }
@@ -1054,12 +1068,22 @@ namespace nvhttp {
 
     // Auto-create a stream session from the config cached by middleware client_connect.
     if constexpr (std::is_same_v<SunshineHTTPS, T>) {
-      if (!last_verified_client_cert.empty() && rtsp_stream::running_session_count() == 0 && pending_stream_config) {
-        BOOST_LOG(info) << "[serverinfo] pending stream config detected; creating session"sv;
-        auto rtsp_url = start_stream_session(*pending_stream_config);
-        pending_stream_config.reset();  // consumed
-        if (rtsp_url.empty()) {
-          BOOST_LOG(warning) << "[serverinfo] session creation failed"sv;
+      if (!last_verified_client_cert.empty() && rtsp_stream::running_session_count() == 0) {
+        std::optional<nlohmann::json> pending;
+        {
+          std::lock_guard lock {pending_stream_config_mutex};
+          pending = pending_stream_config;
+        }
+        if (pending) {
+          BOOST_LOG(info) << "[serverinfo] pending stream config detected; creating session"sv;
+          if (start_stream_session(*pending).empty()) {
+            BOOST_LOG(warning) << "[serverinfo] session creation failed; retaining pending config"sv;
+          } else {
+            std::lock_guard lock {pending_stream_config_mutex};
+            if (pending_stream_config == pending) {
+              pending_stream_config.reset();
+            }
+          }
         }
       }
     }
@@ -1116,6 +1140,7 @@ namespace nvhttp {
   }
 
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
+    std::lock_guard launch_lock {launch_preparation_mutex};
     BOOST_LOG(info) << "[launch] request received"sv;
     print_req<SunshineHTTPS>(request);
 
@@ -1137,6 +1162,12 @@ namespace nvhttp {
       }
     });
 
+    if (rtsp_stream::launch_session_pending()) {
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "Another RTSP handshake is pending; retry launch");
+      tree.put("root.gamesession", 0);
+      return;
+    }
     auto args = request->parse_query_string();
     if (
       args.find("rikey"s) == std::end(args) ||
@@ -1221,13 +1252,20 @@ namespace nvhttp {
     );
     tree.put("root.gamesession", 1);
 
-    rtsp_stream::launch_session_raise(launch_session);
+    if (!rtsp_stream::launch_session_raise(launch_session)) {
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "Another RTSP handshake is pending; retry launch");
+      tree.put("root.gamesession", 0);
+      tree.get_child("root").erase("sessionUrl0");
+      return;
+    }
 
     // Stream was started successfully, we will revert the config when the app or session terminates
     revert_display_configuration = false;
   }
 
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
+    std::lock_guard launch_lock {launch_preparation_mutex};
     print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
@@ -1243,6 +1281,12 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+    if (rtsp_stream::launch_session_pending()) {
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "Another RTSP handshake is pending; retry resume");
+      tree.put("root.resume", 0);
+      return;
+    }
     auto current_appid = proc::proc.running();
     if (current_appid == 0) {
       tree.put("root.resume", 0);
@@ -1315,7 +1359,12 @@ namespace nvhttp {
     );
     tree.put("root.resume", 1);
 
-    rtsp_stream::launch_session_raise(launch_session);
+    if (!rtsp_stream::launch_session_raise(launch_session)) {
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "Another RTSP handshake is pending; retry resume");
+      tree.put("root.resume", 0);
+      tree.get_child("root").erase("sessionUrl0");
+    }
   }
 
   void cancel(resp_https_t response, req_https_t request) {

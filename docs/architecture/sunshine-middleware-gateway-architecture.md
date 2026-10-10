@@ -321,7 +321,11 @@ NVHTTP 会调用：
 start_stream_session(*pending_stream_config)
 ```
 
-该函数创建 `rtsp_stream::launch_session_t`，配置 RTSP 加密、显示参数、音频参数、随机 ping payload 和 control connect data，然后调用 `rtsp_stream::launch_session_raise()`。
+该函数创建 `rtsp_stream::launch_session_t`，配置 RTSP 加密、音频参数、随机 ping payload 和 control connect data，然后调用 `rtsp_stream::launch_session_raise()`。
+
+上游 `client_connect` 的 `width/height/fps` 不作为显示模式依据。启动阶段仍可启用目标显示器、准备拓扑和探测编码器，但不会使用上游参数指定分辨率或刷新率，也不会执行显示模式重映射；原有显示配置恢复策略仍然有效。收到 Moonlight 的 RTSP `ANNOUNCE` 后，使用其 `clientViewportWd/clientViewportHt/maxFPS` 完成显示配置；通过现有校验的 `clientRefreshRateX100` 保留小数刷新率，例如 59.94 Hz。仅在没有其他正在运行的串流时应用显示模式。
+
+显示器配置开关、自动/手动模式、SOPS 和重映射设置仍然有效。要让主机分辨率和刷新率跟随客户端，需启用显示器配置并将分辨率、刷新率设为自动；显示器也必须支持所请求的模式。INFO 日志中的 `[rtsp][video-config]` 记录最终客户端请求的串流宽高和帧率。
 
 ### 8.4 传统启动仍保留
 
