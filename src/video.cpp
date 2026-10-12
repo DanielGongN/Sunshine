@@ -32,6 +32,7 @@ extern "C" {
 #include "stream_disconnect.h"
 #include "sync.h"
 #include "video.h"
+#include "video_recovery.h"
 
 #ifdef _WIN32
 extern "C" {
@@ -320,8 +321,8 @@ namespace video {
     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
 
     ~avcodec_encode_session_t() {
-      // Flush any remaining frames in the encoder
-      if (avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
+      // Only started encoders have frames to flush.
+      if (avcodec_ctx && avcodec_ctx->frame_num > 0 && avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
         packet_raw_avcodec pkt;
         while (avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0);
       }
@@ -1472,8 +1473,7 @@ namespace video {
                     continue;
                   }
 
-                  while (capture_ctx->images->peek()) {
-                    capture_ctx->images->pop();
+                  while (capture_ctx->images->try_pop()) {
                   }
 
                   ++capture_ctx;
@@ -2046,7 +2046,7 @@ namespace video {
     return nullptr;
   }
 
-  bool encode_run(
+  std::optional<stream::detail::disconnect_reason_t> encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
     img_event_t images,
@@ -2055,13 +2055,11 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
-    void *channel_data,
-    const std::shared_ptr<stream::detail::disconnect_state_t> &disconnect
+    void *channel_data
   ) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
-      disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not initialize video encoder '{}'", encoder.codec_from_config(config).name));
-      return false;
+      return stream::detail::disconnect_reason_t {middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not initialize video encoder '{}'", encoder.codec_from_config(config).name)};
     }
 
     // As a workaround for NVENC hangs and to generally speed up encoder reinit,
@@ -2098,27 +2096,17 @@ namespace video {
       // in a separate scope.
       auto dummy_img = disp->alloc_img();
       if (!dummy_img || disp->dummy_img(dummy_img.get())) {
-        disconnect->record(middleware::disconnect_notification_type_e::server_capture_error, "Could not create the initial capture image");
-        return false;
+        return stream::detail::disconnect_reason_t {middleware::disconnect_notification_type_e::server_capture_error, "Could not create the initial capture image"};
       }
       if (session->convert(*dummy_img)) {
-        disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert the initial video image");
-        return false;
+        return stream::detail::disconnect_reason_t {middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert the initial video image"};
       }
     }
 
-    while (true) {
-      // Break out of the encoding loop if any of the following are true:
-      // a) The stream is ending
-      // b) Sunshine is quitting
-      // c) The capture side is waiting to reinit and we've encoded at least one frame
-      //
-      // If we have to reinit before we have received any captured frames, we will encode
-      // the blank dummy frame just to let Moonlight know that we're alive.
-      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
-        break;
-      }
+    // A replacement encoder has no reference frames from the previous session.
+    session->request_idr_frame();
 
+    while (true) {
       bool requested_idr_frame = false;
 
       while (invalidate_ref_frames_events->peek()) {
@@ -2144,18 +2132,22 @@ namespace video {
           frame_timestamp = img->frame_timestamp;
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
-            disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert a captured video image");
-            return false;
+            return stream::detail::disconnect_reason_t {middleware::disconnect_notification_type_e::server_encoder_error, "Could not convert a captured video image"};
           }
         } else if (!images->running()) {
           break;
         }
       }
 
+      // Check immediately before encoding so reinitialization cannot leave packets
+      // in flight after teardown. Send the initial dummy frame if capture is not ready.
+      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
+        break;
+      }
+
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
-        disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not encode video frame {} with '{}'", frame_nr - 1, encoder.codec_from_config(config).name));
-        return false;
+        return stream::detail::disconnect_reason_t {middleware::disconnect_notification_type_e::server_encoder_error, std::format("Could not encode video frame {} with '{}'", frame_nr - 1, encoder.codec_from_config(config).name)};
       }
 
       session->request_normal_frame();
@@ -2164,7 +2156,7 @@ namespace video {
       // This is useful for KVM switch scenarios where mouse may disappear during streaming
       platf::enable_mouse_keys();
     }
-    return true;
+    return std::nullopt;
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
@@ -2546,6 +2538,21 @@ namespace video {
       }
 
       int frame_nr = 1;
+      detail::encoder_recovery_t recovery {*disconnect};
+
+      auto retry_encoder = [&](const stream::detail::disconnect_reason_t &failure, const encoder_t &encoder) {
+        if (shutdown_event->peek() || !images->running()) {
+          return false;
+        }
+        if (!recovery.retry(failure, encoder.flags & ASYNC_TEARDOWN)) {
+          return false;
+        }
+        BOOST_LOG(warning) << "[video][encoder-recovery] attempt="sv << recovery.restarts()
+                           << "/"sv << detail::encoder_recovery_t::max_restarts
+                           << " encoder="sv << encoder.codec_from_config(config).name
+                           << " reason="sv << failure.message;
+        return true;
+      };
 
       auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
       auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
@@ -2574,7 +2581,9 @@ namespace video {
 
         auto encode_device = make_encode_device(*display, encoder, config);
         if (!encode_device) {
-          disconnect->record(middleware::disconnect_notification_type_e::server_encoder_error, "Could not create the video encoding device");
+          if (retry_encoder({middleware::disconnect_notification_type_e::server_encoder_error, "Could not create the video encoding device"}, encoder)) {
+            continue;
+          }
           return;
         }
 
@@ -2592,18 +2601,18 @@ namespace video {
         }
         hdr_event->raise(std::move(hdr_info));
 
-        if (!encode_run(
-              frame_nr,
-              mail,
-              images,
-              config,
-              display,
-              std::move(encode_device),
-              ref->reinit_event,
-              *ref->encoder_p,
-              channel_data,
-              disconnect
-            )) {
+        auto failure = encode_run(
+          frame_nr,
+          mail,
+          images,
+          config,
+          display,
+          std::move(encode_device),
+          ref->reinit_event,
+          *ref->encoder_p,
+          channel_data
+        );
+        if (failure && !retry_encoder(*failure, encoder)) {
           return;
         }
       }
@@ -2942,12 +2951,12 @@ namespace video {
       if (active_av1_mode == 5 && !encoder->av1[encoder_t::DYNAMIC_RANGE] && !encoder->av1[encoder_t::DYNAMIC_RANGE_YUV444]) {
         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 Main10 Rext10_444 on this system"sv;
         active_av1_mode = 0;
-      } else if (active_hevc_mode == 4 && !encoder->av1[encoder_t::DYNAMIC_RANGE_YUV444]) {
+      } else if (active_av1_mode == 4 && !encoder->av1[encoder_t::DYNAMIC_RANGE_YUV444]) {
         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 Rext10_444 on this system"sv;
-        active_hevc_mode = 0;
-      } else if (active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) {
+        active_av1_mode = 0;
+      } else if (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE]) {
         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 Main10 on this system"sv;
-        active_hevc_mode = 0;
+        active_av1_mode = 0;
       } else if (active_av1_mode == 2 && !encoder->av1[encoder_t::PASSED]) {
         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 on this system"sv;
         active_av1_mode = 0;

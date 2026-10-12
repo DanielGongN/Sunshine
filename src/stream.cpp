@@ -96,7 +96,6 @@ namespace stream {
   constexpr int CONTROL_MAX_EVENTS_PER_ITERATION = 256;
   constexpr int CONTROL_MAX_FEEDBACK_PER_SESSION = 64;
   constexpr int CONTROL_MAX_HDR_PER_SESSION = 2;
-  constexpr std::uint32_t CONTROL_TERMINATION_GRACEFUL = 0x80030023;
   constexpr std::uint64_t PING_DIAG_SAMPLE_LIMIT = 32;
   constexpr std::uint64_t PING_DIAG_SAMPLE_INTERVAL = 1000;
 
@@ -636,6 +635,7 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      std::uint32_t termination_code {detail::CONTROL_TERMINATION_GRACEFUL};
       bool termination_sent {};
     } control;
 
@@ -1276,7 +1276,7 @@ namespace stream {
     return 0;
   }
 
-  int send_termination_msg(session_t *session, std::uint32_t reason, std::string_view reason_name) {
+  int send_termination_msg(session_t *session, std::string_view reason_name) {
     if (session->control.termination_sent) {
       return 0;
     }
@@ -1286,6 +1286,7 @@ namespace stream {
       return -1;
     }
 
+    const auto reason = session->control.termination_code;
     control_terminate_t plaintext;
     plaintext.header.type = packetTypes[IDX_TERMINATION];
     plaintext.header.payloadLength = sizeof(plaintext.ec);
@@ -1529,7 +1530,7 @@ namespace stream {
     // termination when we shut down.
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto force_event = mail::man->event<bool>(mail::force_disconnect);
+    auto force_requests = mail::man->queue<detail::upstream_disconnect_t>(mail::force_disconnect);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       server->iterate(CONTROL_SERVICE_WAIT);
 
@@ -1537,13 +1538,15 @@ namespace stream {
         auto lg = server->_sessions.lock();
 
         auto now = std::chrono::steady_clock::now();
-        if (force_event->view(CONTROL_SERVICE_DRAIN_TIMEOUT)) {
-          BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream"sv;
-          force_event->pop();
+        while (auto request = force_requests->pop(CONTROL_SERVICE_DRAIN_TIMEOUT)) {
+          BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream code=0x"sv
+                             << util::hex(request->termination_code).to_string_view()
+                             << " message="sv << request->message;
           for (auto s : *server->_sessions) {
             if (s->state.load(std::memory_order_acquire) == session::state_e::RUNNING) {
-              send_termination_msg(s, CONTROL_TERMINATION_GRACEFUL, "force_disconnect_from_upstream"sv);
-              session::stop(*s, middleware::disconnect_notification_type_e::upstream_requested_stop, "Upstream platform requested stream termination");
+              s->control.termination_code = request->termination_code;
+              send_termination_msg(s, "force_disconnect_from_upstream"sv);
+              session::stop(*s, middleware::disconnect_notification_type_e::upstream_requested_stop, request->message, false);
             }
           }
         }
@@ -1616,7 +1619,7 @@ namespace stream {
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
             if (session->control.peer) {
-              send_termination_msg(session, CONTROL_TERMINATION_GRACEFUL, "session_stopping"sv);
+              send_termination_msg(session, "session_stopping"sv);
             }
             server->flush();
             pos = server->_sessions->erase(pos);
@@ -1663,18 +1666,7 @@ namespace stream {
       server->iterate(CONTROL_SERVICE_DRAIN_TIMEOUT);
     }
 
-    // Let all remaining connections know the server is shutting down
-    // reason: graceful termination
-    std::uint32_t reason = CONTROL_TERMINATION_GRACEFUL;
-
-    control_terminate_t plaintext;
-    plaintext.header.type = packetTypes[IDX_TERMINATION];
-    plaintext.header.payloadLength = sizeof(plaintext.ec);
-    plaintext.ec = util::endian::big<uint32_t>(reason);
-
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-
+    // Keep any selected upstream error code and the send-once guard during shutdown.
     auto lg = server->_sessions.lock();
     for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
       auto session = *pos;
@@ -1683,12 +1675,7 @@ namespace stream {
 
       // We may not have gotten far enough to have an ENet connection yet
       if (session->control.peer) {
-        auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-
-        if (server->send(payload, session->control.peer)) {
-          TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
-          BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
-        }
+        send_termination_msg(session, "broadcast_shutdown"sv);
       }
 
       session->shutdown_event->raise(true);
@@ -2740,7 +2727,7 @@ namespace stream {
       return session.client_cert;
     }
 
-    void stop(session_t &session, middleware::disconnect_notification_type_e type, std::string_view message) {
+    void stop(session_t &session, middleware::disconnect_notification_type_e type, std::string_view message, bool notify_upstream) {
       while_starting_do_nothing(session.state);
       if (session.state.load(std::memory_order_acquire) != state_e::RUNNING) {
         return;
@@ -2762,7 +2749,9 @@ namespace stream {
       BOOST_LOG(info) << "[stream][disconnect] session="sv << session.launch_session_id
                       << " type="sv << static_cast<int>(reason->type)
                       << " message="sv << reason->message;
-      middleware::notify_client_disconnected(reason->message, reason->type);
+      if (notify_upstream) {
+        middleware::notify_client_disconnected(reason->message, reason->type);
+      }
     }
 
     void join(session_t &session) {

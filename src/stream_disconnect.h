@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -14,6 +15,17 @@
 #include "middleware.h"
 
 namespace stream::detail {
+  inline constexpr std::uint32_t CONTROL_TERMINATION_GRACEFUL = 0x80030023;
+  // Private client errors selected by upstream timeout and game-process-exit commands.
+  inline constexpr std::uint32_t CONTROL_TERMINATION_FORCE_TIMEOUT = 0x8004E001;
+  inline constexpr std::uint32_t CONTROL_TERMINATION_STANDBY_TIMEOUT = 0x8004E002;
+  inline constexpr std::uint32_t CONTROL_TERMINATION_GAME_PROCESS_EXIT = 0x8004E003;
+
+  struct upstream_disconnect_t {
+    std::string message;
+    std::uint32_t termination_code {CONTROL_TERMINATION_GRACEFUL};
+  };
+
   struct disconnect_reason_t {
     middleware::disconnect_notification_type_e type;
     std::string message;

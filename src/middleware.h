@@ -15,6 +15,7 @@
 
 namespace middleware {
 
+  // Internal reasons remain distinct; outgoing data.type groups stops into 0/99.
   enum class disconnect_notification_type_e : int {
     other = 0,
     force_timeout = 1,
@@ -64,7 +65,11 @@ namespace middleware {
    * @param message Human-readable disconnect reason.
    * @param type Machine-readable disconnect reason type.
    *
-   * Thread-safe. Emits a disconnected event with data.type and data.message.
+   * Thread-safe. Only the first notification attempt is sent until the next incoming
+   * client_connect event. All types share this limit, including timeout reminders.
+   * Explicit client stops use data.type=0, timeout reminders retain 1/2, and other
+   * reasons use 99. Upstream timeout commands retain 1/2 reporting; other upstream
+   * commands suppress reports until client_connect. Session cleanup does not report again.
    * The top-level message is retained for compatibility.
    */
   void notify_client_disconnected(std::string_view message, disconnect_notification_type_e type = disconnect_notification_type_e::other);

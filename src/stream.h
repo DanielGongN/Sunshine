@@ -79,7 +79,8 @@ namespace stream {
     void stop(
       session_t &session,
       middleware::disconnect_notification_type_e type = middleware::disconnect_notification_type_e::other,
-      std::string_view message = "Streaming session ended without a specific reason"
+      std::string_view message = "Streaming session ended without a specific reason",
+      bool notify_upstream = true
     );
     void join(session_t &session);
     state_e state(session_t &session);

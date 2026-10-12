@@ -4,6 +4,7 @@
  */
 
 // standard includes
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -31,6 +32,7 @@
 #include "network.h"
 #include "nvhttp.h"
 #include "rtsp.h"
+#include "stream_disconnect.h"
 
 using namespace std::literals;
 namespace beast = boost::beast;
@@ -52,6 +54,7 @@ namespace middleware {
   safe::queue_t<std::string> g_outgoing_queue {30};
   std::atomic<bool> g_read_in_progress {false};
   std::atomic<int> g_active_sessions {0};
+  std::atomic<bool> g_disconnected_notification_sent {false};
   constexpr auto HEARTBEAT_INTERVAL = 30s;
   constexpr auto CONNECTED_RETRY_INTERVAL = 30s;
   std::mutex g_connected_ack_mutex;
@@ -60,6 +63,14 @@ namespace middleware {
   asio::steady_timer *g_connected_retry_timer = nullptr;
 
   namespace detail {
+    bool claim_disconnected_notification() {
+      return !g_disconnected_notification_sent.exchange(true, std::memory_order_acq_rel);
+    }
+
+    void reset_disconnected_notification() {
+      g_disconnected_notification_sent.store(false, std::memory_order_release);
+    }
+
     std::int64_t make_timestamp() {
       return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch()
@@ -78,6 +89,7 @@ namespace middleware {
         if (unsigned_value <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
           return static_cast<std::int64_t>(unsigned_value);
         }
+        return std::nullopt;
       }
 
       if (value.is_number_integer()) {
@@ -97,15 +109,83 @@ namespace middleware {
       return msg;
     }
 
+    int disconnect_report_type(disconnect_notification_type_e type) {
+      switch (type) {
+        case disconnect_notification_type_e::client_requested_stop:
+          return 0;
+        case disconnect_notification_type_e::force_timeout:
+        case disconnect_notification_type_e::standby_timeout:
+          return static_cast<int>(type);
+        default:
+          return 99;
+      }
+    }
+
     json make_disconnected_payload(std::string_view message, disconnect_notification_type_e type) {
       json msg;
       msg["event"] = "disconnected";
       msg["message"] = std::string {message};
       msg["data"] = {
-        {"type", static_cast<int>(type)},
+        {"type", disconnect_report_type(type)},
         {"message", std::string {message}}
       };
       return msg;
+    }
+
+    bool handle_upstream_disconnected(const json &msg) {
+      if (!msg.is_object() || !msg.contains("event") || !msg["event"].is_string() || msg["event"] != "disconnected") {
+        return false;
+      }
+      const auto data = msg.value("data", json::object());
+      if (!data.is_object()) {
+        return false;
+      }
+      const auto type = get_int64_field(data, "type");
+      if (data.contains("type") && !type) {
+        return false;
+      }
+
+      stream::detail::upstream_disconnect_t request {
+        "Upstream platform requested stream termination"
+      };
+      std::optional<disconnect_notification_type_e> timeout_report;
+      if (type) {
+        switch (*type) {
+          case 0:
+            request.message = "Upstream requested normal stream termination";
+            break;
+          case 1:
+            request.message = "Upstream requested disconnect after force timeout";
+            request.termination_code = stream::detail::CONTROL_TERMINATION_FORCE_TIMEOUT;
+            timeout_report = disconnect_notification_type_e::force_timeout;
+            break;
+          case 2:
+            request.message = "Upstream requested disconnect after standby timeout";
+            request.termination_code = stream::detail::CONTROL_TERMINATION_STANDBY_TIMEOUT;
+            timeout_report = disconnect_notification_type_e::standby_timeout;
+            break;
+          case 3:
+            request.message = "Upstream reported game process exit";
+            request.termination_code = stream::detail::CONTROL_TERMINATION_GAME_PROCESS_EXIT;
+            break;
+        }
+      }
+      if (msg.contains("message") && msg["message"].is_string() && !msg["message"].get_ref<const std::string &>().empty()) {
+        request.message = msg["message"].get<std::string>();
+      }
+      if (data.contains("message") && data["message"].is_string() && !data["message"].get_ref<const std::string &>().empty()) {
+        request.message = data["message"].get<std::string>();
+      }
+
+      // Timeout commands retain normal reporting; all commands consume the cycle before cleanup.
+      if (timeout_report) {
+        notify_client_disconnected(request.message, *timeout_report);
+      } else {
+        claim_disconnected_notification();
+      }
+      auto requests = mail::man->queue<stream::detail::upstream_disconnect_t>(mail::force_disconnect);
+      requests->raise(std::move(request));
+      return true;
     }
 
     bool is_connected_ack_success(const json &msg, std::int64_t pending_message_id) {
@@ -241,6 +321,10 @@ namespace middleware {
   }
 
   void notify_client_disconnected(std::string_view message, disconnect_notification_type_e type) {
+    if (!detail::claim_disconnected_notification()) {
+      BOOST_LOG(debug) << "Suppressing duplicate disconnected event until next client_connect: type="sv << static_cast<int>(type);
+      return;
+    }
     send_to_upstream(detail::make_disconnected_payload(message, type));
   }
 
@@ -428,9 +512,9 @@ namespace middleware {
         BOOST_LOG(info) << "click_gamepad: injecting button="sv << button;
         input::click_gamepad(0, it->second);
       } else if (event_type == "disconnected") {
-        // Ignore upstream disconnected events until this command is enabled again.
-        // auto force_event = mail::man->event<bool>(mail::force_disconnect);
-        // force_event->raise(true);
+        if (!detail::handle_upstream_disconnected(msg)) {
+          BOOST_LOG(warning) << "Ignoring malformed upstream disconnected command"sv;
+        }
       } else if (event_type == "consume_record_create_success") {
         auto pending_msg_id = pending_connected_message_id();
         if (!pending_msg_id) {
@@ -443,6 +527,7 @@ namespace middleware {
           BOOST_LOG(debug) << "consume_record_create_success did not match pending connected event"sv;
         }
       } else if (event_type == "client_connect") {
+        detail::reset_disconnected_notification();
         BOOST_LOG(info) << "handling client_connect"sv;
         auto &data = msg["data"];
         BOOST_LOG(info) << "client_connect data="sv << data.dump();
