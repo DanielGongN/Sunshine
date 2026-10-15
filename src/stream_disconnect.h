@@ -6,6 +6,7 @@
 
 // standard includes
 #include <cstdint>
+#include <format>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -16,10 +17,16 @@
 
 namespace stream::detail {
   inline constexpr std::uint32_t CONTROL_TERMINATION_GRACEFUL = 0x80030023;
-  // Private client errors selected by upstream timeout and game-process-exit commands.
+  // Private client termination codes selected by upstream commands and local timeouts.
+  inline constexpr std::uint32_t CONTROL_TERMINATION_PLATFORM_DEFAULT_EXIT = 0x8004E000;
   inline constexpr std::uint32_t CONTROL_TERMINATION_FORCE_TIMEOUT = 0x8004E001;
   inline constexpr std::uint32_t CONTROL_TERMINATION_STANDBY_TIMEOUT = 0x8004E002;
   inline constexpr std::uint32_t CONTROL_TERMINATION_GAME_PROCESS_EXIT = 0x8004E003;
+  inline constexpr std::uint32_t CONTROL_TERMINATION_NO_AVAILABLE_TIME = 0x8004E004;
+
+  // Client-to-server ENet disconnect data, separate from server termination messages.
+  inline constexpr std::uint32_t CLIENT_DISCONNECT_REQUESTED_STOP = 0x8004F001;
+  inline constexpr std::uint32_t CLIENT_DISCONNECT_DISPLACED = 0x8004F002;
 
   struct upstream_disconnect_t {
     std::string message;
@@ -30,6 +37,22 @@ namespace stream::detail {
     middleware::disconnect_notification_type_e type;
     std::string message;
   };
+
+  inline disconnect_reason_t client_disconnect_reason(std::uint32_t code) {
+    auto type = middleware::disconnect_notification_type_e::peer_disconnected_unknown;
+    std::string_view message = "Control peer disconnected; client intent is unknown";
+    switch (code) {
+      case CLIENT_DISCONNECT_REQUESTED_STOP:
+        type = middleware::disconnect_notification_type_e::client_requested_stop;
+        message = "Client reported user-requested disconnect";
+        break;
+      case CLIENT_DISCONNECT_DISPLACED:
+        type = middleware::disconnect_notification_type_e::client_displaced;
+        message = "Client reported being displaced by another session";
+        break;
+    }
+    return {type, std::format("{} (ENet data=0x{:08X})", message, code)};
+  }
 
   class disconnect_state_t {
   public:

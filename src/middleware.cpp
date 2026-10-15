@@ -112,7 +112,9 @@ namespace middleware {
     int disconnect_report_type(disconnect_notification_type_e type) {
       switch (type) {
         case disconnect_notification_type_e::client_requested_stop:
-          return 0;
+          return 5;
+        case disconnect_notification_type_e::client_displaced:
+          return 6;
         case disconnect_notification_type_e::force_timeout:
         case disconnect_notification_type_e::standby_timeout:
           return static_cast<int>(type);
@@ -152,7 +154,8 @@ namespace middleware {
       if (type) {
         switch (*type) {
           case 0:
-            request.message = "Upstream requested normal stream termination";
+            request.message = "Upstream requested default platform exit";
+            request.termination_code = stream::detail::CONTROL_TERMINATION_PLATFORM_DEFAULT_EXIT;
             break;
           case 1:
             request.message = "Upstream requested disconnect after force timeout";
@@ -167,6 +170,10 @@ namespace middleware {
           case 3:
             request.message = "Upstream reported game process exit";
             request.termination_code = stream::detail::CONTROL_TERMINATION_GAME_PROCESS_EXIT;
+            break;
+          case 4:
+            request.message = "Upstream reported no available streaming time";
+            request.termination_code = stream::detail::CONTROL_TERMINATION_NO_AVAILABLE_TIME;
             break;
         }
       }

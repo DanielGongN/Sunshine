@@ -15,7 +15,7 @@
 
 namespace middleware {
 
-  // Internal reasons remain distinct; outgoing data.type groups stops into 0/99.
+  // Internal reasons remain distinct; outgoing data.type uses 1/2/5/6/99.
   enum class disconnect_notification_type_e : int {
     other = 0,
     force_timeout = 1,
@@ -23,6 +23,7 @@ namespace middleware {
     client_requested_stop = 10,
     client_reported_error = 11,  ///< Reserved for explicit client error reports.
     peer_disconnected_unknown = 12,
+    client_displaced = 13,  ///< Client reported being displaced by another session.
     control_timeout = 20,
     stream_start_timeout = 21,
     upstream_requested_stop = 30,

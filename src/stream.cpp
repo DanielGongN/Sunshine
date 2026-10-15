@@ -40,6 +40,7 @@ extern "C" {
 #include "stream_ping.h"
 #include "stream_recovery.h"
 #include "stream_route.h"
+#include "stream_termination.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -637,6 +638,7 @@ namespace stream {
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
       std::uint32_t termination_code {detail::CONTROL_TERMINATION_GRACEFUL};
       bool termination_sent {};
+      detail::control_termination_t termination;
     } control;
 
     std::uint32_t launch_session_id;
@@ -897,6 +899,12 @@ namespace stream {
           {
             net::packet_t packet {event.packet};
 
+            // Continue servicing transport ACKs while termination drains, but
+            // never inject application input into an already stopped session.
+            if (session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
+              break;
+            }
+
             if (packet->dataLength < sizeof(std::uint16_t)) {
               BOOST_LOG(warning) << "Dropping truncated control packet"sv;
               break;
@@ -952,6 +960,7 @@ namespace stream {
           BOOST_LOG(warning) << "[control][disconnect] CLIENT DISCONNECTED peer="sv
                              << platf::from_sockaddr((sockaddr *) &event.peer->address.address)
                              << " data="sv << event.data
+                             << " data_hex=0x"sv << util::hex(event.data).to_string_view()
                              << " last_type="sv << control_packet_type_name(last_type)
                              << " last_type_hex=0x"sv << util::hex(last_type).to_string_view()
                              << " last_payload="sv << last_payload_len
@@ -964,7 +973,8 @@ namespace stream {
           }
           session->control.peer = nullptr;
           if (session->state == session::state_e::RUNNING) {
-            session::stop(*session, middleware::disconnect_notification_type_e::peer_disconnected_unknown, std::format("Control peer disconnected; client intent is unknown (ENet data={})", event.data));
+            const auto reason = detail::client_disconnect_reason(event.data);
+            session::stop(*session, reason.type, reason.message);
           }
           break;
         case ENET_EVENT_TYPE_NONE:
@@ -1303,7 +1313,7 @@ namespace stream {
     }
     session->control.termination_sent = true;
 
-    BOOST_LOG(info) << "[control][termination] sent reason="sv << reason_name << " code=0x"sv << util::hex(reason).to_string_view();
+    BOOST_LOG(info) << "[control][termination] queued reason="sv << reason_name << " code=0x"sv << util::hex(reason).to_string_view();
     return 0;
   }
 
@@ -1594,19 +1604,25 @@ namespace stream {
             );
             if (timeout_notification == detail::timeout_notification_e::force) {
               session->timeout_notification_sent = true;
+              session->control.termination_code = detail::CONTROL_TERMINATION_FORCE_TIMEOUT;
               BOOST_LOG(warning) << "[control][timeout] reason=force_timeout force_hold_sec="sv << force_hold_sec
-                                 << " action=notify_upstream"sv;
-              middleware::notify_client_disconnected(
-                u8"长时间挂机，等待上游断开连接",
-                middleware::disconnect_notification_type_e::force_timeout
+                                 << " action=terminate_session code=0x"sv << util::hex(session->control.termination_code).to_string_view();
+              send_termination_msg(session, "force_timeout"sv);
+              session::stop(
+                *session,
+                middleware::disconnect_notification_type_e::force_timeout,
+                "长时间挂机，断开连接"
               );
             } else if (timeout_notification == detail::timeout_notification_e::standby) {
               session->timeout_notification_sent = true;
+              session->control.termination_code = detail::CONTROL_TERMINATION_STANDBY_TIMEOUT;
               BOOST_LOG(warning) << "[control][timeout] reason=standby_timeout idle_sec="sv << idle_sec
-                                 << " action=notify_upstream"sv;
-              middleware::notify_client_disconnected(
-                u8"长时间无操作，等待上游断开连接",
-                middleware::disconnect_notification_type_e::standby_timeout
+                                 << " action=terminate_session code=0x"sv << util::hex(session->control.termination_code).to_string_view();
+              send_termination_msg(session, "standby_timeout"sv);
+              session::stop(
+                *session,
+                middleware::disconnect_notification_type_e::standby_timeout,
+                "长时间无操作，断开连接"
               );
             }
           }
@@ -1618,11 +1634,26 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
-            if (session->control.peer) {
+            auto &termination = session->control.termination;
+            if (session->control.peer && !termination.started()) {
               send_termination_msg(session, "session_stopping"sv);
+              BOOST_LOG(info) << "[control][termination] draining session="sv << session->launch_session_id
+                              << " code=0x"sv << util::hex(session->control.termination_code).to_string_view()
+                              << " timeout_ms="sv << detail::control_termination_t::max_wait.count();
+            }
+            const auto progress = termination.poll(session->control.peer, now);
+            if (progress == detail::termination_progress_e::waiting) {
+              ++pos;
+              continue;
+            }
+            if (progress == detail::termination_progress_e::timed_out) {
+              BOOST_LOG(warning) << "[control][termination] drain_timeout session="sv << session->launch_session_id
+                                 << " code=0x"sv << util::hex(session->control.termination_code).to_string_view();
+            } else {
+              BOOST_LOG(info) << "[control][termination] drain_complete session="sv << session->launch_session_id
+                              << " code=0x"sv << util::hex(session->control.termination_code).to_string_view();
             }
             server->flush();
-            pos = server->_sessions->erase(pos);
 
             if (session->control.peer) {
               {
@@ -1631,8 +1662,10 @@ namespace stream {
               }
 
               enet_peer_disconnect_now(session->control.peer, 0);
+              session->control.peer = nullptr;
             }
 
+            pos = server->_sessions->erase(pos);
             session->controlEnd.raise(true);
             continue;
           }

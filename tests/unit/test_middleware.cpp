@@ -125,7 +125,8 @@ TEST(MiddlewareDisconnectTests, StandbyTimeoutUsesTypeTwo) {
 TEST(MiddlewareDisconnectTests, GroupedReasonsPreserveDetailedMessage) {
   using type_e = middleware::disconnect_notification_type_e;
   const std::vector<std::pair<type_e, int>> types {
-    {type_e::client_requested_stop, 0},
+    {type_e::client_requested_stop, 5},
+    {type_e::client_displaced, 6},
     {type_e::client_reported_error, 99},
     {type_e::peer_disconnected_unknown, 99},
     {type_e::control_timeout, 99},
@@ -205,6 +206,23 @@ TEST_F(MiddlewareDisconnectCycleTests, FirstReasonSuppressesAllLaterDisconnectTy
   EXPECT_EQ(msg.at("data").value("type", -1), 2);
   EXPECT_EQ(msg.at("data").value("message", ""), "Idle reminder");
   EXPECT_FALSE(middleware::g_outgoing_queue.peek());
+}
+
+TEST_F(MiddlewareDisconnectCycleTests, ClientDisconnectCodesQueueDistinctTypesOnce) {
+  for (const auto &[code, expected_type] : std::vector<std::pair<std::uint32_t, int>> {{0x8004F001U, 5}, {0x8004F002U, 6}}) {
+    SCOPED_TRACE(code);
+    middleware::detail::reset_disconnected_notification();
+    const auto reason = stream::detail::client_disconnect_reason(code);
+    middleware::notify_client_disconnected(reason.message, reason.type);
+    middleware::notify_client_disconnected("Later cleanup", middleware::disconnect_notification_type_e::server_shutdown);
+
+    const auto msg = pop_notification();
+    EXPECT_EQ(msg.value("event", ""), "disconnected");
+    EXPECT_EQ(msg.at("data").value("type", -1), expected_type);
+    EXPECT_EQ(msg.at("data").value("message", ""), reason.message);
+    EXPECT_EQ(msg.value("message", ""), reason.message);
+    EXPECT_FALSE(middleware::g_outgoing_queue.peek());
+  }
 }
 
 TEST_F(MiddlewareDisconnectCycleTests, ClientConnectResetStartsOneNewNotificationCycle) {
@@ -295,7 +313,7 @@ TEST_F(MiddlewareDisconnectCycleTests, GameProcessExitQueuesDistinctClientCodeWi
 }
 
 TEST_F(MiddlewareDisconnectCycleTests, GenericUpstreamStopRetainsGracefulCodeWithoutEcho) {
-  for (auto data : {nlohmann::json::object(), nlohmann::json {{"type", 99}}}) {
+  for (auto data : {nlohmann::json::object(), nlohmann::json {{"type", -1}}, nlohmann::json {{"type", 5}}, nlohmann::json {{"type", 99}}}) {
     ASSERT_TRUE(middleware::detail::handle_upstream_disconnected({{"event", "disconnected"}, {"data", data}}));
     auto request = disconnect_requests->pop(std::chrono::milliseconds {0});
     ASSERT_TRUE(request);
@@ -306,14 +324,25 @@ TEST_F(MiddlewareDisconnectCycleTests, GenericUpstreamStopRetainsGracefulCodeWit
   EXPECT_FALSE(middleware::g_outgoing_queue.peek());
 }
 
-TEST_F(MiddlewareDisconnectCycleTests, ExplicitNormalExitUsesGracefulCodeWithoutEcho) {
+TEST_F(MiddlewareDisconnectCycleTests, PlatformDefaultExitUsesPrivateCodeWithoutEcho) {
   ASSERT_TRUE(middleware::detail::handle_upstream_disconnected({{"event", "disconnected"}, {"data", {{"type", 0}}}}));
   auto request = disconnect_requests->pop(std::chrono::milliseconds {0});
   ASSERT_TRUE(request);
-  EXPECT_EQ(request->termination_code, 0x80030023U);
-  EXPECT_EQ(request->message, "Upstream requested normal stream termination");
+  EXPECT_EQ(request->termination_code, stream::detail::CONTROL_TERMINATION_PLATFORM_DEFAULT_EXIT);
+  EXPECT_EQ(request->message, "Upstream requested default platform exit");
 
   middleware::notify_client_disconnected("Normal exit cleanup", middleware::disconnect_notification_type_e::client_requested_stop);
+  EXPECT_FALSE(middleware::g_outgoing_queue.peek());
+}
+
+TEST_F(MiddlewareDisconnectCycleTests, NoAvailableTimeUsesPrivateCodeAndDataMessageWithoutEcho) {
+  ASSERT_TRUE(middleware::detail::handle_upstream_disconnected({{"event", "disconnected"}, {"message", "Platform exit"}, {"data", {{"type", 4}, {"message", "无可用时长，断开连接"}}}}));
+  auto request = disconnect_requests->pop(std::chrono::milliseconds {0});
+  ASSERT_TRUE(request);
+  EXPECT_EQ(request->termination_code, stream::detail::CONTROL_TERMINATION_NO_AVAILABLE_TIME);
+  EXPECT_EQ(request->message, "无可用时长，断开连接");
+
+  middleware::notify_client_disconnected("No available time cleanup", middleware::disconnect_notification_type_e::upstream_requested_stop);
   EXPECT_FALSE(middleware::g_outgoing_queue.peek());
 }
 
@@ -416,6 +445,6 @@ TEST_F(MiddlewareDisconnectCycleTests, ClientConnectResetReenablesReportsAfterUp
 
   middleware::detail::reset_disconnected_notification();
   middleware::notify_client_disconnected("Client stopped the next stream", middleware::disconnect_notification_type_e::client_requested_stop);
-  EXPECT_EQ(pop_notification().at("data").value("type", -1), 0);
+  EXPECT_EQ(pop_notification().at("data").value("type", -1), 5);
   EXPECT_FALSE(middleware::g_outgoing_queue.peek());
 }
