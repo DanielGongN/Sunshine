@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1279" viewBox="0 0 800 1279" role="img" aria-labelledby="title desc">
+  <title id="title">Sunshine 云串流：每次会话重新授权</title>
+  <desc id="desc">推荐方案，待实施。Moonlight 注册独立设备认证公钥，向云平台申请一次性票据；Agent 仅转发签名准备事件。Moonlight 与 Sunshine 通过双向 TLS 直连，完成随机挑战和独立设备私钥持有证明。Sunshine 验签并原子兑换票据，统一控制所有启动入口，再建立新会话密钥并进入强制加密串流。运行期间由独立租约控制；鉴权失败不启动、不输出音视频、不接受控制输入。</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#3b82f6"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#f59e0b"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#22c55e"/>
+    </marker>
+    <marker id="arrow-pink" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#ec4899"/>
+    </marker>
+    <style>
+      text { font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, sans-serif; text-anchor: middle; fill: #1e293b; font-size: 12px; }
+      .heading { font-weight: 600; }
+      .title { font-size: 16px; }
+      .phase { font-size: 11px; fill: #64748b; }
+      .small { font-size: 10px; fill: #64748b; }
+      .blue { fill: #1e40af; }
+      .orange { fill: #b45309; }
+      .green { fill: #166534; }
+      .pink { fill: #9d174d; }
+      .box { stroke-width: 1.2; }
+      .link { fill: none; stroke-width: 1.5; stroke-linecap: round; }
+    </style>
+  </defs>
+  <rect width="800" height="1279" fill="#ffffff"/>
+
+  <!-- Symmetric content bounds: x=30..770. Title top is approximately 25; final card bottom=1254. -->
+  <text x="400" y="37" class="title heading">Sunshine 云串流：每次会话重新授权</text>
+  <text x="400" y="59" class="small">推荐方案 / 待实施 · 平台裁决、Agent 转发、Sunshine 独立验证执行</text>
+
+  <!-- Role overview: four equal cards, x=30/222/414/606, y=84, w=164, h=90; horizontal gap=28. -->
+  <g class="box">
+    <rect x="30" y="84" width="164" height="90" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+    <rect x="222" y="84" width="164" height="90" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+    <rect x="414" y="84" width="164" height="90" rx="8" fill="#f8fafc" stroke="#94a3b8"/>
+    <rect x="606" y="84" width="164" height="90" rx="8" fill="#d1fae5" stroke="#22c55e"/>
+  </g>
+  <text x="112" y="106" class="heading blue">Moonlight 客户端</text>
+  <text x="112" y="124" class="small">保留现有 TLS 证书</text>
+  <text x="112" y="142" class="small">新增独立设备认证密钥</text>
+  <text x="112" y="160" class="small">私钥仅留本机，优先 TPM</text>
+  <text x="304" y="106" class="heading orange">云平台</text>
+  <text x="304" y="124" class="small">账号、权限与并发审核</text>
+  <text x="304" y="142" class="small">签发短时一次性票据</text>
+  <text x="304" y="160" class="small">独立租约与撤销</text>
+  <text x="496" y="106" class="heading">云主机 Agent</text>
+  <text x="496" y="124" class="small">仅转发签名控制事件</text>
+  <text x="496" y="142" class="small">不代替平台签名</text>
+  <text x="496" y="160" class="small">不接触会话密钥</text>
+  <text x="688" y="106" class="heading green">Sunshine</text>
+  <text x="688" y="124" class="small">独立验证并原子兑换</text>
+  <text x="688" y="142" class="small">统一门禁与强制加密</text>
+  <text x="688" y="160" class="small">执行租约到期 / 撤销</text>
+
+  <text x="400" y="201" class="phase">申请与签发 → 直连鉴权 → 会话执行与续租</text>
+
+  <!-- Main flow: x=30..578, center=304. Notes: x=606..770, center=688. All sibling gaps=27 or 28. -->
+  <!-- Connectors are painted before nodes. Each starts 5px from its source and ends 11px before its target. -->
+  <g class="link">
+    <path d="M304,296 L304,307" stroke="#3b82f6" marker-end="url(#arrow-blue)"/>
+    <path d="M304,395 L304,406" stroke="#3b82f6" marker-end="url(#arrow-blue)"/>
+    <path d="M304,512 L304,523" stroke="#3b82f6" marker-end="url(#arrow-blue)"/>
+    <path d="M304,611 L304,622" stroke="#f59e0b" marker-end="url(#arrow-orange)"/>
+    <path d="M304,710 L304,721" stroke="#f59e0b" marker-end="url(#arrow-orange)"/>
+    <path d="M304,827 L304,838" stroke="#22c55e" marker-end="url(#arrow-green)"/>
+    <path d="M304,944 L304,955" stroke="#22c55e" marker-end="url(#arrow-green)"/>
+    <path d="M304,1043 L304,1054" stroke="#22c55e" marker-end="url(#arrow-green)"/>
+    <path d="M583,354 L595,354" stroke="#ec4899" marker-end="url(#arrow-pink)"/>
+    <path d="M583,462 L595,462" stroke="#f59e0b" marker-end="url(#arrow-orange)"/>
+    <path d="M583,777 L595,777" stroke="#ec4899" marker-end="url(#arrow-pink)"/>
+  </g>
+
+  <!-- 1: y=219..291, three lines; first-time registration establishes the additional device key. -->
+  <rect class="box" x="30" y="219" width="548" height="72" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="304" y="241" class="heading blue">① Moonlight 登录平台并注册设备认证公钥</text>
+  <text x="304" y="259">首次 / 换钥时完成公钥注册和私钥持有证明</text>
+  <text x="304" y="277">保留现有 TLS 证书；独立设备私钥只留本机</text>
+  <rect class="box" x="606" y="219" width="164" height="72" rx="8" fill="#fce7f3" stroke="#ec4899"/>
+  <text x="688" y="241" class="heading pink">原有 TLS 凭据</text>
+  <text x="688" y="259" class="heading pink">≠ 本次串流授权</text>
+  <text x="688" y="277" class="small">每次开始均重新申请</text>
+
+  <!-- 2: y=318..390. The right-hand branch terminates in rejection. -->
+  <rect class="box" x="30" y="318" width="548" height="72" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="304" y="340" class="heading orange">② Moonlight 申请串流；平台审核此次请求</text>
+  <text x="304" y="358">账号 / 设备 / 时长 / 主机与应用权限 / 并发</text>
+  <text x="304" y="376">全部通过后，才可签发本次准入票据</text>
+  <rect class="box" x="606" y="318" width="164" height="72" rx="8" fill="#fce7f3" stroke="#ec4899"/>
+  <text x="688" y="340" class="heading pink">审核失败 → 拒绝</text>
+  <text x="688" y="358" class="small">不签发 stream_ticket</text>
+  <text x="688" y="376" class="small">不进入后续串流流程</text>
+
+  <!-- 3: y=417..507. The preparation side branch never creates a running stream. -->
+  <rect class="box" x="30" y="417" width="548" height="90" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="304" y="439" class="heading orange">③ 平台签发一次性 stream_ticket（有效期建议 60s）</text>
+  <text x="304" y="457">绑定设备公钥指纹 + TLS 客户端证书指纹</text>
+  <text x="304" y="475">host_id + host_boot_id、lease_id、appid、action、jti、exp</text>
+  <text x="304" y="493">票据发给 Moonlight；签名准备事件 → Agent → Sunshine</text>
+  <rect class="box" x="606" y="417" width="164" height="90" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="688" y="439" class="heading orange">准备事件仅转发</text>
+  <text x="688" y="457" class="small">Sunshine 独立验平台签名</text>
+  <text x="688" y="475" class="small">client_connect 仅准备</text>
+  <text x="688" y="493" class="heading orange">不能启动串流</text>
+
+  <!-- 4: y=534..606. Authentication handshakes remain possible before authorization. -->
+  <rect class="box" x="30" y="534" width="548" height="72" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="304" y="556" class="heading blue">④ Moonlight 与 Sunshine 建立双向 TLS 直连</text>
+  <text x="304" y="574">客户端校验 Sunshine 服务器身份并提交票据</text>
+  <text x="304" y="592">Sunshine 返回随机 nonce（有效期建议 10s）</text>
+  <rect class="box" x="606" y="534" width="164" height="72" rx="8" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="688" y="556" class="heading">进入鉴权阶段</text>
+  <text x="688" y="574" class="small">允许必要认证握手</text>
+  <text x="688" y="592" class="small">此时尚不创建串流</text>
+
+  <!-- 5: y=633..705. Proof uses the added authentication key, independently of the TLS key. -->
+  <rect class="box" x="30" y="633" width="548" height="72" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="304" y="655" class="heading orange">⑤ Moonlight 提交 DPoP / 私钥持有证明</text>
+  <text x="304" y="673">独立设备私钥签名：nonce + 票据摘要 + 方法 + 目标 URI</text>
+  <text x="304" y="691">业务参数必须与票据 / 会话约束一致</text>
+  <rect class="box" x="606" y="633" width="164" height="72" rx="8" fill="#fce7f3" stroke="#ec4899"/>
+  <text x="688" y="655" class="heading pink">独立设备私钥证明</text>
+  <text x="688" y="673" class="small">优先由 TPM 保护私钥</text>
+  <text x="688" y="691" class="small">旧 TLS 私钥无法替代</text>
+
+  <!-- 6: y=732..822. The successful downward path creates a unique device/lease-bound authorization. -->
+  <rect class="box" x="30" y="732" width="548" height="90" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="304" y="754" class="heading orange">⑥ Sunshine 验证并原子兑换一次性票据</text>
+  <text x="304" y="772">平台签名 / 当前 TLS 证书 / 设备公钥绑定</text>
+  <text x="304" y="790">主机及本次开机 / 应用 / 时间 / nonce 与证明防重放</text>
+  <text x="304" y="808" class="heading green">全部通过 → 唯一会话授权（绑定设备、租约）</text>
+  <rect class="box" x="606" y="732" width="164" height="90" rx="8" fill="#fce7f3" stroke="#ec4899"/>
+  <text x="688" y="754" class="heading pink">任一验证失败 → 拒绝</text>
+  <text x="688" y="772" class="small">不创建串流</text>
+  <text x="688" y="790" class="small">不发送音视频</text>
+  <text x="688" y="808" class="small">不接受控制输入</text>
+
+  <!-- 7: y=849..939. All launch paths share the same authorization gate. -->
+  <rect class="box" x="30" y="849" width="548" height="90" rx="8" fill="#d1fae5" stroke="#22c55e"/>
+  <text x="304" y="871" class="heading green">⑦ 两端在直连 TLS 内建立 / 交换新会话密钥</text>
+  <text x="304" y="889">平台与 Agent 不接触 rikey</text>
+  <text x="304" y="907">/launch、/resume、/cancel 及内部入口统一校验授权</text>
+  <text x="304" y="925">/serverinfo 仅查询；原版 / 旧接口不能绕过</text>
+  <rect class="box" x="606" y="849" width="164" height="90" rx="8" fill="#d1fae5" stroke="#22c55e"/>
+  <text x="688" y="871" class="heading green">唯一启动门禁</text>
+  <text x="688" y="889" class="small">所有入口均必须持有</text>
+  <text x="688" y="907" class="small">当前有效会话授权</text>
+  <text x="688" y="925" class="small">旧版客户端不能例外</text>
+
+  <!-- 8: y=966..1038. Neither the platform nor the Agent is an endpoint on the media path. -->
+  <rect class="box" x="30" y="966" width="548" height="72" rx="8" fill="#d1fae5" stroke="#22c55e"/>
+  <text x="304" y="988" class="heading green">⑧ RTSP 校验当前会话与会话密钥</text>
+  <text x="304" y="1006">强制加密，禁止降级；通过后进入串流</text>
+  <text x="304" y="1024">音视频与控制：Moonlight ↔ Sunshine 直连</text>
+  <rect class="box" x="606" y="966" width="164" height="72" rx="8" fill="#d1fae5" stroke="#22c55e"/>
+  <text x="688" y="988" class="heading green">媒体与控制直连</text>
+  <text x="688" y="1006" class="small">Moonlight ↔ Sunshine</text>
+  <text x="688" y="1024" class="small">平台 / Agent 不在链路中</text>
+
+  <!-- 9: y=1065..1155. Ticket expiry gates entry; the independent lease governs an active session. -->
+  <rect class="box" x="30" y="1065" width="548" height="90" rx="8" fill="#d1fae5" stroke="#22c55e"/>
+  <text x="304" y="1087" class="heading green">⑨ 运行中独立续租（建议租约 60s / 每 20s 续租）</text>
+  <text x="304" y="1105">撤销或租约到期 → 停止串流，清理会话与密钥</text>
+  <text x="304" y="1123">短暂网络恢复可保留有效会话；完整重连需新票据、新密钥</text>
+  <text x="304" y="1141">票据 exp 只限制准入；运行期间由租约控制</text>
+  <rect class="box" x="606" y="1065" width="164" height="90" rx="8" fill="#fce7f3" stroke="#ec4899"/>
+  <text x="688" y="1087" class="heading pink">运行授权看租约</text>
+  <text x="688" y="1105" class="small">票据过期不直接断流</text>
+  <text x="688" y="1123" class="small">撤销 / 到期必须停止</text>
+  <text x="688" y="1141" class="small">完整重连重新准入</text>
+
+  <!-- Outside-flow invariant panel: x=30..770, y=1182..1254; bottom viewBox padding=25. -->
+  <rect class="box" x="30" y="1182" width="740" height="72" rx="8" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="400" y="1204" class="heading">安全边界：旧 TLS 凭据 ≠ 本次授权；准备事件 ≠ 启动；通过验证 ≠ 永久授权</text>
+  <text x="400" y="1222" class="small">准入：一次性票据 + 独立私钥证明　｜　运行：有效会话 + 租约　｜　传输：强制加密</text>
+  <text x="400" y="1240" class="small">本图为推荐方案，尚未实现；建议时长可由平台策略配置。</text>
+</svg>
