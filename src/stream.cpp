@@ -1548,6 +1548,7 @@ namespace stream {
         auto lg = server->_sessions.lock();
 
         auto now = std::chrono::steady_clock::now();
+        std::optional<std::uint32_t> client_rtt;
         while (auto request = force_requests->pop(CONTROL_SERVICE_DRAIN_TIMEOUT)) {
           BOOST_LOG(warning) << "[control][stop] reason=force_disconnect_from_upstream code=0x"sv
                              << util::hex(request->termination_code).to_string_view()
@@ -1691,8 +1692,15 @@ namespace stream {
             }
           }
 
+          if (session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && session->control.peer) {
+            if (const auto rtt = detail::control_peer_rtt(*session->control.peer)) {
+              client_rtt = client_rtt ? std::max(*client_rtt, *rtt) : *rtt;
+            }
+          }
+
           ++pos;
         })
+        middleware::notify_client_rtt(client_rtt);
       }
 
       server->flush();
@@ -1700,6 +1708,7 @@ namespace stream {
     }
 
     // Keep any selected upstream error code and the send-once guard during shutdown.
+    middleware::notify_client_rtt(std::nullopt);
     auto lg = server->_sessions.lock();
     for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
       auto session = *pos;

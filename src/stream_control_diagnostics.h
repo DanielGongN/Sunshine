@@ -13,6 +13,13 @@
 #include <span>
 
 namespace stream::detail {
+  inline std::optional<std::uint32_t> control_peer_rtt(const ENetPeer &peer) {
+    if (peer.state != ENET_PEER_STATE_CONNECTED || peer.lastReceiveTime == 0 || peer.roundTripTime == 0) {
+      return std::nullopt;
+    }
+    return peer.roundTripTime;
+  }
+
   inline std::optional<std::uint16_t> observed_disconnect_header(std::span<const std::uint8_t> packet) {
     if (packet.size() < sizeof(std::uint16_t)) {
       return std::nullopt;

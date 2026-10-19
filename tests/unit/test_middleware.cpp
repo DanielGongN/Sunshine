@@ -3,17 +3,22 @@
  * @brief Test src/middleware.cpp helpers.
  */
 
+#include "src/config.h"
 #include "src/middleware.h"
 #include "src/stream_disconnect.h"
 #include "src/thread_safe.h"
 
+#include <algorithm>
 #include <barrier>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -23,9 +28,11 @@ namespace middleware {
   extern boost::beast::websocket::stream<boost::asio::ip::tcp::socket> *g_ws;
   extern safe::queue_t<std::string> g_outgoing_queue;
   void clear_pending_connected_payload();
+  std::optional<std::int64_t> pending_connected_message_id();
 }  // namespace middleware
 
 namespace middleware::detail {
+  nlohmann::json make_heartbeat_payload(std::int64_t message_id);
   nlohmann::json make_connected_payload(std::int64_t message_id);
   nlohmann::json make_disconnected_payload(std::string_view message, disconnect_notification_type_e type);
   bool is_connected_ack_success(const nlohmann::json &msg, std::int64_t pending_message_id);
@@ -34,6 +41,84 @@ namespace middleware::detail {
 }  // namespace middleware::detail
 
 #include "../tests_common.h"
+
+class MiddlewareHeartbeatTests: public ::testing::Test {
+protected:
+  void SetUp() override {
+    middleware::notify_client_rtt(std::nullopt);
+  }
+
+  void TearDown() override {
+    disconnect();
+    middleware::notify_client_rtt(std::nullopt);
+  }
+
+  void connect() {
+    middleware::notify_client_state(true);
+    connected = true;
+  }
+
+  void disconnect() {
+    if (connected) {
+      middleware::notify_client_state(false);
+      connected = false;
+    }
+  }
+
+  bool connected {};
+};
+
+TEST_F(MiddlewareHeartbeatTests, DisconnectedClientHasNullRtt) {
+  middleware::notify_client_rtt(23);
+  const auto msg = middleware::detail::make_heartbeat_payload(1783665405);
+
+  EXPECT_EQ(msg.at("event"), "client_heartbeat");
+  EXPECT_EQ(msg.at("message_id"), 1783665405);
+  EXPECT_EQ(msg.at("data").at("type"), 1);
+  EXPECT_EQ(msg.at("data").at("net_connected"), false);
+  EXPECT_TRUE(msg.at("data").at("rtt_delay").is_null());
+}
+
+TEST_F(MiddlewareHeartbeatTests, ConnectedClientWithoutMeasurementHasNullRtt) {
+  connect();
+  const auto msg = middleware::detail::make_heartbeat_payload(1);
+
+  EXPECT_EQ(msg.at("data").at("net_connected"), true);
+  EXPECT_TRUE(msg.at("data").at("rtt_delay").is_null());
+}
+
+TEST_F(MiddlewareHeartbeatTests, ReportsLatestRttInMilliseconds) {
+  connect();
+  middleware::notify_client_rtt(23);
+  EXPECT_EQ(middleware::detail::make_heartbeat_payload(1).at("data").at("rtt_delay"), 23);
+
+  middleware::notify_client_rtt(47);
+  EXPECT_EQ(middleware::detail::make_heartbeat_payload(2).at("data").at("rtt_delay"), 47);
+
+  middleware::notify_client_rtt(std::nullopt);
+  const auto msg = middleware::detail::make_heartbeat_payload(3);
+  EXPECT_EQ(msg.at("data").at("net_connected"), true);
+  EXPECT_TRUE(msg.at("data").at("rtt_delay").is_null());
+}
+
+TEST_F(MiddlewareHeartbeatTests, DisconnectAndReconnectDoNotReusePreviousRtt) {
+  connect();
+  middleware::notify_client_rtt(23);
+  disconnect();
+  EXPECT_TRUE(middleware::detail::make_heartbeat_payload(1).at("data").at("rtt_delay").is_null());
+
+  connect();
+  EXPECT_TRUE(middleware::detail::make_heartbeat_payload(2).at("data").at("rtt_delay").is_null());
+
+  middleware::notify_client_rtt(71);
+  EXPECT_EQ(middleware::detail::make_heartbeat_payload(3).at("data").at("rtt_delay"), 71);
+}
+
+TEST_F(MiddlewareHeartbeatTests, FirstConnectionDiscardsUnconnectedMeasurement) {
+  middleware::notify_client_rtt(23);
+  connect();
+  EXPECT_TRUE(middleware::detail::make_heartbeat_payload(1).at("data").at("rtt_delay").is_null());
+}
 
 TEST(MiddlewareConnectedAckTests, ConnectedPayloadUsesNestedData) {
   auto msg = middleware::detail::make_connected_payload(1783665405);
@@ -87,6 +172,182 @@ TEST(MiddlewareConnectedAckTests, MissingCodeIsRejected) {
   };
 
   ASSERT_FALSE(middleware::detail::is_connected_ack_success(ack, 1783665405));
+}
+
+class MiddlewareDeliveryTests: public ::testing::Test {
+protected:
+  void SetUp() override {
+    previous_address = std::exchange(config::sunshine.middleware.address, "127.0.0.1");
+    previous_port = std::exchange(config::sunshine.middleware.port, acceptor.local_endpoint().port());
+    // Engine metadata only reads the certificate; it does not parse it.
+    previous_cert = std::exchange(config::nvhttp.cert, SUNSHINE_SOURCE_DIR "/tests/fixtures/http/hello.txt");
+    auto ready = mail::man->event<bool>(mail::nvhttp_ready);
+    previously_ready = ready->peek();
+    ready->raise(true);
+    middleware::g_outgoing_queue.discard();
+    acceptor.async_accept(ws.next_layer(), [this](boost::system::error_code ec) {
+      ASSERT_FALSE(ec) << ec.message();
+      ws.async_accept([this](boost::system::error_code ec) {
+        ASSERT_FALSE(ec) << ec.message();
+        read_next();
+      });
+    });
+    client = middleware::start();
+    ASSERT_TRUE(wait_for([this]() {
+      return !messages.empty() && messages.back().value("event", "") == "send_to_upstream" &&
+             messages.back().at("data").value("event", "") == "stream_engine_info";
+    }));
+    messages.clear();
+  }
+
+  void TearDown() override {
+    if (ws.is_open()) {
+      ws.async_close(boost::beast::websocket::close_code::normal, [this](boost::system::error_code) {
+        closed = true;
+      });
+      EXPECT_TRUE(wait_for([this]() {
+        return closed;
+      }));
+    }
+    client.reset();
+    boost::system::error_code ec;
+    ws.next_layer().close(ec);
+    acceptor.close(ec);
+    ioc.restart();
+    ioc.poll();
+    middleware::g_outgoing_queue.discard();
+    config::sunshine.middleware.address = std::move(previous_address);
+    config::sunshine.middleware.port = previous_port;
+    config::nvhttp.cert = std::move(previous_cert);
+    if (!previously_ready) {
+      mail::man->event<bool>(mail::nvhttp_ready)->reset();
+    }
+  }
+
+  void read_next() {
+    ws.async_read(buffer, [this](boost::system::error_code ec, std::size_t) {
+      if (ec) {
+        return;
+      }
+      messages.push_back(nlohmann::json::parse(boost::beast::buffers_to_string(buffer.data())));
+      buffer.consume(buffer.size());
+      read_next();
+    });
+  }
+
+  template<class Predicate>
+  bool wait_for(Predicate done, std::chrono::steady_clock::duration timeout = std::chrono::seconds {2}) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!done() && std::chrono::steady_clock::now() < deadline) {
+      ioc.restart();
+      ioc.run_for(std::chrono::milliseconds {5});
+    }
+    return done();
+  }
+
+  boost::asio::io_context ioc;
+  boost::asio::ip::tcp::acceptor acceptor {ioc, {boost::asio::ip::make_address("127.0.0.1"), 0}};
+  boost::beast::websocket::stream<boost::asio::ip::tcp::socket> ws {ioc};
+  boost::beast::flat_buffer buffer;
+  std::unique_ptr<platf::deinit_t> client;
+  std::vector<nlohmann::json> messages;
+  std::string previous_address;
+  std::string previous_cert;
+  int previous_port {};
+  bool previously_ready {};
+  bool closed {};
+};
+
+TEST_F(MiddlewareDeliveryTests, ConnectedIsSentWhileUpstreamIsSilent) {
+  middleware::notify_client_connected();
+
+  ASSERT_TRUE(wait_for([this]() {
+    return !messages.empty();
+  }))
+    << "connected waited for upstream traffic or the heartbeat";
+  ASSERT_EQ(messages.front().value("event", ""), "send_to_upstream");
+  const auto &connected = messages.front().at("data");
+  EXPECT_EQ(connected.value("event", ""), "connected");
+  EXPECT_EQ(connected.at("data").value("type", 0), 1);
+  EXPECT_EQ(connected.at("message_id").get<std::int64_t>(), middleware::pending_connected_message_id());
+}
+
+TEST_F(MiddlewareDeliveryTests, HeartbeatReportsRttWithoutUpstreamEnvelope) {
+  middleware::notify_client_state(true);
+  auto state_guard = util::fail_guard([]() {
+    middleware::notify_client_state(false);
+  });
+  middleware::notify_client_rtt(23);
+
+  ASSERT_TRUE(wait_for([this]() {
+    return std::any_of(messages.begin(), messages.end(), [](const auto &message) {
+      return message.value("event", "") == "client_heartbeat";
+    });
+  },
+                       std::chrono::seconds {32}));
+
+  const auto heartbeat = std::find_if(messages.begin(), messages.end(), [](const auto &message) {
+    return message.value("event", "") == "client_heartbeat";
+  });
+  ASSERT_NE(heartbeat, messages.end());
+  EXPECT_TRUE(heartbeat->at("message_id").is_number_integer());
+  EXPECT_EQ(heartbeat->at("data").at("type"), 1);
+  EXPECT_EQ(heartbeat->at("data").at("net_connected"), true);
+  EXPECT_EQ(heartbeat->at("data").at("rtt_delay"), 23);
+}
+
+TEST_F(MiddlewareDeliveryTests, QueuedMessagesKeepTheirOrderWhileUpstreamIsSilent) {
+  constexpr int count = 16;
+  for (int index = 0; index < count; ++index) {
+    middleware::send_to_upstream({{"event", "delivery_test"}, {"index", index}, {"payload", std::string(8192, 'x')}});
+  }
+
+  ASSERT_TRUE(wait_for([this]() {
+    return messages.size() == count;
+  }));
+  for (int index = 0; index < count; ++index) {
+    const auto &message = messages[index].at("data");
+    EXPECT_EQ(message.value("event", ""), "delivery_test");
+    EXPECT_EQ(message.value("index", -1), index);
+    EXPECT_EQ(message.at("payload"), std::string(8192, 'x'));
+  }
+}
+
+TEST_F(MiddlewareDeliveryTests, ConnectedRetriesAfterThirtySecondsUntilAcknowledged) {
+  const auto started = std::chrono::steady_clock::now();
+  middleware::notify_client_connected();
+  ASSERT_TRUE(wait_for([this]() {
+    return !messages.empty();
+  }));
+  const auto original = messages.front().at("data");
+  auto connected_count = [this]() {
+    return std::count_if(messages.begin(), messages.end(), [](const auto &message) {
+      return message.value("event", "") == "send_to_upstream" && message.at("data").value("event", "") == "connected";
+    });
+  };
+
+  ASSERT_TRUE(wait_for([&connected_count]() {
+    return connected_count() == 2;
+  },
+                       std::chrono::seconds {32}));
+  EXPECT_GE(std::chrono::steady_clock::now() - started, std::chrono::seconds {29});
+  const auto retried = std::find_if(messages.rbegin(), messages.rend(), [](const auto &message) {
+    return message.value("event", "") == "send_to_upstream" && message.at("data").value("event", "") == "connected";
+  });
+  ASSERT_NE(retried, messages.rend());
+  EXPECT_EQ(retried->at("data"), original);
+
+  const auto ack = std::make_shared<std::string>(nlohmann::json {
+    {"event", "consume_record_create_success"},
+    {"message_id", original.at("message_id")},
+    {"data", {{"code", 0}}}
+  }.dump());
+  ws.async_write(boost::asio::buffer(*ack), [ack](boost::system::error_code ec, std::size_t) {
+    EXPECT_FALSE(ec) << ec.message();
+  });
+  ASSERT_TRUE(wait_for([]() {
+    return !middleware::pending_connected_message_id();
+  }));
 }
 
 TEST(MiddlewareDisconnectTests, UnknownReasonUsesAbnormalTypeInData) {

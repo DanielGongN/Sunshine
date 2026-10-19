@@ -8,6 +8,8 @@
 #include <nlohmann/json_fwd.hpp>
 
 // standard includes
+#include <cstdint>
+#include <optional>
 #include <string_view>
 
 // local includes
@@ -50,6 +52,7 @@ namespace middleware {
    *
    * Thread-safe — may be called from any thread.
    * The message is queued and sent on the middleware's io_context thread.
+   * Starts sending without waiting for incoming messages or the heartbeat.
    * If the middleware is not connected, the message is silently dropped.
    */
   void send_to_upstream(nlohmann::json msg);
@@ -83,5 +86,13 @@ namespace middleware {
    * Thread-safe. Used by the heartbeat to report net_connected status.
    */
   void notify_client_state(bool connected);
+
+  /**
+   * @brief Publish the maximum measured RTT of running clients for the heartbeat.
+   * @param rtt Smoothed control RTT in milliseconds, or nullopt if unavailable.
+   *
+   * Thread-safe. Called by the control thread without exposing ENet peers.
+   */
+  void notify_client_rtt(std::optional<std::uint32_t> rtt);
 
 }  // namespace middleware

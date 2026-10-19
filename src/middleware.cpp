@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -52,8 +53,10 @@ namespace middleware {
   asio::io_context *g_ioc = nullptr;
   websocket::stream<tcp::socket> *g_ws = nullptr;
   safe::queue_t<std::string> g_outgoing_queue {30};
-  std::atomic<bool> g_read_in_progress {false};
+  // Accessed only on the middleware io_context thread.
+  std::shared_ptr<std::string> g_write_payload;
   std::atomic<int> g_active_sessions {0};
+  std::atomic<std::int64_t> g_client_rtt_ms {-1};
   std::atomic<bool> g_disconnected_notification_sent {false};
   constexpr auto HEARTBEAT_INTERVAL = 30s;
   constexpr auto CONNECTED_RETRY_INTERVAL = 30s;
@@ -61,6 +64,29 @@ namespace middleware {
   std::optional<std::int64_t> g_pending_connected_message_id;
   std::optional<json> g_pending_connected_payload;
   asio::steady_timer *g_connected_retry_timer = nullptr;
+
+  void drain_outgoing() {
+    if (!g_ws || !g_ws->is_open() || g_write_payload) {
+      return;
+    }
+
+    auto payload = g_outgoing_queue.pop(0ms);
+    if (!payload) {
+      return;
+    }
+
+    // Keep the buffer alive and serialize writes independently of pending reads.
+    g_write_payload = std::make_shared<std::string>(std::move(*payload));
+    g_ws->async_write(asio::buffer(*g_write_payload), [payload = g_write_payload](beast::error_code ec, std::size_t) {
+      g_write_payload.reset();
+      if (ec) {
+        BOOST_LOG(warning) << "Failed to send to upstream: "sv << ec.message();
+        return;
+      }
+
+      drain_outgoing();
+    });
+  }
 
   namespace detail {
     bool claim_disconnected_notification() {
@@ -97,6 +123,19 @@ namespace middleware {
       }
 
       return std::nullopt;
+    }
+
+    json make_heartbeat_payload(std::int64_t message_id) {
+      const auto connected = g_active_sessions.load(std::memory_order_acquire) > 0;
+      const auto rtt = g_client_rtt_ms.load(std::memory_order_acquire);
+      return {
+        {"event", "client_heartbeat"},
+        {"message_id", message_id},
+        {"data",
+         {{"net_connected", connected},
+          {"type", 1},
+          {"rtt_delay", connected && rtt >= 0 ? json(rtt) : json(nullptr)}}}
+      };
     }
 
     json make_connected_payload(std::int64_t message_id) {
@@ -314,10 +353,19 @@ namespace middleware {
 
   void notify_client_state(bool connected) {
     if (connected) {
+      if (g_active_sessions.load(std::memory_order_acquire) == 0) {
+        notify_client_rtt(std::nullopt);
+      }
       g_active_sessions.fetch_add(1, std::memory_order_release);
     } else {
-      g_active_sessions.fetch_sub(1, std::memory_order_release);
+      if (g_active_sessions.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        notify_client_rtt(std::nullopt);
+      }
     }
+  }
+
+  void notify_client_rtt(std::optional<std::uint32_t> rtt) {
+    g_client_rtt_ms.store(rtt ? static_cast<std::int64_t>(*rtt) : -1, std::memory_order_release);
   }
 
   void notify_client_connected() {
@@ -376,6 +424,7 @@ namespace middleware {
       if (worker.joinable()) {
         worker.join();
       }
+      g_write_payload.reset();
     }
 
     void run() {
@@ -625,27 +674,9 @@ namespace middleware {
       send_to_upstream(std::move(msg));
     }
 
-    void drain_outgoing() {
-      while (g_outgoing_queue.peek()) {
-        auto payload = g_outgoing_queue.pop();
-        if (!payload) {
-          continue;
-        }
-        beast::error_code ec;
-        ws.write(asio::buffer(*payload), ec);
-        if (ec) {
-          BOOST_LOG(warning) << "Failed to send to upstream: "sv << ec.message();
-          break;
-        }
-      }
-    }
-
     void do_async_read() {
-      g_read_in_progress.store(true, std::memory_order_release);
       auto buffer = std::make_shared<beast::flat_buffer>();
       ws.async_read(*buffer, [this, buffer](beast::error_code ec, std::size_t bytes) {
-        g_read_in_progress.store(false, std::memory_order_release);
-
         if (stopping.load()) {
           return;
         }
@@ -723,10 +754,10 @@ namespace middleware {
       }
       send_stream_engine_info();
 
-      // Drain outgoing before starting async read (no read pending, safe to write)
+      // Start queued writes; asynchronous reads and writes may run concurrently.
       drain_outgoing();
 
-      // Start async read loop (no cancel in send_to_upstream, so it won't be interrupted)
+      // Start the independent async read loop.
       do_async_read();
 
       // Start heartbeat timer
@@ -738,13 +769,7 @@ namespace middleware {
         return;
       }
 
-      json msg;
-      msg["event"] = "client_heartbeat";
-      msg["message_id"] = make_timestamp();
-      msg["data"] = {
-        {"net_connected", g_active_sessions.load(std::memory_order_acquire) > 0},
-        {"type", 1}  // 1 = sunshine client
-      };
+      const auto msg = detail::make_heartbeat_payload(make_timestamp());
 
       // Heartbeats are sent directly and do not use the send_to_upstream envelope.
       std::string payload = msg.dump();
@@ -840,30 +865,9 @@ namespace middleware {
     std::string payload = envelope.dump();
     g_outgoing_queue.raise(std::move(payload));
 
-    // Post to the io_context and try to drain the outgoing queue.
-    // If the read loop is active, its completion callback will drain the queue.
-    // If no read is active, drain immediately.
+    // Wake the serialized writer immediately, even while waiting for upstream input.
     boost::asio::post(*g_ioc, []() {
-      if (!g_ws) {
-        return;
-      }
-      if (g_read_in_progress.load(std::memory_order_acquire)) {
-        // The active read loop will call drain_outgoing().
-        return;
-      }
-      // No active read operation; drain safely now.
-      while (g_outgoing_queue.peek()) {
-        auto payload = g_outgoing_queue.pop();
-        if (!payload) {
-          continue;
-        }
-        beast::error_code wec;
-        g_ws->write(asio::buffer(*payload), wec);
-        if (wec) {
-          BOOST_LOG(warning) << "send_to_upstream write failed: "sv << wec.message();
-          break;
-        }
-      }
+      drain_outgoing();
     });
   }
 
