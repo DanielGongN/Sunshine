@@ -12,6 +12,10 @@
 namespace platf {
   struct keyboard_mouse_backend_t {
     std::unique_ptr<interception_input_t> interception;
+    bool initialized = false;
+
+    void initialize(const std::wstring &interception_path);
+    void initialize_from_executable_dir();
   };
 
   keyboard_mouse_backend_t select_keyboard_mouse_backend(const std::wstring &interception_path);

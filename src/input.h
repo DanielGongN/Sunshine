@@ -82,6 +82,12 @@ namespace input {
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init();
 
   /**
+   * @brief Select the keyboard/mouse backend after middleware authorizes a client.
+   * @return true when input is ready, including the default platform fallback.
+   */
+  bool preinitialize_keyboard_mouse();
+
+  /**
    * @brief Preinitialize persistent gamepads after middleware authorizes a client.
    * @return true when the requested gamepads are ready.
    */

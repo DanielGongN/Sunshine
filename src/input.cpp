@@ -2313,7 +2313,26 @@ namespace input {
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init() {
     platf_input = platf::input();
 
+    if (!config::sunshine.middleware.enabled) {
+      preinitialize_keyboard_mouse();
+    }
+
     return std::make_unique<deinit_t>();
+  }
+
+  bool preinitialize_keyboard_mouse() {
+#ifdef _WIN32
+    if (!platf_input) {
+      return false;
+    }
+
+    auto result = task_pool.push([]() {
+      return platf::preinitialize_keyboard_mouse(platf_input);
+    });
+    return result.get();
+#else
+    return true;
+#endif
   }
 
   bool preinitialize_gamepads() {

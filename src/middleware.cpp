@@ -600,6 +600,9 @@ namespace middleware {
             nvhttp::set_pending_stream_config(data);
             BOOST_LOG(info) << "client_connect: stream config stored, waiting for serverinfo"sv;
           }
+          if (!input::preinitialize_keyboard_mouse()) {
+            BOOST_LOG(error) << "client_connect: failed to initialize keyboard/mouse input"sv;
+          }
           if (config::sunshine.middleware.gamepad_preinit && !input::preinitialize_gamepads()) {
             BOOST_LOG(error) << "client_connect: failed to preinitialize gamepad"sv;
           }

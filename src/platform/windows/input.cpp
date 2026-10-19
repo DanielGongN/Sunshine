@@ -707,18 +707,6 @@ namespace platf {
     input_t result {new input_raw_t {}};
     auto &raw = *(input_raw_t *) result.get();
 
-    auto selected_backend = task_pool.push([] {
-      return select_keyboard_mouse_backend_from_executable_dir();
-    });
-    raw.keyboard_mouse = selected_backend.get();
-    if (config::input.desktop_mouse_absolute) {
-      if (raw.keyboard_mouse.interception) {
-        BOOST_LOG(info) << "Precise desktop cursor mode is inactive while Interception is selected"sv;
-      } else {
-        BOOST_LOG(info) << "Precise desktop cursor mode enabled for SendInput mouse movement"sv;
-      }
-    }
-
     raw.vigem = new vigem_t {};
     if (raw.vigem->init()) {
       delete raw.vigem;
@@ -731,6 +719,26 @@ namespace platf {
     raw.fnDestroySyntheticPointerDevice = (decltype(DestroySyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "DestroySyntheticPointerDevice");
 
     return result;
+  }
+
+  bool preinitialize_keyboard_mouse(input_t &input) {
+    auto *raw = static_cast<input_raw_t *>(input.get());
+    if (!raw) {
+      return false;
+    }
+    if (raw->keyboard_mouse.initialized) {
+      return true;
+    }
+
+    raw->keyboard_mouse.initialize_from_executable_dir();
+    if (config::input.desktop_mouse_absolute) {
+      if (raw->keyboard_mouse.interception) {
+        BOOST_LOG(info) << "Precise desktop cursor mode is inactive while Interception is selected"sv;
+      } else {
+        BOOST_LOG(info) << "Precise desktop cursor mode enabled for SendInput mouse movement"sv;
+      }
+    }
+    return true;
   }
 
   bool preinitialize_gamepads(input_t &input) {

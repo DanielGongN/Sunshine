@@ -52,6 +52,50 @@ TEST(InterceptionInput, SelectedWhenAvailable) {
   EXPECT_NE(backend.interception, nullptr);
 }
 
+TEST(InterceptionInput, BackendWaitsForExplicitInitialization) {
+  fake_module_t fake;
+  ASSERT_NE(fake.module, nullptr);
+  ASSERT_NE(fake.reset, nullptr);
+  fake.reset();
+
+  platf::keyboard_mouse_backend_t backend;
+  EXPECT_FALSE(backend.initialized);
+  EXPECT_EQ(backend.interception, nullptr);
+
+  backend.initialize(test_dll_path(L"interception_fake.dll"));
+  EXPECT_TRUE(backend.initialized);
+  EXPECT_NE(backend.interception, nullptr);
+}
+
+TEST(InterceptionInput, RepeatedInitializationKeepsSelectedInterception) {
+  fake_module_t fake;
+  ASSERT_NE(fake.module, nullptr);
+  ASSERT_NE(fake.reset, nullptr);
+  fake.reset();
+
+  platf::keyboard_mouse_backend_t backend;
+  backend.initialize(test_dll_path(L"interception_fake.dll"));
+  ASSERT_NE(backend.interception, nullptr);
+  const auto *selected = backend.interception.get();
+
+  backend.initialize(test_dll_path(L"missing-interception.dll"));
+  backend.initialize_from_executable_dir();
+  EXPECT_TRUE(backend.initialized);
+  EXPECT_EQ(backend.interception.get(), selected);
+}
+
+TEST(InterceptionInput, RepeatedInitializationKeepsSendInputFallback) {
+  platf::keyboard_mouse_backend_t backend;
+  backend.initialize(test_dll_path(L"missing-interception.dll"));
+  EXPECT_TRUE(backend.initialized);
+  EXPECT_EQ(backend.interception, nullptr);
+
+  backend.initialize(test_dll_path(L"interception_fake.dll"));
+  backend.initialize_from_executable_dir();
+  EXPECT_TRUE(backend.initialized);
+  EXPECT_EQ(backend.interception, nullptr);
+}
+
 TEST(InterceptionInput, UsesSendInputWhenInterceptionFails) {
   fake_module_t interception_fake;
   ASSERT_NE(interception_fake.module, nullptr);

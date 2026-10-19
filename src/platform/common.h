@@ -795,6 +795,12 @@ namespace platf {
   void reset_desktop_mouse(input_t &input);
 
   /**
+   * @brief Select the keyboard/mouse backend once after client authorization.
+   * @return true when the input context is ready, including SendInput fallback.
+   */
+  bool preinitialize_keyboard_mouse(input_t &input);
+
+  /**
    * @brief Create persistent virtual gamepads after middleware authorizes a client.
    * @return true when all preinitialized slots are ready.
    */
