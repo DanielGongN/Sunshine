@@ -45,7 +45,7 @@ constructs the heartbeat used by the real send path and unit tests.
 ## Task 2: Sample ENet RTT and validate the complete flow
 
 Files: `src/stream_control_diagnostics.h`, `src/stream.cpp`,
-`tests/unit/test_stream_control_diagnostics.cpp`.
+`tests/unit/test_stream_rtt.cpp` (explicitly track this file because `tests/` is ignored).
 
 Interface:
 `std::optional<std::uint32_t> stream::detail::control_peer_rtt(const ENetPeer &peer)`
@@ -57,10 +57,24 @@ and positive RTT.
 - [x] Read RTTs after control session timeout/cleanup processing, include only
       running peers, compute the maximum, and publish once per iteration.
       Publish null at control broadcast shutdown.
-- [ ] Build using the required MSYS2 shell:
+- [x] Build using the required MSYS2 shell:
       `cmake --build cmake-build-codex-tests --target test_sunshine -j 2`.
-- [ ] Run `cmake-build-codex-tests/tests/test_sunshine.exe` with
+- [x] Run `cmake-build-codex-tests/tests/test_sunshine.exe` with
       `--gtest_filter=Middleware*:StreamControlDiagnosticsTests.*` and review
       results, including the real 30-second heartbeat delivery.
-- [ ] Apply `.clang-format` to changed C++ lines, review the diff, and report
+- [x] Apply `.clang-format` to changed C++ lines, review the diff, and report
       the resulting payload and validation results.
+
+## Validation results
+
+- MSYS2 UCRT64 `test_sunshine` build passed.
+- `--gtest_filter=Middleware*:Stream*`: 80 tests passed, including the nine
+  new RTT tests and actual WebSocket heartbeat delivery after 30 seconds.
+- After moving the three transport RTT cases into the explicitly tracked
+  `tests/unit/test_stream_rtt.cpp`, the test target rebuilt successfully and
+  `--gtest_filter=MiddlewareHeartbeatTests.*:StreamControlDiagnosticsTests.*`
+  passed all 11 tests.
+- Changed C++ lines pass `.clang-format` validation and the diff passes
+  whitespace checks.
+- Existing gcov profiles emitted checksum warnings for recompiled files;
+  the test process exited successfully and no coverage result is claimed.
