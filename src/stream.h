@@ -43,7 +43,7 @@ namespace stream {
       bool already_notified
     );
 
-    boost::asio::ip::address select_video_source_address(
+    boost::asio::ip::address select_media_source_address(
       const boost::asio::ip::address &peer_address,
       const std::optional<boost::asio::ip::address> &routed_source_address
     );

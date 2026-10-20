@@ -3,13 +3,13 @@
  * @brief Test src/stream.*
  */
 
+#include <boost/asio/ip/address.hpp>
+#include <boost/asio/ip/udp.hpp>
 #include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <boost/asio/ip/address.hpp>
 
 namespace stream {
   namespace detail {
@@ -28,11 +28,17 @@ namespace stream {
       bool already_notified
     );
 
-    boost::asio::ip::address select_video_source_address(
+    boost::asio::ip::address select_media_source_address(
       const boost::asio::ip::address &peer_address,
       const std::optional<boost::asio::ip::address> &routed_source_address
     );
   }  // namespace detail
+
+  boost::asio::ip::address resolve_media_source_address(
+    const boost::asio::ip::udp::endpoint &peer,
+    const boost::asio::ip::address &bound_address,
+    std::string_view stream_type
+  );
 
   std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2);
 }  // namespace stream
@@ -112,42 +118,109 @@ TEST(StreamTimeoutNotificationTests, NotificationIsLatched) {
   );
 }
 
-TEST(VideoSourceAddressTests, KeepsLoopbackForGatewayPeer) {
+TEST(MediaSourceAddressTests, KeepsLoopbackForGatewayPeer) {
   auto peer = boost::asio::ip::make_address("127.0.0.1");
   auto routed = boost::asio::ip::make_address("192.168.1.10");
 
-  EXPECT_EQ(stream::detail::select_video_source_address(peer, routed), peer);
+  EXPECT_EQ(stream::detail::select_media_source_address(peer, routed), peer);
 }
 
-TEST(VideoSourceAddressTests, UsesResolvedIpv4AddressForDirectPeer) {
+TEST(MediaSourceAddressTests, UsesResolvedIpv4AddressForDirectPeer) {
   auto peer = boost::asio::ip::make_address("223.85.203.217");
   auto routed = boost::asio::ip::make_address("192.168.1.10");
 
-  EXPECT_EQ(stream::detail::select_video_source_address(peer, routed), routed);
+  EXPECT_EQ(stream::detail::select_media_source_address(peer, routed), routed);
 }
 
-TEST(VideoSourceAddressTests, UsesResolvedIpv6AddressForDirectPeer) {
+TEST(MediaSourceAddressTests, UsesResolvedIpv6AddressForDirectPeer) {
   auto peer = boost::asio::ip::make_address("2001:db8::20");
   auto routed = boost::asio::ip::make_address("2001:db8::10");
 
-  EXPECT_EQ(stream::detail::select_video_source_address(peer, routed), routed);
+  EXPECT_EQ(stream::detail::select_media_source_address(peer, routed), routed);
 }
 
-TEST(VideoSourceAddressTests, FallsBackToIpv4AnyWhenRouteIsMissing) {
+TEST(MediaSourceAddressTests, FallsBackToIpv4AnyWhenRouteIsMissing) {
   auto peer = boost::asio::ip::make_address("223.85.203.217");
 
   EXPECT_EQ(
-    stream::detail::select_video_source_address(peer, std::nullopt),
+    stream::detail::select_media_source_address(peer, std::nullopt),
     boost::asio::ip::address {boost::asio::ip::address_v4::any()}
   );
 }
 
-TEST(VideoSourceAddressTests, FallsBackToIpv6AnyForWrongAddressFamily) {
+TEST(MediaSourceAddressTests, FallsBackToIpv6AnyForWrongAddressFamily) {
   auto peer = boost::asio::ip::make_address("2001:db8::20");
   auto routed = boost::asio::ip::make_address("192.168.1.10");
 
   EXPECT_EQ(
-    stream::detail::select_video_source_address(peer, routed),
+    stream::detail::select_media_source_address(peer, routed),
     boost::asio::ip::address {boost::asio::ip::address_v6::any()}
   );
 }
+
+TEST(MediaSourceAddressTests, KeepsIpv4LoopbackBeforeControlConnects) {
+  auto peer = boost::asio::ip::make_address("127.0.0.1");
+
+  EXPECT_EQ(stream::detail::select_media_source_address(peer, std::nullopt), peer);
+}
+
+TEST(MediaSourceAddressTests, KeepsIpv6LoopbackBeforeControlConnects) {
+  auto peer = boost::asio::ip::make_address("::1");
+
+  EXPECT_EQ(stream::detail::select_media_source_address(peer, std::nullopt), peer);
+}
+
+TEST(MediaSourceResolutionTests, ResolvesGatewayAudioFromWildcardSocketBinding) {
+  const boost::asio::ip::udp::endpoint peer {boost::asio::ip::make_address("127.0.0.1"), 41416};
+
+  EXPECT_EQ(
+    stream::resolve_media_source_address(peer, boost::asio::ip::address_v4::any(), "audio"),
+    peer.address()
+  );
+}
+
+TEST(MediaSourceResolutionTests, ResolvesIpv6LoopbackFromWildcardSocketBinding) {
+  const boost::asio::ip::udp::endpoint peer {boost::asio::ip::make_address("::1"), 41416};
+
+  EXPECT_EQ(
+    stream::resolve_media_source_address(peer, boost::asio::ip::address_v6::any(), "audio"),
+    peer.address()
+  );
+}
+
+TEST(MediaSourceResolutionTests, PreservesBoundSourceForDirectAudio) {
+  const boost::asio::ip::udp::endpoint peer {boost::asio::ip::make_address("192.0.2.1"), 5000};
+  auto source = boost::asio::ip::make_address("192.0.2.2");
+
+  EXPECT_EQ(stream::resolve_media_source_address(peer, source, "audio"), source);
+}
+
+#ifdef _WIN32
+TEST(MediaSourceResolutionTests, SendsGatewayAudioBeforeControlConnects) {
+  namespace asio = boost::asio;
+  using asio::ip::udp;
+
+  asio::io_context io_context;
+  udp::socket gateway {io_context, udp::endpoint {asio::ip::address_v4::loopback(), 0}};
+  udp::socket audio {io_context, udp::endpoint {udp::v4(), 0}};
+  const auto peer = gateway.local_endpoint();
+  auto peer_address = peer.address();
+  auto source = stream::resolve_media_source_address(peer, audio.local_endpoint().address(), "audio");
+  ASSERT_EQ(source, peer_address);
+
+  const std::string payload = "audio-before-control";
+  auto send_info = platf::send_info_t {
+    nullptr,
+    0,
+    payload.data(),
+    payload.size(),
+    static_cast<std::uintptr_t>(audio.native_handle()),
+    peer_address,
+    peer.port(),
+    source,
+  };
+
+  // An unspecified IP_PKTINFO source causes WSASendMsg() to fail with WSAEINVAL.
+  EXPECT_TRUE(platf::send(send_info));
+}
+#endif

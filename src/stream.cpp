@@ -144,7 +144,7 @@ namespace stream {
       return standby_timeout > 0 && idle_seconds >= standby_timeout ? timeout_notification_e::standby : timeout_notification_e::none;
     }
 
-    boost::asio::ip::address select_video_source_address(
+    boost::asio::ip::address select_media_source_address(
       const boost::asio::ip::address &peer_address,
       const std::optional<boost::asio::ip::address> &routed_source_address
     ) {
@@ -166,12 +166,16 @@ namespace stream {
     return endpoint.address().to_string() + ':' + std::to_string(endpoint.port());
   }
 
-  boost::asio::ip::address resolve_video_source_address(
+  boost::asio::ip::address resolve_media_source_address(
     const udp::endpoint &peer,
-    const boost::asio::ip::address &bound_address
+    const boost::asio::ip::address &bound_address,
+    std::string_view stream_type
   ) {
     if (peer.address().is_loopback()) {
-      return detail::select_video_source_address(peer.address(), peer.address());
+      auto source_address = detail::select_media_source_address(peer.address(), peer.address());
+      BOOST_LOG(info) << "[stream]["sv << stream_type << "-route] peer="sv << udp_endpoint_to_string(peer)
+                      << " source="sv << source_address.to_string();
+      return source_address;
     }
 
     asio::io_context route_ioc;
@@ -194,13 +198,13 @@ namespace stream {
       }
     }
 
-    auto source_address = detail::select_video_source_address(peer.address(), routed_source_address);
+    auto source_address = detail::select_media_source_address(peer.address(), routed_source_address);
     if (source_address.is_unspecified()) {
-      BOOST_LOG(warning) << "[stream][video-route] failed peer="sv << udp_endpoint_to_string(peer)
+      BOOST_LOG(warning) << "[stream]["sv << stream_type << "-route] failed peer="sv << udp_endpoint_to_string(peer)
                          << " error="sv << (ec ? ec.message() : "invalid routed source")
                          << " fallback="sv << source_address.to_string();
     } else {
-      BOOST_LOG(info) << "[stream][video-route] peer="sv << udp_endpoint_to_string(peer)
+      BOOST_LOG(info) << "[stream]["sv << stream_type << "-route] peer="sv << udp_endpoint_to_string(peer)
                       << " source="sv << source_address.to_string();
     }
 
@@ -2658,7 +2662,7 @@ namespace stream {
                                       boost::asio::ip::address {boost::asio::ip::address_v4::any()} :
                                       boost::asio::ip::address {boost::asio::ip::address_v6::any()}) :
                                    video_local_endpoint.address();
-      session->video.source_address = resolve_video_source_address(session->video.peer, video_bound_address);
+      session->video.source_address = resolve_media_source_address(session->video.peer, video_bound_address, "video"sv);
       retain_media_route(session, ref, socket_e::video, session->video_route, session->video.peer, session->video.source_address, session->video.ping_payload, gateway_mode);
 
       // Enable local prioritization and QoS tagging on video traffic if requested by the client
@@ -2697,10 +2701,20 @@ namespace stream {
                         << gateway_port;
       }
 
+      // Audio PING may arrive before the control connection supplies its local address.
+      boost::system::error_code local_endpoint_ec;
+      auto audio_local_endpoint = ref->audio_sock.local_endpoint(local_endpoint_ec);
+      auto audio_bound_address = local_endpoint_ec ?
+                                   (session->audio.peer.address().is_v4() ?
+                                      boost::asio::ip::address {boost::asio::ip::address_v4::any()} :
+                                      boost::asio::ip::address {boost::asio::ip::address_v6::any()}) :
+                                   audio_local_endpoint.address();
+      auto audio_source_address = resolve_media_source_address(session->audio.peer, audio_bound_address, "audio"sv);
+      retain_media_route(session, ref, socket_e::audio, session->audio_route, session->audio.peer, audio_source_address, session->audio.ping_payload, gateway_mode);
+
       // Enable local prioritization and QoS tagging on audio traffic if requested by the client
       auto address = session->audio.peer.address();
       session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
-      retain_media_route(session, ref, socket_e::audio, session->audio_route, session->audio.peer, session->localAddress, session->audio.ping_payload, gateway_mode);
 
       BOOST_LOG(debug) << "Start capturing Audio"sv;
       audio::capture(session->mail, session->config.audio, session);
