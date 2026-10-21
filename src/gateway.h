@@ -89,7 +89,4 @@ namespace gateway {
    */
   void clear_udp_clients();
 
-  /** Drop queued media during control recovery; control traffic remains active. */
-  void set_media_paused(bool paused);
-
 }  // namespace gateway

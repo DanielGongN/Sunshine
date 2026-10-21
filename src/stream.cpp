@@ -656,14 +656,11 @@ namespace stream {
     std::shared_ptr<detail::control_recovery_t> recovery = std::make_shared<detail::control_recovery_t>();
     std::shared_ptr<detail::media_route_t> video_route = std::make_shared<detail::media_route_t>();
     std::shared_ptr<detail::media_route_t> audio_route = std::make_shared<detail::media_route_t>();
-    // Written only by the video broadcast worker. A new recovery generation
-    // requires a new IDR even if the previous IDR was interrupted in flight.
-    std::uint64_t video_recovery_generation {};
   };
 
-  bool can_send_av_packet(session_t *session, const udp::endpoint &peer, std::optional<std::uint64_t> generation = std::nullopt) {
+  bool can_send_av_packet(session_t *session, const udp::endpoint &peer) {
     return session->state.load(std::memory_order_acquire) == session::state_e::RUNNING && peer.port() != 0 &&
-           (generation ? session->recovery->available(*generation) : session->recovery->available());
+           session->recovery->media_available();
   }
 
   bool complete_control_payload(std::uint16_t type, std::string_view payload) {
@@ -677,10 +674,7 @@ namespace stream {
       session::stop(*session, middleware::disconnect_notification_type_e::control_timeout, "Valid control data arrived after the recovery deadline");
     } else if (transition == detail::recovery_transition_e::recovered) {
       session->video.idr_events->raise(true);
-      if (session->localAddress.is_loopback()) {
-        gateway::set_media_paused(false);
-      }
-      BOOST_LOG(info) << "[stream][recovery] session="sv << session->launch_session_id << " state=recovered action=request_idr"sv;
+      BOOST_LOG(info) << "[stream][recovery] session="sv << session->launch_session_id << " state=recovered action=request_idr media=continuing"sv;
     }
   }
 
@@ -1578,11 +1572,9 @@ namespace stream {
             const auto transition = session->recovery->poll(now, config::stream.ping_timeout);
             if (transition == detail::recovery_transition_e::waiting) {
               input::reset(session->input);
-              if (session->localAddress.is_loopback()) {
-                gateway::set_media_paused(true);
-              }
               BOOST_LOG(info) << "[stream][recovery] session="sv << session->launch_session_id
-                              << " state=waiting idle_ms="sv << session->recovery->idle_ms(now);
+                              << " state=waiting idle_ms="sv << session->recovery->idle_ms(now)
+                              << " action=release_input media=continuing"sv;
             }
           }
 
@@ -1974,17 +1966,10 @@ namespace stream {
 
       auto session = (session_t *) packet->channel_data;
       auto destination = session->video_route->snapshot();
-      const auto recovery_generation = session->recovery->generation();
-      if (!can_send_av_packet(session, destination.peer, recovery_generation)) {
+      if (!can_send_av_packet(session, destination.peer)) {
         BOOST_LOG(debug) << "[stream][video-drop] reason=no_active_client state="sv << static_cast<int>(session->state.load(std::memory_order_acquire))
                          << " peer="sv << udp_endpoint_to_string(destination.peer);
         continue;
-      }
-      if (session->video_recovery_generation != recovery_generation) {
-        if (!packet->is_idr()) {
-          continue;
-        }
-        session->video_recovery_generation = recovery_generation;
       }
 
       frame_network_latency_logger.first_point_now();
@@ -2203,7 +2188,7 @@ namespace stream {
             }
 
             if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
-              if (!can_send_av_packet(session, destination.peer, recovery_generation)) {
+              if (!can_send_av_packet(session, destination.peer)) {
                 break;
               }
               // Do pacing within the frame.
@@ -2227,7 +2212,7 @@ namespace stream {
               batch_info.block_count = current_batch_size;
 
               frame_send_batch_latency_logger.first_point_now();
-              if (!can_send_av_packet(session, destination.peer, recovery_generation)) {
+              if (!can_send_av_packet(session, destination.peer)) {
                 break;
               }
               // Use a batched send if it's supported on this platform
@@ -2761,7 +2746,7 @@ namespace stream {
         session->mic.packets,
         session->mic.cipher ? &*session->mic.cipher : nullptr,
         [recovery = session->recovery]() {
-          return !recovery->available();
+          return !recovery->control_available();
         }
       );
     } catch (const std::exception &e) {
@@ -2889,7 +2874,6 @@ namespace stream {
       // workers, so the old session's final callbacks cannot clear new routes.
       std::lock_guard lifecycle_lock {lifecycle_mutex};
       if (++running_sessions == 1) {
-        gateway::set_media_paused(false);
         middleware::notify_client_state(true);
         platf::streaming_will_start();
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1

@@ -241,21 +241,7 @@ namespace gateway {
 
       BOOST_LOG(info) << "[gateway][udp-clear] clients="sv << client_count;
       asio::post(udp_ioc, [this]() {
-        media_paused = false;
         schedule_udp_client_sends();
-      });
-    }
-
-    void set_media_paused(bool paused) {
-      asio::post(udp_ioc, [this, paused]() {
-        media_paused = paused;
-        udp_audio_out_queue.clear();
-        udp_video_out_queue.clear();
-        udp_audio_out_bytes = 0;
-        udp_video_out_bytes = 0;
-        if (!paused) {
-          schedule_udp_client_sends();
-        }
       });
     }
 
@@ -307,7 +293,6 @@ namespace gateway {
 
     std::map<std::uint8_t, udp::endpoint> udp_clients;
     detail::udp_route_versions_t udp_route_versions;
-    bool media_paused {};
     std::mutex udp_mutex;
 
     std::map<std::uint8_t, std::shared_ptr<udp::socket>> udp_internal_sockets;
@@ -846,10 +831,6 @@ namespace gateway {
       return;
     }
 
-    if (media_paused) {
-      return;
-    }
-
     auto data = std::make_shared<std::vector<std::uint8_t>>();
     data->reserve(UDP_GATEWAY_HEADER_SIZE + payload_len);
     data->push_back(stream_id);
@@ -920,7 +901,7 @@ namespace gateway {
   }
 
   void gateway_t::send_next_audio_packet() {
-    if (udp_audio_out_send_active || stopping.load() || media_paused) {
+    if (udp_audio_out_send_active || stopping.load()) {
       return;
     }
 
@@ -947,7 +928,7 @@ namespace gateway {
   }
 
   void gateway_t::send_next_video_packet() {
-    if (udp_video_out_send_active || stopping.load() || media_paused) {
+    if (udp_video_out_send_active || stopping.load()) {
       return;
     }
 
@@ -1248,13 +1229,6 @@ namespace gateway {
 
     if (impl) {
       impl->clear_udp_clients();
-    }
-  }
-
-  void set_media_paused(bool paused) {
-    std::lock_guard lock {g_client_mutex};
-    if (g_gateway_impl) {
-      g_gateway_impl->set_media_paused(paused);
     }
   }
 
