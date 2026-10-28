@@ -32,27 +32,31 @@ namespace {
       log_offset = log.tellg();
       original_port = config::sunshine.port;
       original_client_mic = config::audio.client_mic;
-      for (int attempt = 0; attempt < 20; ++attempt) {
-        listener = tcp::acceptor(io, {asio::ip::address_v4::loopback(), 0});
-        auto internal_port = listener.local_endpoint().port();
-        if (internal_port < 1124 || internal_port > 65000) {
+      std::string last_port_error;
+      for (int attempt = 0; attempt < 100; ++attempt) {
+        // Let the OS select the public port rather than deriving one that may
+        // still be occupied by a previous test connection in TIME_WAIT.
+        tcp::acceptor tcp_probe(io, {tcp::v4(), 0});
+        base_port = tcp_probe.local_endpoint().port();
+        if (base_port < 1024 || base_port > 65000) {
           continue;
         }
-        base_port = internal_port - gateway::INTERNAL_HTTPS_OFFSET;
         try {
-          tcp::acceptor tcp_probe(io, {asio::ip::address_v4::loopback(), base_port});
+          listener = tcp::acceptor(io, {asio::ip::address_v4::loopback(), static_cast<unsigned short>(base_port + gateway::INTERNAL_HTTPS_OFFSET)});
           udp::socket udp_probe(io, {udp::v4(), base_port});
           udp::socket video_probe(io, {asio::ip::address_v4::loopback(), static_cast<unsigned short>(base_port + 214)});
           udp::socket audio_probe(io, {asio::ip::address_v4::loopback(), static_cast<unsigned short>(base_port + 216)});
-        } catch (const boost::system::system_error &) {
+        } catch (const boost::system::system_error &error) {
+          last_port_error = error.what();
           continue;
         }
+        tcp_probe.close();
         config::sunshine.port = base_port;
         config::audio.client_mic = false;
         instance = gateway::start();
         return;
       }
-      FAIL() << "Could not reserve gateway test ports";
+      FAIL() << "Could not reserve gateway test ports: " << last_port_error;
     }
 
     void TearDown() override {
@@ -81,7 +85,7 @@ namespace {
     }
 
     void run() {
-      deadline.expires_after(std::chrono::seconds(10));
+      deadline.expires_after(std::chrono::seconds(15));
       deadline.async_wait([this](auto ec) {
         if (!ec) {
           ADD_FAILURE() << "Gateway exchange timed out";
@@ -130,13 +134,9 @@ namespace {
         if (!check(ec)) {
           return;
         }
-        close_timer.expires_after(std::chrono::milliseconds(100));
-        close_timer.async_wait([this](auto ec) {
-          if (!ec) {
-            boost::system::error_code ignored;
-            internal.close(ignored);
-          }
-        });
+        ++internal_connections;
+        ADD_FAILURE() << "Connected to internal HTTPS before receiving a complete valid first frame";
+        finish();
       });
       connect_and_send(wire);
       client.async_read_some(asio::buffer(header), [this](auto ec, auto n) {
@@ -145,6 +145,7 @@ namespace {
         finish();
       });
       run();
+      EXPECT_EQ(internal_connections, 0);
     }
 
     bool contains_log(std::string_view expected) {
@@ -169,6 +170,7 @@ namespace {
     std::uint16_t original_port {};
     std::uint16_t base_port {};
     bool original_client_mic {};
+    std::size_t internal_connections {};
     std::streampos log_offset {};
     std::array<std::uint8_t, 3> header {};
     std::vector<std::uint8_t> frame;
@@ -207,18 +209,70 @@ TEST_F(GatewayHttpsForwardingTests, PreservesMultipleRequestFramesAndLargeRespon
   EXPECT_TRUE(contains_log("first_declared=128 first_received=128 c2i_bytes=257 i2c_bytes=1048576"));
 }
 
-TEST_F(GatewayHttpsForwardingTests, LogsActualPartialFirstPayloadWhenInternalCloses) {
+TEST_F(GatewayHttpsForwardingTests, DefersInternalConnectionUntilCompleteFirstFrame) {
+  const std::array<std::uint8_t, 4> request {0x16, 0x03, 0x03, 0x42};
+  std::array<std::uint8_t, 4> forwarded {};
+  asio::steady_timer handshake_deadline(io);
+  response = {0x12, 0x34};
+  listener.async_accept(internal, [this, &forwarded, &handshake_deadline](auto ec) {
+    if (!check(ec)) {
+      return;
+    }
+    ++internal_connections;
+    handshake_deadline.expires_after(std::chrono::milliseconds(500));
+    handshake_deadline.async_wait([this](auto ec) {
+      if (!ec) {
+        ADD_FAILURE() << "First frame reception consumed the internal handshake budget";
+        finish();
+      }
+    });
+    asio::async_read(internal, asio::buffer(forwarded), [this, &handshake_deadline](auto ec, auto) {
+      if (check(ec)) {
+        handshake_deadline.cancel();
+        asio::async_write(internal, asio::buffer(response), [this](auto ec, auto) {
+          check(ec);
+        });
+      }
+    });
+  });
+  connect_and_send({gateway::STREAM_HTTPS, 0, 4, request[0]});
+  close_timer.expires_after(std::chrono::milliseconds(750));
+  close_timer.async_wait([this, &request](auto ec) {
+    if (!ec) {
+      EXPECT_EQ(internal_connections, 0);
+      asio::async_write(client, asio::buffer(request.data() + 1, request.size() - 1), [this](auto ec, auto) {
+        check(ec);
+      });
+    }
+  });
+  read_response();
+  run();
+  EXPECT_EQ(internal_connections, 1);
+  EXPECT_EQ(forwarded, request);
+  EXPECT_EQ(received, response);
+}
+
+TEST_F(GatewayHttpsForwardingTests, TimesOutPartialFirstPayloadWithoutInternalConnection) {
   std::vector<std::uint8_t> wire(3 + 128, 0xAB);
   wire[0] = gateway::STREAM_HTTPS;
   wire[1] = 0x10;
   wire[2] = 0;
   run_partial_frame(wire);
+  EXPECT_TRUE(contains_log("event=first_frame_timeout"));
+  EXPECT_TRUE(contains_log("reason=first_frame_timeout"));
   EXPECT_TRUE(contains_log("first_declared=4096 first_received=128 c2i_bytes=0 i2c_bytes=0"));
 }
 
-TEST_F(GatewayHttpsForwardingTests, LogsUnknownLengthWhenFirstHeaderIsIncomplete) {
+TEST_F(GatewayHttpsForwardingTests, TimesOutIncompleteFirstHeaderWithoutInternalConnection) {
   run_partial_frame({gateway::STREAM_HTTPS, 0x10});
+  EXPECT_TRUE(contains_log("event=first_frame_timeout"));
   EXPECT_TRUE(contains_log("first_header_bytes=1 first_declared=unknown first_received=0 c2i_bytes=0 i2c_bytes=0"));
+}
+
+TEST_F(GatewayHttpsForwardingTests, RejectsEmptyFirstFrameWithoutInternalConnection) {
+  run_partial_frame({gateway::STREAM_HTTPS, 0, 0});
+  EXPECT_TRUE(contains_log("reason=empty_payload"));
+  EXPECT_FALSE(contains_log("event=first_frame_timeout"));
 }
 
 TEST(GatewayLengthParsingTests, ParsesSignedCharBytesAsUnsigned) {
