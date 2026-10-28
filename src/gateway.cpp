@@ -86,6 +86,56 @@ namespace gateway {
     }
   }
 
+  struct https_framed_tunnel_t {
+    https_framed_tunnel_t(socket_ptr client_, socket_ptr internal_):
+        client {std::move(client_)},
+        internal {std::move(internal_)} {
+      static std::atomic<std::uint64_t> next_id {};
+      id = ++next_id;
+    }
+
+    ~https_framed_tunnel_t() {
+      // Retain the state through cancellation callbacks so normal connection
+      // closure includes partial reads and writes in this final summary.
+      const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_at).count();
+      BOOST_LOG(info) << "[gateway][https] id="sv << id << " event=closed reason="sv << close_reason
+                      << " first_header_bytes="sv << first_header_bytes
+                      << " first_declared="sv << (first_frame_length_known ? std::to_string(first_frame_declared) : "unknown")
+                      << " first_received="sv << first_frame_received
+                      << " c2i_bytes="sv << client_to_internal_bytes
+                      << " i2c_bytes="sv << internal_to_client_bytes
+                      << " elapsed_ms="sv << elapsed
+                      << " error_code="sv << close_error.value() << " error="sv << close_error.message();
+    }
+
+    void close(std::string_view reason, boost::system::error_code ec = {}) {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      close_reason = reason;
+      close_error = ec;
+      close_socket_pair(client, internal);
+    }
+
+    socket_ptr client;
+    socket_ptr internal;
+    std::uint64_t id {};
+    std::chrono::steady_clock::time_point started_at {std::chrono::steady_clock::now()};
+    std::size_t first_header_bytes {};
+    bool first_frame_length_known {};
+    std::uint16_t first_frame_declared {};
+    std::size_t first_frame_received {};
+    // Count TLS payload only, excluding the gateway frame headers.
+    std::uint64_t client_to_internal_bytes {};
+    std::uint64_t internal_to_client_bytes {};
+    bool closed {};
+    std::string_view close_reason {"gateway_shutdown"sv};
+    boost::system::error_code close_error;
+  };
+
+  using https_tunnel_ptr = std::shared_ptr<https_framed_tunnel_t>;
+
   class gateway_t;
 
   static std::string g_client_ip;
@@ -262,9 +312,9 @@ namespace gateway {
     void forward_to_internal(socket_ptr client, std::uint8_t stream_id, std::uint16_t target_port, std::vector<std::uint8_t> payload);
 
     void start_https_framed_tunnel(socket_ptr client, std::uint16_t target_port);
-    void do_https_c2i_read(socket_ptr client, socket_ptr internal, bool skip_stream_id = false);
-    void read_length_and_payload(socket_ptr client, socket_ptr internal);
-    void do_https_i2c_read(socket_ptr client, socket_ptr internal);
+    void do_https_c2i_read(https_tunnel_ptr tunnel, bool skip_stream_id = false);
+    void read_length_and_payload(https_tunnel_ptr tunnel);
+    void do_https_i2c_read(https_tunnel_ptr tunnel);
 
     void start_udp_forwarder(std::uint16_t target_port, std::uint8_t stream_id);
     void enqueue_control_client_send(const udp::endpoint &client_ep, std::uint64_t client_generation, const char *payload, std::size_t payload_len);
@@ -506,89 +556,132 @@ namespace gateway {
   }
 
   void gateway_t::start_https_framed_tunnel(socket_ptr client, std::uint16_t target_port) {
-    auto internal = std::make_shared<tcp::socket>(tcp_ioc);
-    internal->async_connect(
+    auto tunnel = std::make_shared<https_framed_tunnel_t>(client, std::make_shared<tcp::socket>(tcp_ioc));
+    boost::system::error_code endpoint_error;
+    const auto peer = client->remote_endpoint(endpoint_error);
+    BOOST_LOG(info) << "[gateway][https] id="sv << tunnel->id << " event=connect client="sv
+                    << (endpoint_error ? "unknown" : peer.address().to_string() + ':' + std::to_string(peer.port()))
+                    << " internal=127.0.0.1:"sv << target_port;
+    tunnel->internal->async_connect(
       tcp::endpoint {asio::ip::make_address("127.0.0.1"), target_port},
-      [this, client, internal](boost::system::error_code ec) {
+      [this, tunnel](boost::system::error_code ec) {
         if (ec) {
-          BOOST_LOG(warning) << "[gateway] HTTPS framed tunnel failed to connect nvhttp: "sv << ec.message();
+          BOOST_LOG(warning) << "[gateway][https] id="sv << tunnel->id << " failed to connect nvhttp: "sv << ec.message();
+          tunnel->close("internal_connect"sv, ec);
           return;
         }
-        do_https_c2i_read(client, internal, true);
-        do_https_i2c_read(client, internal);
+        BOOST_LOG(info) << "[gateway][https] id="sv << tunnel->id << " event=connected internal_local="sv
+                        << tunnel->internal->local_endpoint();
+        do_https_c2i_read(tunnel, true);
+        do_https_i2c_read(tunnel);
       }
     );
   }
 
-  void gateway_t::do_https_c2i_read(socket_ptr client, socket_ptr internal, bool skip_stream_id) {
+  void gateway_t::do_https_c2i_read(https_tunnel_ptr tunnel, bool skip_stream_id) {
     if (skip_stream_id) {
-      read_length_and_payload(client, internal);
+      read_length_and_payload(tunnel);
       return;
     }
 
     auto sid_buf = std::make_shared<std::uint8_t>();
-    asio::async_read(*client, asio::buffer(sid_buf.get(), 1), [this, client, internal, sid_buf](boost::system::error_code ec, std::size_t) {
+    asio::async_read(*tunnel->client, asio::buffer(sid_buf.get(), 1), [this, tunnel, sid_buf](boost::system::error_code ec, std::size_t) {
       if (ec) {
-        close_socket_pair(client, internal);
+        tunnel->close("client_stream_id_read"sv, ec);
         return;
       }
 
       if (*sid_buf != STREAM_HTTPS) {
-        BOOST_LOG(warning) << "[gateway] HTTPS framed tunnel got unexpected stream id 0x"sv
+        BOOST_LOG(warning) << "[gateway][https] id="sv << tunnel->id << " unexpected stream id 0x"sv
                            << util::hex(*sid_buf).to_string_view();
-        close_socket_pair(client, internal);
+        tunnel->close("invalid_stream_id"sv);
         return;
       }
 
-      read_length_and_payload(client, internal);
+      read_length_and_payload(tunnel);
     });
   }
 
-  void gateway_t::read_length_and_payload(socket_ptr client, socket_ptr internal) {
+  void gateway_t::read_length_and_payload(https_tunnel_ptr tunnel) {
     auto len_buf = std::make_shared<std::array<std::uint8_t, 2>>();
-    asio::async_read(*client, asio::buffer(*len_buf), [this, client, internal, len_buf](boost::system::error_code ec, std::size_t) {
-      if (ec) {
-        close_socket_pair(client, internal);
-        return;
-      }
-
-      std::uint16_t payload_len = read_u16_be(len_buf->at(0), len_buf->at(1));
-      if (payload_len == 0) {
-        BOOST_LOG(warning) << "[gateway] HTTPS framed tunnel got empty payload"sv;
-        close_socket_pair(client, internal);
-        return;
-      }
-
-      auto payload = std::make_shared<std::vector<std::uint8_t>>(payload_len);
-      asio::async_read(*client, asio::buffer(*payload), [this, client, internal, payload, payload_len](boost::system::error_code ec, std::size_t) {
+    const bool first_frame = !tunnel->first_frame_length_known;
+    asio::async_read(
+      *tunnel->client,
+      asio::buffer(*len_buf),
+      [tunnel, first_frame](const boost::system::error_code &ec, std::size_t received) {
+        if (first_frame) {
+          tunnel->first_header_bytes = received;
+        }
+        return asio::transfer_all()(ec, received);
+      },
+      [this, tunnel, len_buf, first_frame](boost::system::error_code ec, std::size_t n) {
+        if (first_frame) {
+          tunnel->first_header_bytes = n;
+        }
         if (ec) {
-          BOOST_LOG(info) << "[gateway] HTTPS framed tunnel payload read failed: "sv << ec.message()
-                          << " (expected "sv << payload_len << " bytes)"sv;
-          close_socket_pair(client, internal);
+          tunnel->close("client_length_read"sv, ec);
           return;
         }
 
-        asio::async_write(*internal, asio::buffer(*payload), [this, client, internal, payload](boost::system::error_code ec, std::size_t) {
-          if (ec) {
-            close_socket_pair(client, internal);
-            return;
+        std::uint16_t payload_len = read_u16_be(len_buf->at(0), len_buf->at(1));
+        if (first_frame) {
+          tunnel->first_frame_length_known = true;
+          tunnel->first_frame_declared = payload_len;
+          BOOST_LOG(info) << "[gateway][https] id="sv << tunnel->id << " event=first-frame-declared length="sv << payload_len;
+        }
+        if (payload_len == 0) {
+          BOOST_LOG(warning) << "[gateway][https] id="sv << tunnel->id << " empty payload"sv;
+          tunnel->close("empty_payload"sv);
+          return;
+        }
+
+        auto payload = std::make_shared<std::vector<std::uint8_t>>(payload_len);
+        asio::async_read(
+          *tunnel->client,
+          asio::buffer(*payload),
+          [tunnel, first_frame](const boost::system::error_code &ec, std::size_t received) {
+            if (first_frame) {
+              tunnel->first_frame_received = received;
+            }
+            return asio::transfer_all()(ec, received);
+          },
+          [this, tunnel, payload, first_frame](boost::system::error_code ec, std::size_t received) {
+            if (first_frame) {
+              tunnel->first_frame_received = received;
+            }
+            if (ec) {
+              tunnel->close("client_payload_read"sv, ec);
+              return;
+            }
+            if (first_frame) {
+              BOOST_LOG(info) << "[gateway][https] id="sv << tunnel->id << " event=first-frame-received length="sv << received;
+            }
+
+            asio::async_write(*tunnel->internal, asio::buffer(*payload), [this, tunnel, payload, first_frame](boost::system::error_code ec, std::size_t written) {
+              tunnel->client_to_internal_bytes += written;
+              if (first_frame) {
+                BOOST_LOG(info) << "[gateway][https] id="sv << tunnel->id << " event=first-forward direction=client->internal bytes="sv << written;
+              }
+              BOOST_LOG(debug) << "[gateway][https] id="sv << tunnel->id << " direction=client->internal bytes="sv << written
+                               << " total="sv << tunnel->client_to_internal_bytes;
+              if (ec) {
+                tunnel->close("internal_write"sv, ec);
+                return;
+              }
+              do_https_c2i_read(tunnel);
+            });
           }
-          do_https_c2i_read(client, internal);
-        });
-      });
-    });
+        );
+      }
+    );
   }
 
-  void gateway_t::do_https_i2c_read(socket_ptr client, socket_ptr internal) {
-    auto buf = std::make_shared<std::array<char, 65536>>();
-    internal->async_read_some(asio::buffer(*buf), [this, client, internal, buf](boost::system::error_code ec, std::size_t n) {
-      if (ec == asio::error::eof || n == 0) {
-        close_socket_pair(client, internal);
-        return;
-      }
-      if (ec) {
-        BOOST_LOG(info) << "[gateway] HTTPS framed tunnel internal read failed: "sv << ec.message();
-        close_socket_pair(client, internal);
+  void gateway_t::do_https_i2c_read(https_tunnel_ptr tunnel) {
+    // The frame length is a 16-bit value; a 65536-byte read would encode as zero.
+    auto buf = std::make_shared<std::array<char, 0xFFFF>>();
+    tunnel->internal->async_read_some(asio::buffer(*buf), [this, tunnel, buf](boost::system::error_code ec, std::size_t n) {
+      if (ec || n == 0) {
+        tunnel->close("internal_read"sv, ec);
         return;
       }
 
@@ -599,12 +692,20 @@ namespace gateway {
       wrapped->push_back(static_cast<std::uint8_t>(n & 0xFF));
       wrapped->insert(wrapped->end(), buf->data(), buf->data() + n);
 
-      asio::async_write(*client, asio::buffer(*wrapped), [this, client, internal, wrapped](boost::system::error_code ec, std::size_t) {
+      asio::async_write(*tunnel->client, asio::buffer(*wrapped), [this, tunnel, wrapped](boost::system::error_code ec, std::size_t written) {
+        const auto payload_written = written - std::min(written, UDP_GATEWAY_HEADER_SIZE);
+        const bool first_return = tunnel->internal_to_client_bytes == 0 && payload_written != 0;
+        tunnel->internal_to_client_bytes += payload_written;
+        if (first_return) {
+          BOOST_LOG(info) << "[gateway][https] id="sv << tunnel->id << " event=first-forward direction=internal->client bytes="sv << payload_written;
+        }
+        BOOST_LOG(debug) << "[gateway][https] id="sv << tunnel->id << " direction=internal->client bytes="sv << payload_written
+                         << " total="sv << tunnel->internal_to_client_bytes;
         if (ec) {
-          close_socket_pair(client, internal);
+          tunnel->close("client_write"sv, ec);
           return;
         }
-        do_https_i2c_read(client, internal);
+        do_https_i2c_read(tunnel);
       });
     });
   }
