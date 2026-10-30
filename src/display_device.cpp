@@ -723,7 +723,31 @@ namespace display_device {
 
       // In case we have failed to revert configuration before shutting down, we should
       // do it now.
-      revert_configuration_unlocked(revert_option_e::try_indefinitely);
+      SingleDisplayConfiguration startup_config;
+      startup_config.m_device_id = video_config.output_name;
+      startup_config.m_device_prep = SingleDisplayConfiguration::DevicePreparation::EnsureActive;
+      startup_config.m_resolution = Resolution {1920, 1080};
+      startup_config.m_refresh_rate = Rational {60, 1};
+      DD_DATA.sm_instance->schedule([startup_config, recovered = false](auto &settings_iface, auto &stop_token) mutable {
+        if (!recovered) {
+          if (settings_iface.revertSettings() != SettingsManagerInterface::RevertResult::Ok) {
+            BOOST_LOG(warning) << "Failed to recover display configuration before applying startup mode; retrying.";
+            return;
+          }
+          recovered = true;
+        }
+
+        const auto result = settings_iface.applySettings(startup_config);
+        if (result == SettingsManagerInterface::ApplyResult::Ok) {
+          BOOST_LOG(info) << "Applied startup display mode: 1920x1080 at 60 Hz.";
+        } else {
+          BOOST_LOG(warning) << "Failed to apply startup display mode: 1920x1080 at 60 Hz.";
+        }
+        if (result != SettingsManagerInterface::ApplyResult::ApiTemporarilyUnavailable) {
+          stop_token.requestStop();
+        }
+      },
+                                    {.m_sleep_durations = {DEFAULT_RETRY_INTERVAL}});
     }
 
     class deinit_t: public platf::deinit_t {
