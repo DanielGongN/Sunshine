@@ -31,9 +31,19 @@ if(NOT WIX_INSTALL_RESULT EQUAL 0)
      WiX packaging may not work correctly, error: ${WIX_INSTALL_OUTPUT}")
 endif()
 
+# Run the managed tool directly. The generated wix.exe apphost can fail to
+# access NuGet lock files even when the dotnet host can access the same files.
+file(GLOB WIX_MANAGED_EXECUTABLES
+        "${WIX_TOOL_PATH}/.store/wix/${WIX_VERSION}/wix/${WIX_VERSION}/tools/*/any/wix.dll")
+list(LENGTH WIX_MANAGED_EXECUTABLES WIX_MANAGED_EXECUTABLE_COUNT)
+if(NOT WIX_MANAGED_EXECUTABLE_COUNT EQUAL 1)
+    message(FATAL_ERROR "Expected one managed WiX entry point, found: ${WIX_MANAGED_EXECUTABLES}")
+endif()
+list(GET WIX_MANAGED_EXECUTABLES 0 WIX_MANAGED_EXECUTABLE)
+
 # Install WiX UI Extension
 execute_process(
-        COMMAND "${WIX_TOOL_PATH}/wix" extension add WixToolset.UI.wixext/${WIX_UI_VERSION}
+        COMMAND "${DOTNET_EXECUTABLE}" "${WIX_MANAGED_EXECUTABLE}" extension add WixToolset.UI.wixext/${WIX_UI_VERSION}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         ERROR_VARIABLE WIX_UI_INSTALL_OUTPUT
         RESULT_VARIABLE WIX_UI_INSTALL_RESULT
@@ -45,7 +55,7 @@ endif()
 
 # Install WiX Util Extension
 execute_process(
-        COMMAND "${WIX_TOOL_PATH}/wix" extension add WixToolset.Util.wixext/${WIX_UI_VERSION}
+        COMMAND "${DOTNET_EXECUTABLE}" "${WIX_MANAGED_EXECUTABLE}" extension add WixToolset.Util.wixext/${WIX_UI_VERSION}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         ERROR_VARIABLE WIX_UTIL_INSTALL_OUTPUT
         RESULT_VARIABLE WIX_UTIL_INSTALL_RESULT
