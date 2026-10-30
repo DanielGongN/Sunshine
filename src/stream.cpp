@@ -588,6 +588,15 @@ namespace stream {
     struct {
       std::string ping_payload;
 
+      // Accessed only by the video broadcast thread. Counters are cumulative per session.
+      struct {
+        std::chrono::steady_clock::time_point last_report {};
+        std::chrono::steady_clock::time_point last_detail {};
+        std::uint64_t frames {}, complete {}, skipped {}, interrupted {}, partial {}, exceptions {};
+        std::uint64_t attempted {}, submitted {}, failed {}, batch_fallbacks {};
+        std::uint64_t state_skips {}, peer_skips {}, media_skips {};
+      } diagnostics;
+
       int lowseq;
       udp::endpoint peer;
       boost::asio::ip::address source_address;
@@ -1966,8 +1975,66 @@ namespace stream {
 
       auto session = (session_t *) packet->channel_data;
       auto destination = session->video_route->snapshot();
+      auto &stats = session->video.diagnostics;
+      ++stats.frames;
+      std::uint64_t frame_submitted = 0;
+      std::uint64_t frame_failed = 0;
+      bool frame_skipped = false;
+      bool frame_interrupted = false;
+      bool frame_exception = false;
+      const char *stop_reason = "none";
+      auto record_stop = [&]() {
+        // Diagnostic snapshot only: the existing protection checks decide whether to send.
+        if (session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
+          stop_reason = "session_not_running";
+        } else if (destination.peer.port() == 0) {
+          stop_reason = "invalid_peer_port";
+        } else if (!session->recovery->media_available()) {
+          stop_reason = "media_unavailable";
+        } else {
+          stop_reason = "state_changed_during_observation";
+        }
+      };
+      auto report_frame = util::fail_guard([&]() {
+        stats.submitted += frame_submitted;
+        stats.failed += frame_failed;
+        stats.skipped += frame_skipped;
+        stats.interrupted += frame_interrupted;
+        stats.partial += frame_submitted > 0 && (frame_interrupted || frame_failed || frame_exception);
+        stats.exceptions += frame_exception;
+        stats.complete += !frame_skipped && !frame_interrupted && !frame_failed && !frame_exception;
+        stats.state_skips += std::string_view(stop_reason) == "session_not_running";
+        stats.peer_skips += std::string_view(stop_reason) == "invalid_peer_port";
+        stats.media_skips += std::string_view(stop_reason) == "media_unavailable";
+        if (std::string_view(stop_reason) == "none") {
+          stop_reason = frame_exception ? "broadcast_exception" : frame_failed ? "send_failed" :
+                                                                                 "none";
+        }
+        auto now = std::chrono::steady_clock::now();
+        if ((frame_skipped || frame_interrupted || frame_failed || frame_exception) && now - stats.last_detail >= 1s) {
+          BOOST_LOG(info) << "[stream][video-send-event] session="sv << session->launch_session_id
+                          << " frame="sv << packet->frame_index() << " reason="sv << stop_reason
+                          << " skipped="sv << frame_skipped << " interrupted="sv << frame_interrupted
+                          << " exception="sv << frame_exception << " submitted="sv << frame_submitted
+                          << " failed="sv << frame_failed << " peer="sv << udp_endpoint_to_string(destination.peer);
+          stats.last_detail = now;
+        }
+        if (now - stats.last_report >= 1s) {
+          BOOST_LOG(info) << "[stream][video-send-stats] session="sv << session->launch_session_id
+                          << " cumulative=true frames="sv << stats.frames << " complete="sv << stats.complete
+                          << " skipped="sv << stats.skipped << " interrupted="sv << stats.interrupted
+                          << " partial="sv << stats.partial << " exceptions="sv << stats.exceptions
+                          << " attempted="sv << stats.attempted << " submitted="sv << stats.submitted
+                          << " failed="sv << stats.failed << " batch_fallbacks="sv << stats.batch_fallbacks
+                          << " state_skips="sv << stats.state_skips << " peer_skips="sv << stats.peer_skips
+                          << " media_skips="sv << stats.media_skips;
+          stats.last_report = now;
+        }
+      });
       if (!can_send_av_packet(session, destination.peer)) {
-        BOOST_LOG(debug) << "[stream][video-drop] reason=no_active_client state="sv << static_cast<int>(session->state.load(std::memory_order_acquire))
+        frame_skipped = true;
+        record_stop();
+        BOOST_LOG(debug) << "[stream][video-drop] reason="sv << stop_reason << " state="sv << static_cast<int>(session->state.load(std::memory_order_acquire))
                          << " peer="sv << udp_endpoint_to_string(destination.peer);
         continue;
       }
@@ -2189,6 +2256,8 @@ namespace stream {
 
             if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
               if (!can_send_av_packet(session, destination.peer)) {
+                frame_interrupted = true;
+                record_stop();
                 break;
               }
               // Do pacing within the frame.
@@ -2213,10 +2282,14 @@ namespace stream {
 
               frame_send_batch_latency_logger.first_point_now();
               if (!can_send_av_packet(session, destination.peer)) {
+                frame_interrupted = true;
+                record_stop();
                 break;
               }
               // Use a batched send if it's supported on this platform
+              stats.attempted += current_batch_size;
               if (!platf::send_batch(batch_info)) {
+                ++stats.batch_fallbacks;
                 // Batched send is not available, so send each packet individually
                 BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
                 for (auto y = 0; y < current_batch_size; y++) {
@@ -2231,8 +2304,14 @@ namespace stream {
                     destination.source,
                   };
 
-                  platf::send(send_info);
+                  if (platf::send(send_info)) {
+                    ++frame_submitted;
+                  } else {
+                    ++frame_failed;
+                  }
                 }
+              } else {
+                frame_submitted += current_batch_size;
               }
               frame_send_batch_latency_logger.second_point_now_and_log();
 
@@ -2249,7 +2328,7 @@ namespace stream {
 
           frame_network_latency_logger.second_point_now_and_log();
 
-          BOOST_LOG(verbose) << "Sent Frame seq ["sv << packet->frame_index() << "] pts ["sv << timestamp
+          BOOST_LOG(verbose) << "Processed FEC block for Frame seq ["sv << packet->frame_index() << "] pts ["sv << timestamp
                              << "] shards ["sv << shards.size() << "/"sv << shards.percentage << "%]"sv
                              << (frame_is_dupe ? " Dupe" : "")
                              << (packet->is_idr() ? " Key" : "")
@@ -2261,6 +2340,7 @@ namespace stream {
 
         session->video.lowseq = lowseq;
       } catch (const std::exception &e) {
+        frame_exception = true;
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);
       }
