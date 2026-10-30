@@ -1,6 +1,10 @@
 On Windows we use msys2 and ucrt64 to compile.
 You need to prefix commands with `E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c`.
 
+For every subsequent change, the final build verification must run `bash build.sh` in MSYS2 UCRT64:
+`E:\WorkComp\msys64\msys2_shell.cmd -defterm -here -no-start -ucrt64 -c "bash build.sh"`.
+Direct CMake builds or individual tests may supplement this final build, but must not replace it.
+
 Prefix build directories with `cmake-build-`.
 
 The test executable is named `test_sunshine` and will be located inside the `tests` directory within
