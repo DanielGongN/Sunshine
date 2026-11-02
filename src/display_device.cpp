@@ -730,9 +730,37 @@ namespace display_device {
       startup_config.m_refresh_rate = Rational {60, 1};
       DD_DATA.sm_instance->schedule([startup_config, recovered = false](auto &settings_iface, auto &stop_token) mutable {
         if (!recovered) {
-          if (settings_iface.revertSettings() != SettingsManagerInterface::RevertResult::Ok) {
-            BOOST_LOG(warning) << "Failed to recover display configuration before applying startup mode; retrying.";
+          using enum SettingsManagerInterface::RevertResult;
+          const auto recovery_result = settings_iface.revertSettings();
+          if (recovery_result == ApiTemporarilyUnavailable) {
+            BOOST_LOG(warning) << "Display API is temporarily unavailable during startup recovery; retrying.";
             return;
+          }
+          if (recovery_result != Ok) {
+            if (recovery_result != TopologyIsInvalid && recovery_result != SwitchingTopologyFailed) {
+              BOOST_LOG(error) << "Failed to recover display configuration; stopping startup mode setup.";
+              stop_token.requestStop();
+              return;
+            }
+
+            // A saved topology may refer to displays that no longer exist. Accept
+            // the current desktop before applying settings, otherwise applySettings
+            // will continue to reject the stale initial device state.
+            const auto devices = settings_iface.enumAvailableDevices();
+            const auto primary = std::find_if(devices.begin(), devices.end(), [](const auto &device) {
+              return device.m_info && device.m_info->m_primary;
+            });
+            if (primary == devices.end()) {
+              BOOST_LOG(warning) << "No current primary display is available for startup mode; retrying.";
+              return;
+            }
+            if (!settings_iface.resetPersistence()) {
+              BOOST_LOG(error) << "Failed to reset stale display state; stopping startup mode setup.";
+              stop_token.requestStop();
+              return;
+            }
+            startup_config.m_device_id = primary->m_device_id;
+            BOOST_LOG(warning) << "Saved display topology could not be restored. Reset stale state and use current primary display: " << primary->m_device_id;
           }
           recovered = true;
         }
