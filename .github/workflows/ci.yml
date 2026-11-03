@@ -14,14 +14,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build-windows-fork:
+    name: Windows
+    if: github.repository != 'LizardByte/Sunshine'
+    permissions:
+      contents: write  # reusable workflow also supports publishing tagged builds
+    uses: ./.github/workflows/build-windows.yml
+
   github-env:
     name: GitHub Env Debug
+    if: github.repository == 'LizardByte/Sunshine'
     permissions:
       contents: read
     uses: LizardByte/.github/.github/workflows/__call-github-env.yml@master
 
   release-setup:
     name: Release Setup
+    if: github.repository == 'LizardByte/Sunshine'
     outputs:
       publish_release: ${{ steps.release-setup.outputs.publish_release }}
       release_body: ${{ steps.release-setup.outputs.release_body }}

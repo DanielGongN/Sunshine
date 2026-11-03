@@ -14,7 +14,13 @@ set(ENET_NO_INSTALL ON CACHE BOOL "Don't install any libraries built for enet")
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/enet")
 
 # web server
-add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/Simple-Web-Server")
+function(sunshine_add_web_server)
+    # Keep compatibility settings in Sunshine so the submodule can use a public upstream commit.
+    set(CMAKE_POLICY_VERSION_MINIMUM 4.0)
+    set(CMAKE_POLICY_DEFAULT_CMP0167 NEW)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/Simple-Web-Server")
+endfunction()
+sunshine_add_web_server()
 
 # libdisplaydevice
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/libdisplaydevice")
