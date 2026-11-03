@@ -23,3 +23,10 @@
 - [ ] 检查工作流语法及可下载依赖，运行规定的本地完整构建。
 - [ ] 仅暂存任务文件，使用中文 fix 提交并推送 origin/master。
 - [ ] 跟进对应提交的 GitHub CI，修复实际日志中出现的问题，直到成功且有非空构建产物。
+
+## Runtime packaging follow-up
+
+- [ ] 将现有 interception.dll 加入版本管理，并在 Windows CPack 规则中将它安装到主程序同目录。
+- [ ] 将已有 engine.conf 安装到 config/engine.conf，不修改配置内容。
+- [ ] 上传前验证 ZIP 内两个文件的路径、非空内容及 SHA-256。
+- [ ] 运行规定的 MSYS2 UCRT64 完整构建和 ZIP 打包；提交推送后检查 GitHub 成功产物的实际内容。

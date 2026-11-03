@@ -1,6 +1,12 @@
 # windows specific packaging
 install(TARGETS sunshine RUNTIME DESTINATION "." COMPONENT application)
 
+# Runtime files for the customized Windows build.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64")
+    install(FILES "${CMAKE_SOURCE_DIR}/interception.dll" DESTINATION "." COMPONENT application)
+endif()
+install(FILES "${CMAKE_SOURCE_DIR}/engine.conf" DESTINATION "config" COMPONENT application)
+
 # Hardening: include zlib1.dll (loaded via LoadLibrary() in openssl's libcrypto.a)
 install(FILES "${ZLIB}" DESTINATION "." COMPONENT application)
 

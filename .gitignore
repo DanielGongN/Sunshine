@@ -15,6 +15,7 @@
 *.so
 *.dylib
 *.dll
+!/interception.dll
 
 # Fortran module files
 *.mod

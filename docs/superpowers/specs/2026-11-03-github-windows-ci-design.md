@@ -10,5 +10,7 @@
 - 网页发布和翻译同步仅在上游仓库执行，避免 fork 缺少上游发布密钥导致无关失败。
 - 独立工作流支持手动运行，v 开头的标签保留既有 GitHub Release 上传行为。
 - 构建目录使用 cmake-build- 前缀，保留用户其他未提交的更改。
+- Windows x64 包将根目录的 interception.dll 安装到主程序同目录，将根目录的 engine.conf 安装到 config/engine.conf。
+- GitHub 上传产物前检查两个运行文件的路径、非空内容和 SHA-256，确保与仓库源文件一致。
 
 验收：MSYS2 UCRT64 的 bash build.sh 成功；提交推送后，GitHub CI 成功并存在非空的 Sunshine-Windows-AMD64 构建产物。

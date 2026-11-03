@@ -120,6 +120,40 @@ jobs:
           ls -lh artifacts/
           test -f artifacts/Sunshine-Windows-AMD64-portable.zip
 
+      - name: Verify packaged runtime files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @{
+            'Sunshine/interception.dll' = 'interception.dll'
+            'Sunshine/config/engine.conf' = 'engine.conf'
+          }
+          $archive = [System.IO.Compression.ZipFile]::OpenRead(
+            (Join-Path $PWD 'artifacts/Sunshine-Windows-AMD64-portable.zip'))
+          try {
+            foreach ($path in $files.Keys) {
+              $entry = $archive.GetEntry($path)
+              if ($null -eq $entry -or $entry.Length -eq 0) {
+                throw "Missing or empty runtime file: $path"
+              }
+              $stream = $entry.Open()
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              try {
+                $actualHash = [Convert]::ToHexString($sha256.ComputeHash($stream))
+              } finally {
+                $stream.Dispose()
+                $sha256.Dispose()
+              }
+              $expectedHash = (Get-FileHash -LiteralPath $files[$path] -Algorithm SHA256).Hash
+              if ($actualHash -ne $expectedHash) {
+                throw "Packaged file differs from source: $path"
+              }
+              Write-Host "Verified $path"
+            }
+          } finally {
+            $archive.Dispose()
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
